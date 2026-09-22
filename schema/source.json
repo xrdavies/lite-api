@@ -1,10 +1,6 @@
 {
   "project": "database-contract",
   "commit": "20a94fbb567b62208751292ed7786b24a7e7c0fe",
-  "excluded_tables": [
-    "public.sub2api_plugin_bindings",
-    "public.sub2api_plugin_installations"
-  ],
   "migrations": {
     "001_init.sql": "9ba0369779484625edcea7a7d1d4582397e31546db9149b05004990a3f16c630",
     "002_account_type_migration.sql": "aad3816e44f58ff007ea4df8092aae580f3f85180314c1deb1b1054b20892bbf",
@@ -294,5 +290,6 @@
     "238_purge_unlimited_user_platform_quotas.sql": "052756d1b1ac951f002034bf0434f8a6ea943ec0a2a34541ca4374ba6278cce7",
     "238b_content_moderation_engine_meta.sql": "420af91eec85bdb60474640612a0f4d069db6ddfb21e6ed702b89713f3599287",
     "239_channel_reasoning_effort_multipliers.sql": "66feb546785dfa385d8efd268a40276cd8ffdb0cead7026cd79e339a3b69edf1"
-  }
+  },
+  "schema_exception": "Two plugin tables and their owned objects are omitted; other business tables retain their structure and meaning."
 }

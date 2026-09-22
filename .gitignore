@@ -1,1 +1,8 @@
 /reserve/
+/.env
+/.env.*
+!/.env.example
+/bin/
+/coverage.out
+*.test
+.DS_Store
