@@ -17,12 +17,10 @@ import (
 )
 
 type batchGroupInput struct {
-	AllowBatch       *bool        `json:"allow_batch_image_generation"`
-	IndependentImage *bool        `json:"image_rate_independent"`
-	ImageRate        *json.Number `json:"image_rate_multiplier"`
-	Image1K          *json.Number `json:"image_price_1k"`
-	BatchDiscount    *json.Number `json:"batch_image_discount_multiplier"`
-	BatchHold        *json.Number `json:"batch_image_hold_multiplier"`
+	imagePrices
+	AllowBatch    *bool        `json:"allow_batch_image_generation"`
+	BatchDiscount *json.Number `json:"batch_image_discount_multiplier"`
+	BatchHold     *json.Number `json:"batch_image_hold_multiplier"`
 }
 
 func (in batchGroupInput) apply(ctx context.Context, tx *sql.Tx, id int64) error {
@@ -36,12 +34,21 @@ func (in batchGroupInput) apply(ctx context.Context, tx *sql.Tx, id int64) error
 		name        string
 		v           *json.Number
 		whole, frac int
-	}{{"image_price_1k", in.Image1K, 12, 8}, {"image_rate_multiplier", in.ImageRate, 6, 4}, {"batch_image_discount_multiplier", in.BatchDiscount, 6, 4}, {"batch_image_hold_multiplier", in.BatchHold, 6, 4}} {
+	}{{"image_price_1k", in.Image1K, 12, 8}, {"image_price_2k", in.Image2K, 12, 8}, {"image_price_4k", in.Image4K, 12, 8}, {"image_rate_multiplier", in.ImageRate, 6, 4}, {"batch_image_discount_multiplier", in.BatchDiscount, 6, 4}, {"batch_image_hold_multiplier", in.BatchHold, 6, 4}} {
 		if f.v != nil {
-			if !validDecimal(*f.v, f.whole, f.frac) {
+			value := f.v.String()
+			imagePrice := strings.HasPrefix(f.name, "image_price_")
+			if imagePrice {
+				value = strings.TrimPrefix(value, "-")
+			}
+			if !validDecimal(json.Number(value), f.whole, f.frac) {
 				return bad("invalid " + f.name)
 			}
-			add(f.name, f.v.String())
+			if imagePrice && rat(*f.v).Sign() < 0 {
+				add(f.name, nil)
+			} else {
+				add(f.name, f.v.String())
+			}
 		}
 	}
 	if in.AllowBatch != nil {

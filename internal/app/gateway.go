@@ -28,6 +28,7 @@ type gatewayKey struct {
 	Blacklist []string    `json:"ip_blacklist"`
 }
 type gatewayGroup struct {
+	imagePrices
 	audioPrices
 	videoPrices
 	reasoningPolicy
@@ -590,7 +591,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	bodyLimit := int64(4 << 20)
-	if protocol == "images" || audioProtocol(protocol) {
+	if protocol == "images" || protocol == "gemini" || audioProtocol(protocol) {
 		bodyLimit = 32 << 20
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
@@ -1082,10 +1083,19 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
+		if wireIn.Protocol == "gemini" && wireIn.ImageSize == "" {
+			wireIn.ImageSize, wireIn.ImageSizeSource = "2K", "default"
+		}
+		wireIn.ImageGeneration = wireIn.ImageGeneration || wireIn.Protocol == "gemini" && geminiImageModel(selected.UpstreamModel)
 		if !in.CountOnly && selected.Search == "" && audioIn == nil {
 			preflight, priceErr := selected.price(billingModel)
-			if priceErr == nil && preflight.BillingMode != "per_request" {
-				_, priceErr = calculatePrice(preflight, wireIn.preflightUsage(), g.Group.Rate, tier, wireIn.Effort, "", started, g.Group.LongContext)
+			rate, label := g.Group.Rate, ""
+			if wireIn.Protocol == "gemini" && wireIn.ImageGeneration {
+				preflight, rate, priceErr = selected.geminiImagePrice(g.Group, billingModel, wireIn.ImageSize)
+				label = wireIn.ImageSize
+			}
+			if priceErr == nil {
+				_, priceErr = calculatePrice(preflight, wireIn.preflightUsage(), rate, tier, wireIn.Effort, label, started, g.Group.LongContext)
 			}
 			if priceErr != nil {
 				selected.Release()
@@ -1258,7 +1268,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Accel-Buffering", "no")
 		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 4096), 2<<20)
+		frameLimit := 2 << 20
+		if wireIn.Protocol == "gemini" {
+			frameLimit = 16 << 20
+		}
+		scanner.Buffer(make([]byte, 4096), frameLimit)
 		frame := []string{}
 		var size int
 		emit := func() error {
@@ -1422,7 +1436,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 			if wireIn.Protocol != "chat_completions" && (observation.complete() || terminal != "") {
 				terminal += wire
-				if len(terminal) > 2<<20 {
+				if len(terminal) > frameLimit {
 					return &apiError{502, "upstream terminal frames exceed limit"}
 				}
 				done = wireIn.Protocol == "anthropic" || wireIn.Protocol == "responses"
@@ -1437,7 +1451,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		for scanner.Scan() {
 			line := scanner.Text()
 			size += len(line)
-			if size > 2<<20 {
+			if size > frameLimit {
 				forwardErr = &apiError{502, "upstream stream frame exceeds limit"}
 				break
 			}
@@ -1480,6 +1494,37 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			end, _, forwardErr = responsesGemini.finish(observation.Usage)
 			terminal += end
 			observation.ResponseID = responsesGemini.Output.ID
+		}
+	}
+	if wireIn.Protocol == "gemini" && !in.CountOnly {
+		count := observation.ImageCount
+		observation.Usage.ImageRequest = wireIn.ImageGeneration || count > 0
+		if count == 0 && (geminiImageModel(model) || geminiImageModel(selected.UpstreamModel)) && forwardErr == nil && observation.complete() && !observation.blocked && !observation.ImageRejected {
+			count = 1
+		}
+		if count > 0 {
+			observation.Usage.ImageCount = count
+			observation.Usage.ImageSize = wireIn.ImageSize
+			observation.Usage.ImageSizeSource = wireIn.ImageSizeSource
+			observation.Usage.ImageInputSize = wireIn.ImageInputSize
+			observation.Usage.Requests = count
+		}
+		if observation.Usage.ImageRequest && (count > 0 || forwardErr == nil && observation.complete()) {
+			if !observation.HasUsage {
+				billingModel := selected.ChannelModel
+				switch selected.BillingSource {
+				case "requested":
+					billingModel = model
+				case "upstream":
+					billingModel = selected.UpstreamModel
+				case "response_model":
+					if observation.Model != "" {
+						billingModel = observation.Model
+					}
+				}
+				p, _, priceErr := selected.geminiImagePrice(g.Group, billingModel, wireIn.ImageSize)
+				observation.HasUsage = priceErr == nil && (p.BillingMode == "image" || p.BillingMode == "per_request")
+			}
 		}
 	}
 	if in.CountOnly {

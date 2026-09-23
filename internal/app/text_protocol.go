@@ -20,6 +20,8 @@ type textRequest struct {
 	Store                                        bool
 	NativeCompaction                             bool
 	Stream, CountOnly                            bool
+	ImageGeneration                              bool
+	ImageSize, ImageSizeSource, ImageInputSize   string
 	Headers                                      http.Header
 	Search                                       *grokSearchRequest
 }
@@ -138,6 +140,7 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 		}
 		var contents []json.RawMessage
 		contentsRaw := body["contents"]
+		configBody := body
 		if raw := body["generateContentRequest"]; raw != nil {
 			var nested map[string]json.RawMessage
 			if !in.CountOnly || contentsRaw != nil || json.Unmarshal(raw, &nested) != nil || nested == nil {
@@ -148,6 +151,7 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 				return in, bad("token count model must match the URL model")
 			}
 			contentsRaw = nested["contents"]
+			configBody = nested
 		}
 		if json.Unmarshal(contentsRaw, &contents) != nil || len(contents) == 0 {
 			return in, bad("contents are required")
@@ -158,14 +162,31 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 			} `json:"thinkingConfig"`
 			Modalities []string `json:"responseModalities"`
 		}
-		if raw := body["generationConfig"]; raw != nil && json.Unmarshal(raw, &config) != nil {
+		if raw := configBody["generationConfig"]; raw != nil && json.Unmarshal(raw, &config) != nil {
 			return in, bad("invalid generationConfig")
 		}
 		for _, modality := range config.Modalities {
-			if strings.ToUpper(modality) != "TEXT" {
+			switch strings.ToUpper(strings.TrimSpace(modality)) {
+			case "TEXT":
+			case "IMAGE":
+				in.ImageGeneration = true
+			default:
 				return in, bad("media generation is not yet available on this endpoint")
 			}
 		}
+		var err error
+		in.ImageSize, in.ImageSizeSource, err = geminiImageSize(configBody)
+		if err != nil {
+			return in, err
+		}
+		var imageConfig struct {
+			Image struct {
+				Size string `json:"imageSize"`
+			} `json:"imageConfig"`
+		}
+		_ = json.Unmarshal(configBody["generationConfig"], &imageConfig)
+		in.ImageInputSize = strings.TrimSpace(imageConfig.Image.Size)
+		in.ImageGeneration = in.ImageGeneration || geminiImageModel(in.Model)
 		in.Effort = strings.ToLower(config.Thinking.Level)
 		if len(in.Effort) > 20 {
 			return in, bad("invalid thinkingLevel")
@@ -413,6 +434,10 @@ func (in textRequest) preflightUsage() priceUsage {
 	if in.Protocol == "anthropic" {
 		u.CacheWrite = 1
 	}
+	if in.ImageGeneration {
+		u.Output = 2
+		u.ImageOutput = 1
+	}
 	return u
 }
 
@@ -459,6 +484,8 @@ type textObservation struct {
 	started, stopped      bool
 	finished              map[int]bool
 	blocked               bool
+	ImageRejected         bool
+	ImageCount            int64
 }
 
 func (o *textObservation) complete() bool {
@@ -582,19 +609,45 @@ func (o *textObservation) observe(data []byte) error {
 		}
 		for _, c := range event.Candidates {
 			o.finished[c.Index] = c.Finish != "" || o.finished[c.Index]
+			if c.Finish != "" && c.Finish != "STOP" && c.Finish != "MAX_TOKENS" {
+				o.ImageRejected = true
+			}
 		}
 		o.blocked = o.blocked || event.Feedback.Block != ""
+		count, err := countGeminiImages(data)
+		if err != nil {
+			return err
+		}
+		// ponytail: preserve cumulative relay payload semantics with the maximum
+		// count in one frame; delta-only multi-image streams may undercount.
+		o.ImageCount = max(o.ImageCount, count)
 		if event.Metadata != nil && string(event.Metadata) != "null" {
 			var u struct {
-				Input    *int64 `json:"promptTokenCount"`
-				Output   int64  `json:"candidatesTokenCount"`
-				Thoughts int64  `json:"thoughtsTokenCount"`
-				Cached   int64  `json:"cachedContentTokenCount"`
+				Input         *int64 `json:"promptTokenCount"`
+				Output        int64  `json:"candidatesTokenCount"`
+				Thoughts      int64  `json:"thoughtsTokenCount"`
+				Cached        int64  `json:"cachedContentTokenCount"`
+				OutputDetails []struct {
+					Modality string `json:"modality"`
+					Tokens   int64  `json:"tokenCount"`
+				} `json:"candidatesTokensDetails"`
 			}
 			if json.Unmarshal(event.Metadata, &u) != nil || u.Input == nil || !tokenCountsValid(*u.Input, u.Output, u.Thoughts, u.Cached) || u.Cached > *u.Input || u.Output+u.Thoughts > 2147483647 {
 				return &apiError{502, "upstream usage is invalid"}
 			}
-			o.Usage = priceUsage{Input: *u.Input - u.Cached, Output: u.Output + u.Thoughts, CacheRead: u.Cached}
+			imageOutput := int64(0)
+			for _, detail := range u.OutputDetails {
+				if detail.Tokens < 0 || detail.Tokens > 2147483647 {
+					return &apiError{502, "upstream image usage is invalid"}
+				}
+				if strings.EqualFold(detail.Modality, "IMAGE") {
+					imageOutput += detail.Tokens
+				}
+			}
+			if imageOutput > u.Output {
+				return &apiError{502, "upstream image usage is invalid"}
+			}
+			o.Usage = priceUsage{Input: *u.Input - u.Cached, Output: u.Output + u.Thoughts, CacheRead: u.Cached, ImageOutput: imageOutput}
 			o.HasUsage = true
 		}
 		return nil

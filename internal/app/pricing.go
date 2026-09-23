@@ -326,6 +326,9 @@ func (p *timePrice) multiplierAt(at time.Time) *big.Rat {
 
 // Context includes cached input. Output does not move a request into a higher tier.
 type priceUsage struct {
+	ImageRequest                                                     bool
+	ImageCount                                                       int64
+	ImageSize, ImageSizeSource, ImageInputSize                       string
 	VideoCount, VideoSeconds                                         int64
 	VideoResolution                                                  string
 	AudioUnits                                                       string
@@ -384,7 +387,7 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 	if !validPrice(&rate, 6, 4) {
 		return empty, bad("invalid billing rate")
 	}
-	for _, n := range []int64{u.Input, u.Output, u.CacheWrite, u.CacheWrite5m, u.CacheWrite1h, u.CacheRead, u.ImageInput, u.ImageOutput, u.Requests, u.VideoCount, u.VideoSeconds} {
+	for _, n := range []int64{u.Input, u.Output, u.CacheWrite, u.CacheWrite5m, u.CacheWrite1h, u.CacheRead, u.ImageInput, u.ImageOutput, u.Requests, u.VideoCount, u.VideoSeconds, u.ImageCount} {
 		if n < 0 || n > 2147483647 {
 			return empty, bad("invalid usage count")
 		}

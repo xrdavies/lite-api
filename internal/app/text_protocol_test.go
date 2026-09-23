@@ -41,6 +41,18 @@ func TestNativeUsage(t *testing.T) {
 	if err := g.observe([]byte(`{"candidates":[{"index":1,"finishReason":"MAX_TOKENS"}]}`)); err != nil || !g.complete() || g.Usage.Input != 6 || g.Usage.Output != 12 || g.Usage.CacheRead != 4 {
 		t.Fatal(g, err)
 	}
+	image := textObservation{Protocol: "gemini"}
+	if err := image.observe([]byte(`{"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":30,"cachedContentTokenCount":5,"candidatesTokenCount":20,"promptTokensDetails":[{"modality":"TEXT","tokenCount":20},{"modality":"IMAGE","tokenCount":5}],"candidatesTokensDetails":[{"modality":"TEXT","tokenCount":8},{"modality":"IMAGE","tokenCount":12}]}}`)); err != nil || image.Usage.Input != 25 || image.Usage.Output != 20 || image.Usage.CacheRead != 5 || image.Usage.ImageOutput != 12 {
+		t.Fatal("Gemini image usage", image, err)
+	}
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-image:generateContent", nil)
+	req.SetPathValue("action", "gemini-image:generateContent")
+	if _, err := parseTextRequest(req, "gemini", map[string]json.RawMessage{
+		"contents":         json.RawMessage(`[{"parts":[{"text":"draw a cat"}]}]`),
+		"generationConfig": json.RawMessage(`{"responseModalities":["TEXT","IMAGE"]}`),
+	}); err != nil {
+		t.Fatal("Gemini IMAGE modality rejected", err)
+	}
 	for protocol, events := range map[string][]string{
 		"anthropic": {`{"type":"message_stop"}`, `{"usage":{"input_tokens":-1,"output_tokens":0}}`, `{"usage":{"input_tokens":1,"output_tokens":0,"cache_creation_input_tokens":2147483648}}`},
 		"gemini":    {`{"usageMetadata":{"promptTokenCount":1,"cachedContentTokenCount":2}}`, `{"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2147483647,"thoughtsTokenCount":1}}`, `{"usageMetadata":{"promptTokenCount":null}}`},

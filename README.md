@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务；托管工具及其余扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 原生同步/流式及批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务；托管工具及其余扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -73,7 +73,7 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 `GET /api/v1/model-plaza` 是分组模型价格目录，由 `model_plaza_enabled`（默认关闭）、`model_plaza_require_auth` 和 `model_plaza_description` 控制。匿名只见公开分组；使用登录令牌可查询已授权专属分组和本人的 `user_rate_multiplier`，受公开分组限制的用户仍需授权。无效令牌明确拒绝，API Key 不能代替登录。目录每个 IP 每分钟最多 60 次，响应禁止缓存；不调用上游或产生消费，也不保证列出的模型当前可调度。
 
-广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。分组媒体专用价格仍待后续实现。
+广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。Gemini 模型另返回按 1K/2K/4K 分档的 `image_pricing`，与原生图片结算共用价格解析；明确的 token 价卡继续以 token 单价展示。
 
 ## 网关、用量与账务
 
@@ -194,6 +194,18 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-integration.py
 
 `reserve/` 是被 Git 忽略的本地规划目录。来源版权及许可证见 `NOTICE`、`LICENSE`、`COPYING`。
 
+
+## Gemini 原生图片
+
+`POST /v1beta/models/{model}:generateContent` 和 `:streamGenerateContent?alt=sse` 支持 Gemini API Key 图片生成及带输入图片的编辑。请求沿用原生 `contents`、`generationConfig.responseModalities` 和 `imageConfig`，模型映射、composite→Gemini、鉴权、并发/RPM、幂等及额度检查沿用网关。输入上限 32 MiB，JSON 响应或单个 SSE 帧上限 16 MiB。原生字段参见 [generateContent](https://ai.google.dev/api/generate-content)。
+
+图片数量优先取实际 `inlineData` / `inline_data` 图片 part；兼容累积式 SSE，以单帧最大图片数计量，纯增量多图流分散在不同帧时可能少计。无内联图片时，对已知图片模型的正常完整响应沿用一张的兼容回落；上游明确拦截或图片失败不触发回落。`candidatesTokensDetails` 中的 IMAGE token 与普通输出分别记录，思考 token 计入普通输出。明确 token 价卡须有真实 token usage，不能用图片数量填造。
+
+计价顺序为：有效的显式 token 价卡优先并使用普通倍率；其他情况依次使用分组模型价卡、分组尺寸价、渠道媒体价、固定图片参考价。`image_price_1k/2k/4k` 单位 USD/张，0 免费、负数清除覆盖、省略/null 保持。按图计价使用 `image_rate_independent` / `image_rate_multiplier`，否则采用有效用户/分组倍率。参考价的 2K/4K 系数为 1.5/2，是兼容基线而非实时原厂报价。
+
+账务尺寸沿用请求 `imageSize` 的 1K/2K/4K，缺省或 AUTO 按 2K；原生 `512` 可转发，但原 schema 无此计费档，沿用缺省 2K 并记录原输入值。该计费口径独立于上游默认输出尺寸，不通过解码像素修改字段含义。原 `image_count`、`image_size`、`image_input_size`、`image_size_source`、图片 token/费用对本人用量查询可见。
+
+计费价格在派发前固定，成功图片即使后续断流仍结算；数据库失败保留账务收据恢复，终止成功帧在结算前不发送。该能力使用本地 HTTP 上游模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实 Gemini 图片凭证联调；Chat/Messages/Responses 转换的图片输出扩展仍需继续验证。
 
 ## 批量图片任务
 
