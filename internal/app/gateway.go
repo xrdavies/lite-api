@@ -824,6 +824,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			wireIn.Protocol = "chat_completions"
 			path = "/v1/chat/completions"
 			responsesBridge = newChatResponsesStream(model, chatRequest.Custom)
+			responsesBridge.Namespaces = chatRequest.Namespaces
 		}
 		if in.Search != nil {
 			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)

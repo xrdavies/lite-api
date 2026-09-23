@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestResponsesChatRequest(t *testing.T) {
@@ -57,6 +58,86 @@ func TestResponsesChatRequest(t *testing.T) {
 	next, err := responsesToChatRequest(map[string]json.RawMessage{"model": json.RawMessage(`"m"`), "instructions": json.RawMessage(`"new rule"`), "input": json.RawMessage(`"next"`)}, first.History)
 	if err != nil || next.Messages[0].Content != "new rule\n\npersistent rule" || next.History[0].Content != "persistent rule" {
 		t.Fatal("continuation instruction semantics", next, err)
+	}
+}
+
+func TestResponsesChatNamespaces(t *testing.T) {
+	parse := func(raw string) map[string]json.RawMessage {
+		t.Helper()
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	body := parse(`{"model":"m","input":[{"role":"user","content":"hello"},{"type":"function_call","namespace":"files","name":"read","call_id":"one","arguments":"{}"}],"tools":[{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]}],"tool_choice":{"type":"function","namespace":"files","name":"read"}}`)
+	r := httptest.NewRequest("POST", "/responses", nil)
+	if _, err := parseTextRequest(r, "responses", body); err != nil {
+		t.Fatal("native namespace admission", err)
+	}
+	converted, err := responsesToChatRequest(body, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _ := json.Marshal(converted.Body)
+	if strings.Contains(string(wire), `"namespace"`) || !strings.Contains(string(wire), `"name":"files__read"`) || converted.History[1].Calls[0].Namespace != "files" || converted.Messages[1].Calls[0].Namespace != "" {
+		t.Fatal("namespace lowering/history", string(wire))
+	}
+	s := newChatResponsesStream("m", converted.Custom)
+	s.Namespaces = converted.Namespaces
+	stream, err := s.observe([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"files__read","arguments":"{}"}}]},"finish_reason":"tool_calls"}],`+chatBridgeUsage+`}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, raw, err := s.finish()
+	if err != nil || !strings.Contains(stream+terminal, `"namespace":"files"`) || !strings.Contains(string(raw), `"name":"read"`) || strings.Contains(string(raw), "files__read") {
+		t.Fatal("namespace restoration", string(raw), err)
+	}
+	continued, err := responsesToChatRequest(parse(`{"model":"m","input":[{"type":"function_call_output","call_id":"call_read","output":"ok"}]}`), []convertedChatMessage{s.assistant()})
+	if err != nil || continued.Messages[0].Calls[0].Function.Name != "files__read" || continued.Namespaces["files__read"].Namespace != "files" {
+		t.Fatal("namespace history without redeclaration", continued, err)
+	}
+	for _, raw := range []string{
+		`{"tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"one"}]},{"type":"function","name":"ns__one"}]}`,
+		`{"tools":[{"type":"function","name":"ns__one"},{"type":"namespace","name":"ns","tools":[{"type":"function","name":"one"}]}]}`,
+		`{"tools":[{"type":"namespace","name":"a__b","tools":[{"type":"function","name":"c"}]},{"type":"namespace","name":"a","tools":[{"type":"function","name":"b__c"}]}]}`,
+		`{"tools":[{"type":"namespace","name":"ns","tools":[{"type":"function","name":"one"},{"type":"function","name":"one","strict":true}]}]}`,
+		`{"input":[{"type":"function_call","name":"ns__one","call_id":"a","arguments":"{}"},{"type":"function_call","namespace":"ns","name":"one","call_id":"b","arguments":"{}"}]}`,
+	} {
+		b := parse(raw)
+		b["model"] = json.RawMessage(`"m"`)
+		if b["input"] == nil {
+			b["input"] = json.RawMessage(`"hello"`)
+		}
+		if _, err := responsesToChatRequest(b, nil); err == nil {
+			t.Fatal("namespace collision accepted", raw)
+		}
+	}
+	for _, raw := range []string{
+		`{"type":"namespace","name":"ns","tools":[{"type":"web_search"}]}`,
+		`{"type":"namespace","name":"ns","tools":[{"type":"namespace","name":"nested","tools":[{"type":"function","name":"f"}]}]}`,
+		`{"type":"namespace","name":"ns","tools":[{"type":"function","name":"f"}],"children":[{"type":"web_search"}]}`,
+	} {
+		b := parse(`{"model":"m","input":"hello","tools":[` + raw + `]}`)
+		if _, err := parseTextRequest(r, "responses", b); err == nil {
+			t.Fatal("invalid namespace admitted", raw)
+		}
+	}
+	duplicate := parse(`{"model":"m","input":"hello","tools":[{"type":"namespace","name":"ns","children":[{"type":"function","name":"one"},{"type":"function","name":"one"}]}]}`)
+	if got, err := responsesToChatRequest(duplicate, nil); err != nil || len(got.Body["tools"].([]any)) != 1 {
+		t.Fatal("namespace duplicate deduplication", err)
+	}
+	additional := parse(`{"model":"m","input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"files","tools":[{"type":"function","name":"read"}]}]},{"role":"user","content":"hello"}]}`)
+	if _, err := parseTextRequest(r, "responses", additional); err != nil {
+		t.Fatal("additional namespace admission", err)
+	}
+	if got, err := responsesToChatRequest(additional, nil); err != nil || got.Namespaces["files__read"] != (responseToolName{"files", "read"}) {
+		t.Fatal("additional namespace lowering", err)
+	}
+	left := flattenedToolName(strings.Repeat("工具", 30), "read")
+	right := flattenedToolName(strings.Repeat("工具", 30), "write")
+	if len(left) > 64 || !utf8.ValidString(left) || left == right {
+		t.Fatal("long namespace identity", left, right)
 	}
 }
 
@@ -215,6 +296,12 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 			usage = `"usage":null`
 		}
 		message := `{"role":"assistant","content":"converted answer","reasoning_content":"converted thought","tool_calls":[{"id":"call_convert","type":"function","function":{"name":"lookup","arguments":"{}"}}]}`
+		if mode.Load() == 7 {
+			message = strings.ReplaceAll(message, `"name":"lookup"`, `"name":"files__lookup"`)
+			if !strings.Contains(string(body["tools"]), `"name":"files__lookup"`) || strings.Contains(string(body["tools"]), `"namespace"`) {
+				t.Error("namespaced tool not lowered")
+			}
+		}
 		if string(body["stream"]) != "true" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"id":"chat_result","model":"real-chat","choices":[{"index":0,"message":`+message+`,"finish_reason":"`+finish+`"}],`+usage+`}`)
@@ -226,7 +313,11 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		emit := func(s string) { fmt.Fprintf(w, "data: %s\n\n", s); http.NewResponseController(w).Flush() }
 		emit(`{"id":"chat_stream","model":"real-chat","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"converted thought"}}]}`)
-		emit(`{"id":"chat_stream","choices":[{"index":0,"delta":{"content":"converted answer","tool_calls":[{"index":0,"id":"call_convert","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`)
+		toolChunk := `{"id":"chat_stream","choices":[{"index":0,"delta":{"content":"converted answer","tool_calls":[{"index":0,"id":"call_convert","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`
+		if mode.Load() == 7 {
+			toolChunk = strings.ReplaceAll(toolChunk, `"name":"lookup"`, `"name":"files__lookup"`)
+		}
+		emit(toolChunk)
 		if mode.Load() != 4 {
 			emit(`{"id":"chat_stream","choices":[{"index":0,"delta":{},"finish_reason":"` + finish + `"}]}`)
 		}
@@ -395,6 +486,28 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 		t.Fatal("recovery charged twice", count, err)
 	}
 
+	mode.Store(7)
+	for _, stream := range []bool{false, true} {
+		namespaced := body(stream)
+		namespaced["tools"] = []any{map[string]any{"type": "namespace", "name": "files", "tools": []any{map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}}}}}
+		namespaced["tool_choice"] = map[string]string{"type": "function", "namespace": "files", "name": "lookup"}
+		w := call("POST", "/responses", key, namespaced, "")
+		check(w)
+		if !strings.Contains(w.Body.String(), `"namespace":"files"`) || !strings.Contains(w.Body.String(), `"name":"lookup"`) || strings.Contains(w.Body.String(), "files__lookup") {
+			t.Fatal("namespaced output", w.Body.String())
+		}
+		if !stream {
+			var response struct{ ID string }
+			_ = json.Unmarshal(w.Body.Bytes(), &response)
+			namespaced["previous_response_id"] = response.ID
+			namespaced["input"] = []any{map[string]any{"type": "function_call_output", "call_id": "call_convert", "output": "found"}}
+			check(call("POST", "/responses", key, namespaced, ""))
+			if got := gotMessages.Load().(string); !strings.Contains(got, `"name":"files__lookup"`) || strings.Contains(got, `"namespace"`) {
+				t.Fatal("namespaced continuation", got)
+			}
+		}
+	}
+	mode.Store(0)
 	// A continuation remains bound even when a healthy fallback is available.
 	var spareCalls atomic.Int32
 	spare := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

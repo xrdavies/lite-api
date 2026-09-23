@@ -84,6 +84,11 @@ func testResponses(t *testing.T, a *App, admin string) {
 		if body["stream_options"] != nil {
 			t.Error("Chat options injected into Responses")
 		}
+		if mode.Load() == 6 {
+			if !strings.Contains(string(body["tools"]), `"type":"namespace"`) || !strings.Contains(string(body["tool_choice"]), `"namespace":"files"`) {
+				t.Error("native namespace declaration was rewritten")
+			}
+		}
 		if r.Header.Get("X-Codex-Beta-Features") != "" {
 			var items []map[string]json.RawMessage
 			if r.Header.Get("X-Codex-Beta-Features") != "remote_compaction_v2" || json.Unmarshal(body["input"], &items) != nil || len(items) != 2 || credentialString(items[0], "role") != "user" || credentialString(items[1], "type") != "compaction_trigger" {
@@ -118,6 +123,9 @@ func testResponses(t *testing.T, a *App, admin string) {
 			usage = `"usage":null`
 		}
 		response := fmt.Sprintf(`{"object":"response","id":"resp_%d","model":"response-model","status":%q,"service_tier":"default","output":[{"type":"function_call","call_id":"call_one","name":"weather","arguments":"{\"city\":\"Tokyo\"}"},{"type":"reasoning","encrypted_content":"encrypted-reasoning"}],%s}`, n, status, usage)
+		if mode.Load() == 6 {
+			response = strings.Replace(response, `"name":"weather"`, `"name":"weather","namespace":"files"`, 1)
+		}
 		if string(body["stream"]) != "true" {
 			_, _ = fmt.Fprint(w, response)
 			return
@@ -259,6 +267,14 @@ func testResponses(t *testing.T, a *App, admin string) {
 		t.Fatal("store=false response was bound", w.Code)
 	}
 	delete(body, "previous_response_id")
+	mode.Store(6)
+	for _, stream := range []bool{false, true} {
+		request := map[string]any{"model": "client-response", "input": "hello", "stream": stream, "tools": []any{map[string]any{"type": "namespace", "name": "files", "tools": []any{map[string]any{"type": "function", "name": "weather", "parameters": map[string]any{"type": "object"}}}}}, "tool_choice": map[string]string{"type": "function", "namespace": "files", "name": "weather"}}
+		if w := call("/responses", key, request, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"namespace":"files"`) {
+			t.Fatal("native namespace forwarding", stream, w.Code, w.Body.String())
+		}
+	}
+	mode.Store(0)
 	// A more preferred account must never receive the first account's response ID.
 	account("Other Responses", other.URL, 0)
 	body["previous_response_id"] = "resp_1"

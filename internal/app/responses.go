@@ -100,11 +100,38 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
-		if kind := credentialString(tool, "type"); kind != "function" && kind != "custom" {
+		if kind := credentialString(tool, "type"); kind == "namespace" {
+			if _, err := responseNamespaceChildren(tool); err != nil {
+				return in, err
+			}
+		} else if kind != "function" && kind != "custom" {
 			return in, bad("hosted tool billing is not yet available")
 		}
 	}
 	return in, nil
+}
+
+func responseNamespaceChildren(tool map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+	if name := credentialString(tool, "name"); name == "" || len(name) > 256 {
+		return nil, bad("invalid tool namespace")
+	}
+	raw := tool["tools"]
+	if raw != nil && tool["children"] != nil {
+		return nil, bad("use tools or children, not both")
+	}
+	if raw == nil {
+		raw = tool["children"]
+	}
+	var children []map[string]json.RawMessage
+	if json.Unmarshal(raw, &children) != nil || len(children) == 0 {
+		return nil, bad("namespace requires function tools")
+	}
+	for _, child := range children {
+		if credentialString(child, "type") != "function" || credentialString(child, "name") == "" || len(credentialString(child, "name")) > 256 {
+			return nil, bad("namespace supports only named client function tools")
+		}
+	}
+	return children, nil
 }
 
 // Additional tools are subject to the same admission and billing rules as tools.

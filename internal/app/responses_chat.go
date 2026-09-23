@@ -1,16 +1,20 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"time"
 )
 
 type convertedChatTool struct {
-	ID       string `json:"id,omitempty"`
-	Index    int    `json:"index,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Function struct {
+	ID    string `json:"id,omitempty"`
+	Index int    `json:"index,omitempty"`
+	Type  string `json:"type,omitempty"`
+	// Namespace is retained in encrypted history and removed from Chat requests.
+	Namespace string `json:"namespace,omitempty"`
+	Function  struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
@@ -26,14 +30,33 @@ type convertedChatMessage struct {
 }
 
 type responsesChatRequest struct {
-	Body     map[string]any
-	Messages []convertedChatMessage
-	History  []convertedChatMessage
-	Custom   map[string]bool
+	Body       map[string]any
+	Messages   []convertedChatMessage
+	History    []convertedChatMessage
+	Custom     map[string]bool
+	Namespaces map[string]responseToolName
+}
+
+type responseToolName struct{ Namespace, Name string }
+
+func flattenedToolName(namespace, name string) string {
+	full := namespace + "__" + name
+	if len(full) <= 64 {
+		return full
+	}
+	sum := sha256.Sum256([]byte(full))
+	var prefix strings.Builder
+	for _, r := range full {
+		if prefix.Len()+len(string(r)) > 54 {
+			break
+		}
+		prefix.WriteRune(r)
+	}
+	return prefix.String() + "__" + hex.EncodeToString(sum[:4])
 }
 
 func responsesToChatRequest(body map[string]json.RawMessage, history []convertedChatMessage) (*responsesChatRequest, error) {
-	out := &responsesChatRequest{Body: map[string]any{"model": body["model"], "stream": false, "store": false}, Custom: map[string]bool{}}
+	out := &responsesChatRequest{Body: map[string]any{"model": body["model"], "stream": false, "store": false}, Custom: map[string]bool{}, Namespaces: map[string]responseToolName{}}
 	for _, name := range []string{"stream", "temperature", "top_p", "service_tier", "parallel_tool_calls", "metadata", "user", "safety_identifier", "prompt_cache_key", "prompt_cache_retention"} {
 		if raw := body[name]; raw != nil {
 			out.Body[name] = raw
@@ -114,9 +137,56 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	if err != nil {
 		return nil, err
 	}
+	// Reserve direct names before flattening so declaration order cannot hide a collision.
+	direct := map[string]bool{}
+	for _, tool := range tools {
+		if credentialString(tool, "type") != "namespace" {
+			direct[credentialString(tool, "name")] = true
+		}
+	}
+	registerNamespace := func(namespace, name string) (string, error) {
+		if namespace == "" || name == "" || len(namespace) > 256 || len(name) > 256 {
+			return "", bad("invalid namespaced tool")
+		}
+		flat := flattenedToolName(namespace, name)
+		owner := responseToolName{namespace, name}
+		if previous, exists := out.Namespaces[flat]; direct[flat] || exists && previous != owner {
+			return "", bad("namespaced tool collides with another tool")
+		}
+		out.Namespaces[flat] = owner
+		return flat, nil
+	}
+	expanded := []map[string]json.RawMessage{}
+	namespacedDefinitions := map[string]string{}
+	for _, tool := range tools {
+		if credentialString(tool, "type") != "namespace" {
+			expanded = append(expanded, tool)
+			continue
+		}
+		children, err := responseNamespaceChildren(tool)
+		if err != nil {
+			return nil, err
+		}
+		for _, child := range children {
+			flat, err := registerNamespace(credentialString(tool, "name"), credentialString(child, "name"))
+			if err != nil {
+				return nil, err
+			}
+			definition, _ := json.Marshal(child)
+			if previous, exists := namespacedDefinitions[flat]; exists {
+				if previous != string(definition) {
+					return nil, bad("conflicting namespaced tool definitions")
+				}
+				continue
+			}
+			namespacedDefinitions[flat] = string(definition)
+			child["name"], _ = json.Marshal(flat)
+			expanded = append(expanded, child)
+		}
+	}
 	convertedTools := []any{}
 	seen := map[string]bool{}
-	for _, tool := range tools {
+	for _, tool := range expanded {
 		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
 		if name == "" || len(name) > 256 || seen[name] {
 			return nil, bad("invalid or duplicate tool name")
@@ -156,6 +226,13 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 				return nil, bad("invalid tool choice")
 			}
 			kind, name := credentialString(choice, "type"), credentialString(choice, "name")
+			if namespace := credentialString(choice, "namespace"); namespace != "" {
+				flat := flattenedToolName(namespace, name)
+				if kind != "function" || out.Namespaces[flat] != (responseToolName{namespace, name}) {
+					return nil, bad("tool choice must name a declared namespace function")
+				}
+				name = flat
+			}
 			if (kind != "function" && kind != "custom") || !seen[name] {
 				return nil, bad("tool choice must name a declared tool")
 			}
@@ -198,6 +275,10 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			}
 			call := convertedChatTool{ID: callID, Type: "function"}
 			call.Function.Name = name
+			call.Namespace = credentialString(item, "namespace")
+			if call.Namespace != "" && kind != "function_call" {
+				return nil, bad("namespace requires a function call")
+			}
 			if kind == "custom_tool_call" {
 				var input string
 				if json.Unmarshal(item["input"], &input) != nil {
@@ -259,6 +340,27 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	// Only top-level instructions are replaced on continuation. Input messages,
 	// including their system/developer roles, remain part of the conversation.
 	out.History = append([]convertedChatMessage(nil), out.Messages[historyStart:]...)
+	// History retains original tool identities. Only wire messages use flat names.
+	for _, message := range out.Messages {
+		for _, call := range message.Calls {
+			if call.Namespace != "" {
+				if _, err := registerNamespace(call.Namespace, call.Function.Name); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for i := range out.Messages {
+		out.Messages[i].Calls = append([]convertedChatTool(nil), out.Messages[i].Calls...)
+		for j := range out.Messages[i].Calls {
+			call := &out.Messages[i].Calls[j]
+			if call.Namespace != "" {
+				call.Function.Name, call.Namespace = flattenedToolName(call.Namespace, call.Function.Name), ""
+			} else if _, exists := out.Namespaces[call.Function.Name]; exists {
+				return nil, bad("history tool identity collides with a namespace")
+			}
+		}
+	}
 	// Leading instruction items become one system message. Later instruction items
 	// retain their position as user messages for strict Chat-compatible upstreams.
 	leads := 0
@@ -360,6 +462,7 @@ type chatResponsesStream struct {
 	Tools                                   map[int]int
 	TextIndex, ReasoningIndex, RefusalIndex int
 	Custom                                  map[string]bool
+	Namespaces                              map[string]responseToolName
 	Usage                                   map[string]json.RawMessage
 }
 
@@ -426,6 +529,9 @@ func (s *chatResponsesStream) item(p *chatResponsePart, full bool) (map[string]a
 			return nil, &apiError{502, "upstream tool identity is missing"}
 		}
 		v["call_id"], v["name"], v["arguments"] = p.CallID, p.Name, ""
+		if name, ok := s.Namespaces[p.Name]; ok {
+			v["name"], v["namespace"] = name.Name, name.Namespace
+		}
 		if s.Custom[p.Name] {
 			v["type"], v["input"] = "custom_tool_call", ""
 			delete(v, "arguments")
@@ -732,6 +838,9 @@ func (s *chatResponsesStream) assistant() convertedChatMessage {
 		case "function_call":
 			call := convertedChatTool{ID: p.CallID, Type: "function"}
 			call.Function.Name, call.Function.Arguments = p.Name, p.Arguments
+			if name, ok := s.Namespaces[p.Name]; ok {
+				call.Function.Name, call.Namespace = name.Name, name.Namespace
+			}
 			if call.Function.Arguments == "" {
 				call.Function.Arguments = "{}"
 			}
