@@ -103,6 +103,72 @@ func (a *App) usageStats(w http.ResponseWriter, r *http.Request) error {
 	}
 	return reply(w, raw)
 }
+
+// Reporting periods use calendar boundaries in the same timezone as daily
+// quotas; they do not change the rolling windows used for spending limits.
+func usagePeriodStart(period string, now time.Time) (time.Time, error) {
+	day, week := quotaStarts(now)
+	switch period {
+	case "day":
+		return day, nil
+	case "week":
+		return week, nil
+	case "month":
+		return time.Date(day.Year(), day.Month(), 1, 0, 0, 0, 0, day.Location()), nil
+	default:
+		return time.Time{}, bad("period must be day, week or month")
+	}
+}
+
+func (a *App) adminUserUsage(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	period := r.URL.Query().Get("period")
+	if period == "" {
+		period = "month"
+	}
+	now := time.Now()
+	start, err := usagePeriodStart(period, now)
+	if err != nil {
+		return err
+	}
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT jsonb_build_object(
+ 'period',$4::text,'start_date',$2::timestamptz,'end_date',$3::timestamptz,'timezone','Asia/Shanghai',
+ 'total_requests',s.requests,'total_tokens',s.tokens,'total_cost',s.cost,'avg_duration_ms',s.duration)
+ FROM users u CROSS JOIN LATERAL (
+ SELECT count(*) AS requests,COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens,
+ COALESCE(sum(actual_cost),0) AS cost,COALESCE(avg(duration_ms),0) AS duration
+ FROM usage_logs WHERE user_id=u.id AND created_at >= $2 AND created_at < $3
+ )s WHERE u.id=$1 AND u.deleted_at IS NULL`, id, start, now, period))
+	if err != nil {
+		return err
+	}
+	return reply(w, raw)
+}
+
+func (a *App) accountTodayStats(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	start, _ := quotaStarts(now)
+	// Account cost uses the historical cost override and multiplier, never the
+	// current account configuration. An explicit zero override remains zero.
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT to_jsonb(s) FROM accounts a CROSS JOIN LATERAL (
+ SELECT count(*) AS requests,COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens,
+ COALESCE(sum(COALESCE(account_stats_cost,total_cost)*COALESCE(account_rate_multiplier,1)),0) AS cost,
+ COALESCE(sum(total_cost),0) AS standard_cost,COALESCE(sum(actual_cost),0) AS user_cost
+ FROM usage_logs WHERE account_id=a.id AND created_at >= $2 AND created_at < $3
+ )s WHERE a.id=$1 AND a.deleted_at IS NULL`, id, start, now))
+	if err != nil {
+		return err
+	}
+	return reply(w, raw)
+}
+
 func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
 	uid := current(r).ID
 	page, size := pagination(r)
@@ -134,6 +200,8 @@ func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
 	return pageReply(w, items, total, page, size)
 }
 func (a *App) usageRoutes() {
+	a.route("GET /api/v1/admin/users/{id}/usage", "admin", a.adminUserUsage)
+	a.route("GET /api/v1/admin/accounts/{id}/today-stats", "admin", a.accountTodayStats)
 	a.route("POST /api/v1/usage/dashboard/api-keys-usage", "user", a.keyUsageCosts)
 	a.route("GET /api/v1/user/api-keys/{id}/usage/daily", "user", a.keyDailyUsage)
 	a.route("GET /api/v1/admin/usage/search-users", "admin", a.usageSearch)

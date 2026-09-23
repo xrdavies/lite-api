@@ -275,6 +275,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testChatGemini(t, a, admin)
 	testMessagesGemini(t, a, admin)
 	testOperational(t, a, admin, otherToken)
+	testUsageSummaries(t, a, admin, otherToken)
 	testResponsesChat(t, a, admin)
 	testClientToolSearch(t, a, admin)
 	testLiveGateway(t, a, admin)

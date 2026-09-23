@@ -47,6 +47,129 @@ func TestOperationalAvailability(t *testing.T) {
 	}
 }
 
+func TestUsagePeriodStart(t *testing.T) {
+	now := time.Date(2026, 8, 31, 16, 30, 0, 0, time.UTC)
+	for period, want := range map[string]string{
+		"day": "2026-09-01T00:00:00+08:00", "week": "2026-08-31T00:00:00+08:00", "month": "2026-09-01T00:00:00+08:00",
+	} {
+		got, err := usagePeriodStart(period, now)
+		if err != nil || got.Format(time.RFC3339) != want {
+			t.Fatal(period, got, err)
+		}
+	}
+	if _, err := usagePeriodStart("year", now); err == nil {
+		t.Fatal("unknown reporting period accepted")
+	}
+}
+
+func testUsageSummaries(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	data := func(method, path string, body any) map[string]json.RawMessage {
+		t.Helper()
+		w := call(method, path, admin, body)
+		var response struct{ Data map[string]json.RawMessage }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return response.Data
+	}
+	uid := string(data("POST", "/api/v1/admin/users", map[string]any{"email": "usage-summary@example.test", "password": "usage-summary-password"})["id"])
+	aid := string(data("POST", "/api/v1/admin/accounts", map[string]any{"name": "usage-summary", "platform": "openai", "type": "apikey", "credentials": map[string]any{"api_key": "summary-secret", "base_url": "http://127.0.0.1:1"}})["id"])
+	var kid int64
+	if err := a.DB.QueryRow("INSERT INTO api_keys(user_id,key,name) VALUES($1,'summary-client-key','summary') RETURNING id", uid).Scan(&kid); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	day, _ := quotaStarts(time.Now())
+	for _, row := range []struct {
+		Total, Actual            string
+		Override, Rate, Duration any
+	}{
+		{"0.5", "0.3333333333", "0.1234567890", "2", 100},
+		{"0.1000000001", "0.2222222222", nil, nil, 200},
+		{"9", "0.1111111111", "0", "5", nil},
+	} {
+		exec(`INSERT INTO usage_logs(user_id,api_key_id,account_id,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,total_cost,actual_cost,account_stats_cost,account_rate_multiplier,duration_ms,created_at)
+ VALUES($1,$2,$3,'summary',1000000000,1000000000,1000000000,1000000000,$4,$5,$6,$7,$8,$9)`, uid, kid, aid, row.Total, row.Actual, row.Override, row.Rate, row.Duration, day)
+	}
+	for _, at := range []time.Time{day.Add(-time.Nanosecond * 1000), day.AddDate(0, 0, 1)} {
+		exec(`INSERT INTO usage_logs(user_id,api_key_id,account_id,model,total_cost,actual_cost,created_at) VALUES($1,$2,$3,'outside-day',99,1,$4)`, uid, kid, aid, at)
+	}
+	// Historical account/key state must not rewrite the recorded costs.
+	exec("UPDATE accounts SET status='inactive',rate_multiplier=99 WHERE id=$1", aid)
+	exec("UPDATE api_keys SET deleted_at=now() WHERE id=$1", kid)
+	uPath, aPath := "/api/v1/admin/users/"+uid+"/usage", "/api/v1/admin/accounts/"+aid+"/today-stats"
+	check := func(got map[string]json.RawMessage, want map[string]string) {
+		t.Helper()
+		for k, v := range want {
+			if !json.Valid(got[k]) || rat(json.Number(got[k])).Cmp(rat(json.Number(v))) != 0 {
+				t.Fatalf("%s: got %s want %s", k, got[k], v)
+			}
+		}
+	}
+	check(data("GET", aPath, nil), map[string]string{"requests": "3", "tokens": "12000000000", "cost": "0.3469135781", "standard_cost": "9.6000000001", "user_cost": "0.6666666666"})
+	check(data("GET", uPath+"?period=day", nil), map[string]string{"total_requests": "3", "total_tokens": "12000000000", "total_cost": "0.6666666666", "avg_duration_ms": "150"})
+	for _, period := range []string{"week", "month", ""} {
+		path := uPath
+		if period != "" {
+			path += "?period=" + period
+		} else {
+			period = "month"
+		}
+		got := data("GET", path, nil)
+		start, _ := usagePeriodStart(period, time.Now())
+		count, cost := "3", "0.6666666666"
+		if start.Before(day) {
+			count, cost = "4", "1.6666666666"
+		}
+		check(got, map[string]string{"total_requests": count, "total_cost": cost})
+		if string(got["period"]) != `"`+period+`"` {
+			t.Fatal("wrong period", got)
+		}
+	}
+	for _, path := range []string{uPath, aPath} {
+		for _, v := range []struct {
+			Token  string
+			Status int
+		}{{"", 401}, {ordinary, 403}, {"summary-client-key", 401}} {
+			if w := call("GET", path, v.Token, nil); w.Code != v.Status {
+				t.Fatal("summary permissions", path, w.Code)
+			}
+		}
+	}
+	if w := call("GET", uPath+"?period=year", admin, nil); w.Code != 400 {
+		t.Fatal("unknown period", w.Code)
+	}
+	for _, path := range []string{"/api/v1/admin/users/9223372036854775807/usage", "/api/v1/admin/accounts/9223372036854775807/today-stats"} {
+		if w := call("GET", path, admin, nil); w.Code != 404 {
+			t.Fatal("missing resource", w.Code)
+		}
+	}
+	other := string(data("POST", "/api/v1/admin/users", map[string]any{"email": "empty-summary@example.test", "password": "usage-summary-password"})["id"])
+	check(data("GET", "/api/v1/admin/users/"+other+"/usage", nil), map[string]string{"total_requests": "0", "total_tokens": "0", "total_cost": "0", "avg_duration_ms": "0"})
+	exec("UPDATE users SET deleted_at=now() WHERE id=$1", uid)
+	exec("UPDATE accounts SET deleted_at=now() WHERE id=$1", aid)
+	for _, path := range []string{uPath, aPath} {
+		if w := call("GET", path, admin, nil); w.Code != 404 {
+			t.Fatal("deleted resource", w.Code)
+		}
+	}
+}
+
 func testOperational(t *testing.T, a *App, admin, ordinary string) {
 	t.Helper()
 	call := func(method, path, token string, body any) *httptest.ResponseRecorder {

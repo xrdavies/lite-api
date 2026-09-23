@@ -29,6 +29,8 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
 
+`GET /api/v1/admin/users/{id}/usage` 查询指定用户的真实用量汇总，`period=day|week|month`（默认 month）分别从 Asia/Shanghai 当日、周一或当月首日零点统计到查询时刻，返回请求数、包含缓存的 token 总量、用户实际费用和已记录耗时的平均值。`GET /api/v1/admin/accounts/{id}/today-stats` 返回上游账号当日的 requests、tokens、cost、standard_cost、user_cost；账号成本使用历史 `COALESCE(account_stats_cost,total_cost) × COALESCE(account_rate_multiplier,1)`，标准费用使用 total_cost，用户费用使用 actual_cost。金额由数据库精确汇总，当前倍率修改不改变历史结果；已删除 Key 的消费继续计入，不存在或已删除的用户/账号返回 404。两个接口仅管理员可用，不查询上游或调用复杂统计任务。
+
 复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini；images 可调度 OpenAI 或 Grok API Key 图片生成/编辑，Grok 编辑请求会转换为其原生 JSON 图片对象。
 
 复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换与媒体继续开发。
