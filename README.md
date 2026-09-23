@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI 兼容图片生成和同步图片编辑（JSON URL/data URL 与 multipart 文件）接口；批量任务、其他媒体、托管工具及扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI 兼容图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务接口；批量任务、其他媒体、托管工具及扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -29,7 +29,7 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
 
-复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini，图片执行随后续媒体功能交付。
+复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini；images 当前调度 OpenAI 兼容图片生成/编辑。
 
 复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换与媒体继续开发。
 
@@ -168,6 +168,14 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`api_key_ids` 最多 100 个，只返回本人 Key）：`today_actual_cost` 为 Asia/Shanghai 当日费用，原 `total_actual_cost` 字段为近 30 天费用。`GET /api/v1/user/api-keys/{id}/usage/daily` 支持 1–90 天和显式 `timezone`，默认 30 天、Asia/Shanghai。金额直接在数据库精确汇总，不改变原始消费。
 
 管理员审计查询为 `/api/v1/admin/audit-logs` 和 `/{id}`，支持操作者、动作、方法、IP、RFC3339 时间、成功状态及关键词筛选；每页最多 200 条。查询不提供清空能力。`/api/v1/admin/usage/search-users` 与 `/search-api-keys` 为账务筛选提供用户/Key 简要信息，包含历史用户归属，不返回密码和 Key 原文。
+
+## 异步图片任务
+
+`POST /v1/images/generations/async` 和 `/v1/images/edits/async` 接受与同步图片相同的 JSON 或编辑 multipart 请求，返回 202、任务 ID 和 `poll_url`；通过 `GET /v1/images/tasks/{task_id}` 查询。三个入口均有去掉 `/v1` 的别名。当前使用允许图片的 OpenAI 分组或路由到 OpenAI 的 composite 分组，沿用模型、账号、价格、限额和计费规则。流式图片请求拒绝；`Idempotency-Key` 在同一 Key、相同操作及别名之间重放原任务，不同请求体冲突返回 409。
+
+先由管理员配置 `/api/v1/admin/backups/image-storage`（GET/PUT，POST `/test` 检查桶权限）。仅支持独立 S3 兼容存储，`reuse_backup_s3=true` 拒绝；读取配置不返回 secret，空 secret 保留已有值。开启且配置完整才接受新任务。上游返回的 base64 或 URL 图片经受控网络下载和大小校验后上传，结果只保存对象 URL；关闭存储或余额/Key 额度耗尽后，已生成任务仍可由原 Key 查询，禁用/删除/到期 Key 仍拒绝。对象本身的生命周期由存储管理，任务完成后保留 24 小时；私有 URL 使用配置的签名有效期。
+
+请求及存储配置快照加密持久化在 Redis，不保存客户端 Key 明文；执行前重新检查 Key 归属、分组与权限。单实例一个执行者，最多 32 个待完成任务，队列满返回 429。Redis 应启用持久化且不使用会淘汰任务的策略；需要抵御宿主机断电时使用 `appendfsync always`。运行时先持久结算已发生消费，再转存图片，随后保存可恢复的结果/账务检查点。结算检查点恢复和重复轮询不重复生成或扣费；转存失败仍记录已发生的消费。重启后继续未派发任务和待结算任务；上游请求已派发但结果未持久化时，因上游没有可续接任务 ID，任务明确失败并提示核查，避免自动重发产生重复费用。
 
 ## 验证
 

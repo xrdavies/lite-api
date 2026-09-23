@@ -169,6 +169,9 @@ func (a *App) gatewayAuth(r *http.Request, spending bool) (identity *gatewayIden
 		return nil, denied()
 	}
 	g.SourcePlatform = g.Group.Platform
+	if execution := imageExecution(r.Context()); execution != nil && (g.Key.ID != execution.Task.APIKeyID || g.Key.GroupID != execution.Task.GroupID || g.UserID != execution.Task.UserID) {
+		return nil, conflict("image task API key assignment changed")
+	}
 	if turn := socketTurn(r.Context()); turn != nil && (g.Key.ID != turn.socket.keyID || g.Key.GroupID != turn.socket.groupID || g.UserID != turn.socket.userID) {
 		return nil, conflict("API key assignment changed; reconnect")
 	}
@@ -511,6 +514,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	id := randomToken(24)
+	if execution := imageExecution(r.Context()); execution != nil {
+		id = execution.Task.ID
+	}
 	w.Header().Set("X-Request-ID", id)
 	started := time.Now()
 	controller := http.NewResponseController(w)
@@ -542,7 +548,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	timeout := 5 * time.Minute
+	if imageExecution(r.Context()) != nil {
+		timeout = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	r = r.WithContext(ctx)
 	var err error
@@ -1394,6 +1404,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			billingCtx, billingCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err = a.saveReceipt(billingCtx, receipt)
 			billingCancel()
+			if execution := imageExecution(ctx); execution != nil {
+				// Persist consumption before slow object I/O. An interrupted upload
+				// must not erase an already observed billable result.
+				storageCtx, storageCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				checkpointErr := a.checkpointImageTask(storageCtx, execution, responseBody, receipt, forwardErr)
+				storageCancel()
+				if err == nil {
+					err = checkpointErr
+				}
+			}
 		}
 		if err != nil {
 			forwardErr = &apiError{503, "usage settlement failed; billing requires review"}

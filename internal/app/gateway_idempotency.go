@@ -114,7 +114,7 @@ func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gat
 			code = 500
 		}
 		state := "failed"
-		if code == 200 && writer.succeeded {
+		if code >= 200 && code < 300 && writer.succeeded {
 			state = "succeeded"
 		}
 		var response any

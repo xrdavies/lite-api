@@ -201,6 +201,7 @@ func (a *App) startWorkers() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.workerCancel = cancel
 	a.workerDone = make(chan struct{})
+	a.startImageTasks(ctx)
 	go func() {
 		defer close(a.workerDone)
 		if err := a.recoverReceipts(ctx); err != nil {

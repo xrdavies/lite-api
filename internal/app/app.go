@@ -45,6 +45,8 @@ type App struct {
 	privateUpstreams []netip.Prefix
 	workerCancel     context.CancelFunc
 	workerDone       chan struct{}
+	imageWorkerDone  chan struct{}
+	imageTaskMu      sync.Mutex
 	planMu           sync.Mutex
 	instanceLost     atomic.Bool
 	ingressFailures  atomic.Uint64
@@ -144,6 +146,7 @@ func (a *App) Close() {
 	a.websocketDone.Wait()
 	a.workerCancel()
 	<-a.workerDone
+	<-a.imageWorkerDone
 	a.Redis.Close()
 	a.instanceLock.Close()
 	a.DB.Close()
@@ -334,6 +337,7 @@ func (a *App) routes() {
 	})
 	a.settingsRoutes()
 	a.imageStorageRoutes()
+	a.imageTaskRoutes()
 	a.route("GET /api/v1/version", "public", func(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, map[string]string{"version": "dev"})
 	})
