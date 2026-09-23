@@ -31,6 +31,9 @@ type groupInput struct {
 	Pricing          *[]modelPrice        `json:"model_pricing"`
 	ModelRouting     *map[string][]int64  `json:"model_routing"`
 	RoutingEnabled   *bool                `json:"model_routing_enabled"`
+	MaxEffort        *string              `json:"max_reasoning_effort"`
+	OverLimit        *string              `json:"max_reasoning_effort_over_limit"`
+	EffortMappings   *[]effortMapping     `json:"reasoning_effort_mappings"`
 }
 
 type modelManifestConfig struct {
@@ -134,6 +137,9 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if in.Platform != nil {
 		platform = *in.Platform
 	}
+	if err := in.validateReasoning(platform); err != nil {
+		return err
+	}
 	if in.Status != nil {
 		status = *in.Status
 	}
@@ -185,7 +191,18 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if in.RoutingEnabled != nil {
 		routingEnabled = *in.RoutingEnabled
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled))
+	maxEffort, overLimit, effortMappings := "", "downgrade", "[]"
+	if in.MaxEffort != nil {
+		maxEffort = *in.MaxEffort
+	}
+	if in.OverLimit != nil {
+		overLimit = *in.OverLimit
+	}
+	if in.EffortMappings != nil {
+		raw, _ := json.Marshal(in.EffortMappings)
+		effortMappings = string(raw)
+	}
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings))
 	if err != nil {
 		return err
 	}
@@ -208,6 +225,25 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	add := func(field string, v any) {
 		args = append(args, v)
 		sets = append(sets, fmt.Sprintf("%s=$%d", field, len(args)))
+	}
+	if in.MaxEffort != nil || in.OverLimit != nil || in.EffortMappings != nil {
+		var platform string
+		if err = a.DB.QueryRowContext(r.Context(), "SELECT platform FROM groups WHERE id=$1 AND deleted_at IS NULL", id).Scan(&platform); err != nil {
+			return err
+		}
+		if err = in.validateReasoning(platform); err != nil {
+			return err
+		}
+		if in.MaxEffort != nil {
+			add("max_reasoning_effort", *in.MaxEffort)
+		}
+		if in.OverLimit != nil {
+			add("max_reasoning_effort_over_limit", *in.OverLimit)
+		}
+		if in.EffortMappings != nil {
+			raw, _ := json.Marshal(in.EffortMappings)
+			add("reasoning_effort_mappings", string(raw))
+		}
 	}
 	if in.ModelRouting != nil {
 		raw, _ := json.Marshal(in.ModelRouting)

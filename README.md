@@ -37,6 +37,10 @@ go build -o bin/lite-api ./cmd/lite-api
 
 未固定模型目录账号时，manifest 的能力取模型优先池内账号的交集；优先账号无可用元数据时不借用普通候选的能力。复合分组同名模型在其他端点平台可调用时，仍以共同能力为限。显式 `codex_models_manifest_config` 保持所选目录账号的顺序。目录展示不承诺此刻有并发空位，也不保证回退账号拥有相同上下文上限。
 
+OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reasoning_effort_over_limit= downgrade|deny` 和 `reasoning_effort_mappings`。上限支持 minimal/low/medium/high/xhigh/max，Anthropic 不接受 minimal；复合分组派发到 Anthropic 时将 minimal 策略目标适配为 low。映射格式为 `{"from":"max","to":"high","match_type":"prefix","model":"gpt-"}`，最多 64 条；from 另可为 none，to 另可为 deny。匹配客户端原始模型名，精确优先于最长前缀/后缀，再到全局；同级按数组顺序，仅执行一次映射，随后执行上限。超限 deny 或映射 deny 返回 403，不调用上游。
+
+策略处理显式 `reasoning.effort`、`reasoning_effort`、`output_config.effort`，保留嵌套其他字段；缺省值不补写，未知值交由上游处理。Chat、Responses、Messages 及其复合派发均使用实际转发 effort 的价格倍率；用量中的 `requested_reasoning_effort` 单独保留规范化的客户端请求值（未知/none 为 null，缺省时可记录模型名的已知后缀）。在途修改策略不改变该次结算，已完成的幂等请求仍可原样重放。省略/null 保留配置，空上限取消限制，空映射数组清除规则；策略不用于 Gemini 或其他具体平台。
+
 ## 上游与健康测试
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实文本请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。

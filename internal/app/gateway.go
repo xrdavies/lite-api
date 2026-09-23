@@ -28,6 +28,7 @@ type gatewayKey struct {
 	Blacklist []string    `json:"ip_blacklist"`
 }
 type gatewayGroup struct {
+	reasoningPolicy
 	ID             int64               `json:"id"`
 	Platform       string              `json:"platform"`
 	Rate           json.Number         `json:"rate_multiplier"`
@@ -460,6 +461,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
+	originalEffort := requestedEffort(request, model)
 	if protocol == "gemini" && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
 		fail(bad("Gemini native endpoints require a Gemini group"))
 		return
@@ -529,6 +531,15 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if protocol == "gemini" && g.Group.Platform != "gemini" || protocol == "embeddings" && g.Group.Platform != "openai" {
 		fail(bad("resolved platform does not support this endpoint"))
 		return
+	}
+	if protocol != "gemini" && protocol != "embeddings" {
+		if err = g.Group.reasoningPolicy.apply(request, model, g.Group.Platform); err == nil {
+			effort, err = requestEffort(request, protocol)
+		}
+		if err != nil {
+			fail(err)
+			return
+		}
 	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
 	if err != nil {
@@ -753,6 +764,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, effort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
+			receipt.RequestedEffort = originalEffort
 			receipt.NativeCompaction = in.NativeCompaction
 			receipt.Upstream, _ = in.upstreamPath(selected.UpstreamModel)
 			receipt.Upstream, _, _ = strings.Cut(receipt.Upstream, "?")

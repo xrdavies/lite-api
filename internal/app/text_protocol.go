@@ -103,6 +103,13 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	if raw := body["reasoning_effort"]; raw != nil && (json.Unmarshal(raw, &in.Effort) != nil || len(in.Effort) > 20) {
 		return in, bad("invalid reasoning_effort")
 	}
+	if protocol == "anthropic" {
+		var err error
+		in.Effort, err = requestEffort(body, protocol)
+		if err != nil {
+			return in, err
+		}
+	}
 	if raw := body["service_tier"]; raw != nil && (json.Unmarshal(raw, &in.Tier) != nil || len(in.Tier) > 16) {
 		return in, bad("invalid service_tier")
 	}
