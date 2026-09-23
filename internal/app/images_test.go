@@ -62,6 +62,87 @@ func TestImageEditRequestParsing(t *testing.T) {
 	}
 }
 
+func TestImagesToGrok(t *testing.T) {
+	body := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(`{"model":"m","prompt":"edit","images":[{"url":"https://example.test/a.png"}]}`), &body); err != nil {
+		t.Fatal(err)
+	}
+	out, err := imagesToGrok(body)
+	if err != nil || out["images"] != nil {
+		t.Fatalf("grok image conversion: %v %#v", err, out)
+	}
+	var image map[string]any
+	if json.Unmarshal(out["image"], &image) != nil || image["type"] != "image_url" || image["url"] != "https://example.test/a.png" {
+		t.Fatalf("grok image shape: %s", out["image"])
+	}
+}
+
+func testGrokImages(t *testing.T, a *App, admin string) {
+	t.Helper()
+	call := func(path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.189:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	manage := func(path, token string, body any) map[string]any {
+		w := call(path, token, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		var out struct {
+			Data map[string]any `json:"data"`
+		}
+		if json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatal("invalid management response")
+		}
+		return out.Data
+	}
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != "Bearer grok-image-key" || (r.URL.Path != "/v1/images/generations" && r.URL.Path != "/v1/images/edits") {
+			t.Errorf("grok image upstream auth/path: %s %s", r.Header.Get("Authorization"), r.URL.Path)
+		}
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if credentialString(body, "model") != "grok-imagine-image-2.0" || credentialString(body, "prompt") == "" {
+			t.Errorf("grok image request: %s", mustJSON(body))
+		}
+		if body["image"] != nil {
+			var image map[string]any
+			_ = json.Unmarshal(body["image"], &image)
+			if image["type"] != "image_url" {
+				t.Errorf("grok edit object: %v", image)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"created":1710000000,"data":[{"url":"https://cdn.example/grok.png"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	manage("/api/v1/admin/users", admin, map[string]any{"email": "grok-images@example.test", "password": "grok-images-password", "balance": 1})
+	user := manage("/api/v1/auth/login", "", map[string]any{"email": "grok-images@example.test", "password": "grok-images-password"})["access_token"].(string)
+	gid := int64(manage("/api/v1/admin/groups", admin, map[string]any{"name": "Grok images", "platform": "grok", "allow_image_generation": true})["id"].(float64))
+	manage("/api/v1/admin/channels", admin, map[string]any{"name": "Grok image tariff", "group_ids": []int64{gid}, "model_pricing": []any{map[string]any{"platform": "grok", "models": []string{"client-grok-image"}, "billing_mode": "image", "per_request_price": json.Number("0.02")}}})
+	manage("/api/v1/admin/accounts", admin, map[string]any{"name": "Grok image account", "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "grok-image-key", "base_url": upstream.URL, "api_protocol": "chat_completions", "model_mapping": map[string]string{"client-grok-image": "grok-imagine-image-2.0"}}})
+	key := manage("/api/v1/keys", user, map[string]any{"name": "Grok image key", "group_id": gid})["key"].(string)
+	gen := call("/v1/images/generations", key, map[string]any{"model": "client-grok-image", "prompt": "draw a fox", "n": 1})
+	if gen.Code != http.StatusOK || requests.Load() != 1 {
+		t.Fatalf("grok image generation: %d %s calls=%d", gen.Code, gen.Body.String(), requests.Load())
+	}
+	edit := call("/v1/images/edits", key, map[string]any{"model": "client-grok-image", "prompt": "make it blue", "images": []any{map[string]any{"url": "https://example.test/source.png"}}})
+	if edit.Code != http.StatusOK || requests.Load() != 2 {
+		t.Fatalf("grok image edit: %d %s calls=%d", edit.Code, edit.Body.String(), requests.Load())
+	}
+	var logged int
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE model='client-grok-image'").Scan(&logged); err != nil || logged != 2 {
+		t.Fatalf("grok image usage: %d %v", logged, err)
+	}
+}
+
 func testImages(t *testing.T, a *App, admin string) {
 	t.Helper()
 	for _, raw := range []string{`{"model":"m","prompt":"draw","n":0}`, `{"model":"m","prompt":"draw","n":11}`, `{"model":"m","prompt":"draw","response_format":"xml"}`} {

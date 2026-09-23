@@ -393,7 +393,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if protocol == "images" {
-			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+			matches = (u.Platform == "openai" || u.Platform == "grok") && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if grokSearchProtocol(protocol) {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
@@ -619,8 +619,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(&apiError{404, "this endpoint requires an OpenAI group"})
 		return
 	}
-	if protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "composite" {
-		fail(&apiError{404, "this endpoint requires an OpenAI group"})
+	if protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "grok" && g.Group.Platform != "composite" {
+		fail(&apiError{404, "this endpoint requires an OpenAI or Grok group"})
 		return
 	}
 	if protocol == "images" && !g.Group.AllowImage {
@@ -702,7 +702,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 	}
-	if protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search" || protocol == "images") && g.Group.Platform != "openai" {
+	if protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search") && g.Group.Platform != "openai" || protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
@@ -850,6 +850,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			_ = json.Unmarshal(request["generateContentRequest"], &nested)
 			nested["model"], _ = json.Marshal("models/" + strings.TrimPrefix(selected.UpstreamModel, "models/"))
 			request["generateContentRequest"], _ = json.Marshal(nested)
+		}
+		if protocol == "images" && in.Action == "edits" && selected.Account.Platform == "grok" {
+			request, err = imagesToGrok(request)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
 		}
 		upstreamBody, _ := json.Marshal(request)
 		wireIn, chatBridge = in, nil

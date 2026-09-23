@@ -246,6 +246,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testNativeGateway(t, a, admin)
 	testEmbeddings(t, a, admin)
 	testImages(t, a, admin)
+	testGrokImages(t, a, admin)
 	testImageTasks(t, a, admin)
 	testBatchImages(t, a, admin)
 	testResponses(t, a, admin)

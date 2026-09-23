@@ -74,8 +74,17 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 		}
 		if in.Action == "edits" {
 			var images []json.RawMessage
-			if json.Unmarshal(body["images"], &images) != nil || len(images) == 0 || len(images) > 10 {
-				return in, bad("image edits require between 1 and 10 images")
+			if raw := body["images"]; raw != nil {
+				if json.Unmarshal(raw, &images) != nil || len(images) == 0 || len(images) > 10 {
+					return in, bad("image edits require between 1 and 10 images")
+				}
+			} else if raw := body["image"]; raw != nil {
+				// xAI's image endpoint uses one image object instead of the
+				// OpenAI-compatible images array. Keep the original object on
+				// the wire; this branch only validates the shared request shape.
+				images = []json.RawMessage{raw}
+			} else {
+				return in, bad("image edits require an image source")
 			}
 			for _, raw := range images {
 				var image struct {
@@ -343,6 +352,45 @@ func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMe
 	}
 	out["images"], _ = json.Marshal(images)
 	return out, nil
+}
+
+// imagesToGrok keeps the public OpenAI image contract while emitting the JSON
+// object shape used by the Grok image endpoint. Generation requests already
+// share the wire format; edits are the only incompatible part.
+func imagesToGrok(body map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	if body["images"] == nil {
+		return body, nil
+	}
+	var sources []json.RawMessage
+	if json.Unmarshal(body["images"], &sources) != nil || len(sources) == 0 || len(sources) > 10 {
+		return nil, bad("invalid image edit sources")
+	}
+	objects := make([]map[string]any, 0, len(sources))
+	for _, raw := range sources {
+		var image struct {
+			URL      string `json:"url"`
+			ImageURL struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+		}
+		if json.Unmarshal(raw, &image) != nil {
+			return nil, bad("invalid image edit source")
+		}
+		if image.URL == "" {
+			image.URL = image.ImageURL.URL
+		}
+		if !validImageSource(image.URL) {
+			return nil, bad("invalid image edit source")
+		}
+		objects = append(objects, map[string]any{"url": image.URL, "type": "image_url"})
+	}
+	delete(body, "images")
+	if len(objects) == 1 {
+		body["image"], _ = json.Marshal(objects[0])
+	} else {
+		body["images"], _ = json.Marshal(objects)
+	}
+	return body, nil
 }
 
 func (in textRequest) preflightUsage() priceUsage {
