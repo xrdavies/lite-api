@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,12 +24,20 @@ func main() {
 }
 func run() error {
 	if len(os.Args) != 2 {
-		return errors.New("usage: lite-api init-db | bootstrap | serve")
+		return errors.New("usage: lite-api init-db | bootstrap | serve | upstream-check")
 	}
 	cfg := app.ConfigFromEnv()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	switch os.Args[1] {
+	case "upstream-check":
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer checkCancel()
+		result, err := app.CheckUpstream(checkCtx, os.Getenv("UPSTREAM_BASE_URL"), os.Getenv("UPSTREAM_API_KEY"), os.Getenv("UPSTREAM_MODEL"))
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
 	case "init-db", "bootstrap":
 		db, err := app.OpenDatabase(ctx, cfg.DatabaseURL)
 		if err != nil {

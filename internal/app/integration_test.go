@@ -40,7 +40,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	if err = Bootstrap(ctx, db, "another@example.test", "correct-password"); err == nil {
 		t.Fatal("bootstrap replaced an existing installation")
 	}
-	a, err := New(ctx, Config{DatabaseURL: databaseURL, RedisURL: redisURL, JWTSecret: strings.Repeat("a", 32)})
+	a, err := New(ctx, Config{DatabaseURL: databaseURL, RedisURL: redisURL, JWTSecret: strings.Repeat("a", 32), UpstreamPrivateCIDRs: "127.0.0.1/32,::1/128"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +240,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	if err = db.QueryRowContext(ctx, "SELECT deleted_at IS NOT NULL FROM api_keys WHERE id=$1", kid).Scan(&deleted); err != nil || !deleted {
 		t.Fatal("user deletion did not revoke key", err)
 	}
+	testUpstreamManagement(t, a, admin, otherToken, gid)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)
@@ -247,6 +248,15 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	if err = schema.Validate(ctx, db); err == nil {
 		t.Fatal("schema drift accepted")
 	}
+	var lockPID int
+	if err = a.instanceLock.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&lockPID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.ExecContext(ctx, "SELECT pg_terminate_backend($1)", lockPID); err != nil {
+		t.Fatal(err)
+	}
+	expect(503, "GET", "/health", "", nil)
+	expect(503, "GET", "/api/v1/admin/accounts", admin, nil)
 }
 
 func TestTokenValidation(t *testing.T) {

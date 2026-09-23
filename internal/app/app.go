@@ -13,9 +13,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lib/pq"
@@ -23,22 +26,27 @@ import (
 	"github.com/xrdavies/lite-api/schema"
 )
 
-type Config struct{ DatabaseURL, RedisURL, ListenAddr, JWTSecret string }
+type Config struct{ DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs string }
 
 func ConfigFromEnv() Config {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	return Config{os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), addr, os.Getenv("JWT_SECRET")}
+	return Config{os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), addr, os.Getenv("JWT_SECRET"), os.Getenv("UPSTREAM_PRIVATE_CIDRS")}
 }
 
 type App struct {
-	DB           *sql.DB
-	Redis        *redis.Client
-	instanceLock *sql.Conn
-	secret       []byte
-	mux          *http.ServeMux
+	DB               *sql.DB
+	Redis            *redis.Client
+	instanceLock     *sql.Conn
+	secret           []byte
+	mux              *http.ServeMux
+	privateUpstreams []netip.Prefix
+	workerCancel     context.CancelFunc
+	workerDone       chan struct{}
+	planMu           sync.Mutex
+	instanceLost     atomic.Bool
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -97,11 +105,42 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return fail(errors.New("Redis connection failed"))
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
+	for _, raw := range strings.Split(cfg.UpstreamPrivateCIDRs, ",") {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			cache.Close()
+			return fail(errors.New("invalid UPSTREAM_PRIVATE_CIDRS"))
+		}
+		a.privateUpstreams = append(a.privateUpstreams, prefix)
+	}
 	a.routes()
+	a.startWorkers()
 	return a, nil
 }
-func (a *App) Close()                { a.Redis.Close(); a.instanceLock.Close(); a.DB.Close() }
+func (a *App) Close() {
+	a.workerCancel()
+	<-a.workerDone
+	a.Redis.Close()
+	a.instanceLock.Close()
+	a.DB.Close()
+}
 func (a *App) Handler() http.Handler { return a.mux }
+
+func (a *App) checkInstance(ctx context.Context) error {
+	if a.instanceLost.Load() {
+		return &apiError{503, "instance lock lost; restart this service"}
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := a.instanceLock.PingContext(ctx); err != nil {
+		a.instanceLost.Store(true)
+		return &apiError{503, "instance lock lost; restart this service"}
+	}
+	return nil
+}
 
 type apiError struct {
 	status  int
@@ -127,6 +166,9 @@ func (a *App) route(pattern, access string, h handler) {
 		started := time.Now()
 		var user *identity
 		err := func() error {
+			if err := a.checkInstance(r.Context()); err != nil {
+				return err
+			}
 			if access != "public" {
 				var err error
 				user, err = a.authenticate(r)
@@ -278,4 +320,7 @@ func (a *App) routes() {
 	a.userRoutes()
 	a.keyRoutes()
 	a.groupRoutes()
+	a.accountRoutes()
+	a.proxyRoutes()
+	a.testPlanRoutes()
 }
