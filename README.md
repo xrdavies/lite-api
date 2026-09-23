@@ -155,6 +155,10 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 管理员可通过 `GET /api/v1/admin/ops/user-concurrency` 查询活跃用户的当前占用/排队，通过 `GET /api/v1/admin/ops/concurrency` 查询账号及平台/分组汇总，后者支持 `platform`、`group_id` 筛选。数据来自本实例即时计数，不需要启用监控产品；只供管理员查询。共享账号分别计入其各个分组，分组汇总不能直接相加，平台汇总只计一次；容量是配置值，不代表上游健康或此刻可调度。
 
+基础运行查询还包括 `/api/v1/admin/ops/account-availability`、`/realtime-traffic`、`/errors`、`/request-errors`、`/upstream-errors` 及错误详情。可用性检查状态、人工停调、期限、冷却和额度；具体模型和实时并发仍以派发检查为准。流量按原始用量及最终失败请求计算最近 1/5/30/60 分钟 QPS/TPS，重试及已有用量的失败请求不重复计数。HTTP 上游拒绝尝试只进入上游诊断，最终错误可通过 `/request-errors/{id}/upstream-errors` 关联查询；不保存上游错误正文或凭证。错误列表默认最近一小时，可按身份、资源、平台、模型、状态和 RFC3339 时间筛选，最长 31 天。
+
+`/api/v1/admin/ops/ingress-rejections` 按分钟记录网关鉴权拒绝；IPv6 按 /64 归并，不记录尝试的 Key，每秒最多写 100 次。`/ingress-rejections/health` 报告进程内失败与丢弃计数；`/auth-cache-invalidation/health` 明确返回数据库直读模式及 outbox 积压数，不伪装存在缓存订阅者。`/api/v1/admin/groups/usage-summary` 提供精确累计/今日/昨日费用，`/capacity-summary` 提供健康账号的配置并发及当前占用。以上接口仅管理员可用，不启动历史聚合或监控模板任务。
+
 用量、扣费去重、用户余额、Key/账号计数和平台额度同事务写入。日志精度为 10 位，余额与 Key/账号扣款为 8 位；起始余额为正的已发生消费可使余额为负。Redis 保存不含提示词或凭证的待结算记录，后台重试和重启恢复不重复扣费；持久部署须保留 Redis AOF 和 PostgreSQL 数据。上游尚未返回 usage 时的进程崩溃仍需人工核查，不能承诺第三方调用恰好一次。
 
 可选 `Idempotency-Key` 在同一个客户端 Key 下识别重复请求；24 小时内完整 JSON/SSE 响应可重放，同键不同内容返回 409。进程中断遗留的 processing 记录即使过期也拒绝自动重发，需核查原请求；超过 16 MiB 的响应不缓存重放。客户端请求幂等和扣费去重分别记录。

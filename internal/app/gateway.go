@@ -97,7 +97,12 @@ func ipMatches(addr netip.Addr, rules []string) bool {
 	}
 	return false
 }
-func (a *App) gatewayAuth(r *http.Request, spending bool) (*gatewayIdentity, error) {
+func (a *App) gatewayAuth(r *http.Request, spending bool) (identity *gatewayIdentity, authErr error) {
+	defer func() {
+		if authErr != nil {
+			a.recordIngressRejection(r, authErr)
+		}
+	}()
 	token := bearer(r)
 	gemini := strings.HasPrefix(r.URL.Path, "/v1beta/")
 	if r.URL.Query().Get("api_key") != "" || !gemini && r.URL.Query().Get("key") != "" {
@@ -1034,6 +1039,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			break
 		}
 		status := resp.StatusCode
+		a.recordUpstreamFailure(id, g, selected, r, in, path, status, started)
 		resp.Body.Close()
 		searchEndpointError := protocol == "alpha_search" && (status == 401 || status == 404 || status == 405)
 		if !searchEndpointError {

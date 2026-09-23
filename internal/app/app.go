@@ -47,6 +47,8 @@ type App struct {
 	workerDone       chan struct{}
 	planMu           sync.Mutex
 	instanceLost     atomic.Bool
+	ingressFailures  atomic.Uint64
+	ingressDropped   atomic.Uint64
 	gatewayMu        sync.Mutex
 	gatewayActive    map[string]int
 	gatewayWaiting   map[string]int
@@ -346,6 +348,7 @@ func (a *App) routes() {
 	a.modelRoutes()
 	a.quotaRoutes()
 	a.usageRoutes()
+	a.operationalRoutes()
 	a.route("GET /api/v1/admin/ops/concurrency", "admin", a.accountConcurrency)
 	a.route("GET /api/v1/admin/ops/user-concurrency", "admin", a.userConcurrency)
 }

@@ -107,7 +107,8 @@ func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
 	uid := current(r).ID
 	page, size := pagination(r)
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM ops_error_logs WHERE user_id=$1", uid).Scan(&total); err != nil {
+	const where = " FROM ops_error_logs WHERE user_id=$1 AND status_code>=400 AND error_phase NOT IN ('upstream','account_auth')"
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*)"+where, uid).Scan(&total); err != nil {
 		return err
 	}
 	const columns = "id,request_id,api_key_id,model,request_path,stream,error_phase,error_type,status_code,error_message,is_business_limited,duration_ms,created_at"
@@ -116,13 +117,13 @@ func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+" FROM ops_error_logs WHERE user_id=$1 AND id=$2)e", uid, id))
+		raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+where+" AND id=$2)e", uid, id))
 		if err != nil {
 			return err
 		}
 		return reply(w, raw)
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+" FROM ops_error_logs WHERE user_id=$1 ORDER BY id DESC LIMIT $2 OFFSET $3)e", uid, size, (page-1)*size)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+where+" ORDER BY id DESC LIMIT $2 OFFSET $3)e", uid, size, (page-1)*size)
 	if err != nil {
 		return err
 	}
