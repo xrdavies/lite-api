@@ -290,6 +290,13 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	must("POST", upath+"/balance", admin, map[string]any{"operation": "set", "balance": 100})
 	done = begin("account", aid)
 	must("PUT", upath, admin, map[string]any{"rpm_limit": 1})
+	// Seed the consumed window explicitly; earlier successful requests may be
+	// in the previous minute when this suite crosses a clock boundary.
+	for minute := time.Now().Unix() / 60; minute <= time.Now().Unix()/60+1; minute++ {
+		if err := a.Redis.Set(t.Context(), fmt.Sprintf("gateway:rpm:u:%d:%d", uid, minute), 1, 2*time.Minute).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	finish(done, "account", aid, 429)
 	must("PUT", upath, admin, map[string]any{"rpm_limit": 0})
 	done = begin("account", aid)
