@@ -115,7 +115,11 @@ alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token u
 
 Grok 独立搜索每次成功按 `search_price_per_1k / 1000` 乘用户专属/分组倍率结算，不叠加响应中的 token 用量。管理员在分组创建/更新中配置该字段：默认 5 USD/千次，0 免费，负数清除，省略/null 保留；默认值同样是固定兼容规则。消费模型分别为 `grok-web-search`、`grok-x-search`，实际请求/上游/响应模型另行记录。权限、模型许可、渠道限制、额度、排队、RPM、幂等及失败结算恢复共用网关；web/X 幂等相互独立，同类根路径别名共享重放。上游 401/402/403/429/5xx 最多尝试四个不同账号，网络结果不明不重发。当前由本地协议服务和真实数据库测试验证，尚无 Grok 原厂搜索实测。
 
-`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 代理 token 计数。账号需配置 Anthropic 协议；按量兼容平台可使用 `credentials.api_protocol=anthropic`。版本和 beta 协议头受长度限制后转发，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
+`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 代理 token 计数。原生转发及 token 计数要求 Anthropic 协议；按量兼容平台可使用 `credentials.api_protocol=anthropic`。版本和 beta 协议头受长度限制后转发，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
+
+Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；`count_tokens` 仍要求原生计数账号。
+
+该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。
 
 Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（SSE）和 `:countTokens`，模型映射同时应用于 URL 与嵌套 token 计数请求。输出 token 包含思考 token，缓存 token 从普通输入中拆分；原生流保持 Gemini 事件形态，不添加 Chat 的 `[DONE]`。当前原生端点支持文本生成及其多模态输入，媒体生成输出和协议转换继续开发。
 

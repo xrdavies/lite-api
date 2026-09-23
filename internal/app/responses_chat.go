@@ -554,6 +554,7 @@ type chatResponsesStream struct {
 	Created                                 int64
 	Sequence, Size                          int
 	Started                                 bool
+	Quiet                                   bool
 	Parts                                   []*chatResponsePart
 	Tools                                   map[int]int
 	TextIndex, ReasoningIndex, RefusalIndex int
@@ -570,6 +571,9 @@ func newChatResponsesStream(model string, custom map[string]bool) *chatResponses
 }
 
 func (s *chatResponsesStream) emit(kind string, fields map[string]any) string {
+	if s.Quiet {
+		return ""
+	}
 	fields["type"], fields["sequence_number"] = kind, s.Sequence
 	s.Sequence++
 	raw, _ := json.Marshal(fields)
