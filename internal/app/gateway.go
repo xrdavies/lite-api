@@ -492,7 +492,7 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
 	}
-	for _, path := range []string{"/v1/images/generations", "/images/generations", "/backend-api/codex/images/generations"} {
+	for _, path := range []string{"/v1/images/generations", "/images/generations", "/backend-api/codex/images/generations", "/v1/images/edits", "/images/edits", "/backend-api/codex/images/edits"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "images") })
 	}
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
@@ -545,15 +545,24 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
+	bodyLimit := int64(4 << 20)
+	if protocol == "images" {
+		bodyLimit = 32 << 20
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		fail(bad("request body exceeds limit or could not be read"))
 		return
 	}
 	var request map[string]json.RawMessage
-	if json.Unmarshal(body, &request) != nil || request == nil {
-		fail(bad("JSON object required"))
+	if protocol == "images" && strings.HasSuffix(r.URL.Path, "/edits") && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		request, err = parseImageMultipart(body, r.Header.Get("Content-Type"))
+	} else {
+		err = json.Unmarshal(body, &request)
+	}
+	if err != nil || request == nil {
+		fail(bad("JSON object or image edit multipart form required"))
 		return
 	}
 	in, err := parseTextRequest(r, protocol, request)

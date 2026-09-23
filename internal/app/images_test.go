@@ -5,12 +5,62 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+func TestImageEditRequestParsing(t *testing.T) {
+	jsonBody := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(`{"model":"image-edit","prompt":"replace","images":[{"image_url":{"url":"data:image/png;base64,AA=="}}]}`), &jsonBody); err != nil {
+		t.Fatal(err)
+	}
+	in, err := parseTextRequest(httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil), "images", jsonBody)
+	if err != nil || in.Action != "edits" || in.Scope != "images.edits" {
+		t.Fatalf("json edit parse: %#v %v", in, err)
+	}
+	if path, err := in.upstreamPath("image-edit"); err != nil || path != "/v1/images/edits" {
+		t.Fatalf("edit upstream path: %q %v", path, err)
+	}
+
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	_ = form.WriteField("model", "image-edit")
+	_ = form.WriteField("prompt", "replace")
+	part, err := form.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="image"; filename="source.png"`},
+		"Content-Type":        {"image/png"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part.Write([]byte("png-bytes"))
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	multipartBody, err := parseImageMultipart(body.Bytes(), form.FormDataContentType())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err = parseTextRequest(httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil), "images", multipartBody)
+	if err != nil || in.Action != "edits" {
+		t.Fatalf("multipart edit parse: %#v %v", in, err)
+	}
+	for _, raw := range []string{
+		`{"model":"image-edit","prompt":"x","images":[{"file_id":"file_1"}]}`,
+		`{"model":"image-edit","prompt":"x","images":[]}`,
+	} {
+		var invalid map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &invalid)
+		if _, err := parseTextRequest(httptest.NewRequest(http.MethodPost, "/v1/images/edits", nil), "images", invalid); err == nil {
+			t.Fatalf("invalid edit accepted: %s", raw)
+		}
+	}
+}
 
 func testImages(t *testing.T, a *App, admin string) {
 	t.Helper()
@@ -54,7 +104,7 @@ func testImages(t *testing.T, a *App, admin string) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.URL.Path != "/v1/images/generations" || r.Header.Get("Authorization") != "Bearer image-upstream" || r.Header.Get("Cookie") != "" {
+		if r.URL.Path != "/v1/images/generations" && r.URL.Path != "/v1/images/edits" || r.Header.Get("Authorization") != "Bearer image-upstream" || r.Header.Get("Cookie") != "" {
 			t.Errorf("image upstream isolation: path=%s auth=%q cookie=%q", r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("Cookie"))
 		}
 		var body struct {
@@ -63,7 +113,7 @@ func testImages(t *testing.T, a *App, admin string) {
 			N      int    `json:"n"`
 		}
 		raw, decodeErr := io.ReadAll(r.Body)
-		if json.Unmarshal(raw, &body) != nil || decodeErr != nil || body.Model != "upstream-image" || body.Prompt != "draw a small lighthouse" || body.N != 2 {
+		if json.Unmarshal(raw, &body) != nil || decodeErr != nil || body.Model != "upstream-image" || (r.URL.Path == "/v1/images/generations" && (body.Prompt != "draw a small lighthouse" || body.N != 2)) || (r.URL.Path == "/v1/images/edits" && body.Prompt != "replace the sky") {
 			t.Errorf("image request changed: %+v raw=%s err=%v", body, raw, decodeErr)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -99,19 +149,49 @@ func testImages(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE model='client-image'").Scan(&logged); err != nil || logged != 1 {
 		t.Fatal("image duplicate billing", logged, err)
 	}
+	editBody := map[string]any{"model": "client-image", "prompt": "replace the sky", "images": []any{map[string]any{"url": "https://example.test/source.png"}}}
+	edit := call("/v1/images/edits", key, editBody, "image-edit")
+	if edit.Code != http.StatusOK || !strings.Contains(edit.Body.String(), `"b64_json":"one"`) || calls.Load() != 2 {
+		t.Fatalf("json image edit failed: %d %s calls=%d", edit.Code, edit.Body.String(), calls.Load())
+	}
+	var form bytes.Buffer
+	mw := multipart.NewWriter(&form)
+	_ = mw.WriteField("model", "client-image")
+	_ = mw.WriteField("prompt", "replace the sky")
+	part, err := mw.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="image"; filename="source.png"`}, "Content-Type": {"image/png"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("source-bytes"))
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	multipartRequest := httptest.NewRequest(http.MethodPost, "/images/edits", bytes.NewReader(form.Bytes()))
+	multipartRequest.Header.Set("Content-Type", mw.FormDataContentType())
+	multipartRequest.Header.Set("Authorization", "Bearer "+key)
+	multipartRequest.Header.Set("Idempotency-Key", "image-edit-multipart")
+	multipartRequest.RemoteAddr = "192.0.2.88:1234"
+	multipartResponse := httptest.NewRecorder()
+	a.Handler().ServeHTTP(multipartResponse, multipartRequest)
+	if multipartResponse.Code != http.StatusOK || !strings.Contains(multipartResponse.Body.String(), `"b64_json":"one"`) || calls.Load() != 3 {
+		t.Fatalf("multipart image edit failed: %d %s calls=%d", multipartResponse.Code, multipartResponse.Body.String(), calls.Load())
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE model='client-image'").Scan(&logged); err != nil || logged != 3 {
+		t.Fatal("image edit settlement count", logged, err)
+	}
 	for _, invalid := range []map[string]any{
 		{"model": "client-image", "prompt": "", "n": 1},
 		{"model": "client-image", "prompt": "draw", "n": 0},
 		{"model": "client-image", "prompt": "draw", "n": 11},
 		{"model": "client-image", "prompt": "draw", "response_format": "xml"},
 	} {
-		if w := call("/v1/images/generations", key, invalid, ""); w.Code != http.StatusBadRequest || calls.Load() != 1 {
+		if w := call("/v1/images/generations", key, invalid, ""); w.Code != http.StatusBadRequest || calls.Load() != 3 {
 			t.Fatalf("invalid image request dispatched: %#v -> %d %s", invalid, w.Code, w.Body.String())
 		}
 	}
 	deniedGroup := int64(manage("/api/v1/admin/groups", admin, map[string]any{"name": "Images disabled", "platform": "openai"})["id"].(float64))
 	deniedKey := manage("/api/v1/keys", token, map[string]any{"name": "Disabled image key", "group_id": deniedGroup})["key"].(string)
-	if w := call("/v1/images/generations", deniedKey, body, ""); w.Code != http.StatusForbidden || calls.Load() != 1 {
+	if w := call("/v1/images/generations", deniedKey, body, ""); w.Code != http.StatusForbidden || calls.Load() != 3 {
 		t.Fatalf("disabled image group accepted: %d %s", w.Code, w.Body.String())
 	}
 }

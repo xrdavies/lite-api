@@ -1,8 +1,14 @@
 package app
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,11 +44,12 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	in := textRequest{Protocol: protocol, Headers: http.Header{}}
 	if protocol == "images" {
 		if strings.HasSuffix(r.URL.Path, "/generations") {
-			in.Action = "generations"
+			in.Action, in.Scope = "generations", "images.generations"
+		} else if strings.HasSuffix(r.URL.Path, "/edits") {
+			in.Action, in.Scope = "edits", "images.edits"
 		} else {
-			return in, bad("image edits require multipart form data")
+			return in, missing()
 		}
-		in.Scope = "images.generations"
 		if json.Unmarshal(body["model"], &in.Model) != nil || !validModelPattern(in.Model) || strings.Contains(in.Model, "*") {
 			return in, bad("invalid model")
 		}
@@ -64,6 +71,31 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 		}
 		if raw := body["stream"]; raw != nil && string(raw) != "false" {
 			return in, bad("image generation does not stream")
+		}
+		if in.Action == "edits" {
+			var images []json.RawMessage
+			if json.Unmarshal(body["images"], &images) != nil || len(images) == 0 || len(images) > 10 {
+				return in, bad("image edits require between 1 and 10 images")
+			}
+			for _, raw := range images {
+				var image struct {
+					URL      string `json:"url"`
+					ImageURL struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+					FileID string `json:"file_id"`
+				}
+				if json.Unmarshal(raw, &image) != nil || image.FileID != "" {
+					return in, bad("image edits require image URLs or data URLs")
+				}
+				imageURL := image.URL
+				if imageURL == "" {
+					imageURL = image.ImageURL.URL
+				}
+				if !validImageSource(imageURL) {
+					return in, bad("invalid image edit source")
+				}
+			}
 		}
 		return in, nil
 	}
@@ -230,7 +262,7 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 	case "embeddings":
 		return "/v1/embeddings", nil
 	case "images":
-		return "/v1/images/generations", nil
+		return "/v1/images/" + in.Action, nil
 	case "anthropic":
 		if in.CountOnly {
 			return "/v1/messages/count_tokens", nil
@@ -249,6 +281,68 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 	default:
 		return "/v1/chat/completions", nil
 	}
+}
+
+func validImageSource(raw string) bool {
+	if len(raw) == 0 || len(raw) > 16<<20 || strings.ContainsAny(raw, "\r\n\x00") {
+		return false
+	}
+	if strings.HasPrefix(raw, "data:image/") {
+		return strings.Contains(raw, ";base64,")
+	}
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Hostname() != ""
+}
+
+// parseImageMultipart converts the OpenAI edit form into the same JSON shape as
+// the JSON endpoint. The upstream only receives normalized data URLs.
+func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMessage, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		return nil, bad("invalid image edit multipart form")
+	}
+	form := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+	out := map[string]json.RawMessage{}
+	var images []map[string]any
+	for {
+		part, err := form.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, bad("invalid image edit multipart form")
+		}
+		data, readErr := io.ReadAll(io.LimitReader(part, 8<<20+1))
+		_ = part.Close()
+		if readErr != nil || len(data) > 8<<20 {
+			return nil, bad("image edit file is too large")
+		}
+		name := part.FormName()
+		if part.FileName() != "" && (name == "image" || strings.HasPrefix(name, "image[")) {
+			content := part.Header.Get("Content-Type")
+			if !strings.HasPrefix(content, "image/") {
+				return nil, bad("image edit file must be an image")
+			}
+			images = append(images, map[string]any{"url": "data:" + content + ";base64," + base64.StdEncoding.EncodeToString(data)})
+			continue
+		}
+		value := strings.TrimSpace(string(data))
+		switch name {
+		case "model", "prompt", "response_format":
+			out[name] = json.RawMessage(fmt.Sprintf("%q", value))
+		case "n":
+			out[name] = json.RawMessage(value)
+		case "image":
+			if value != "" && validImageSource(value) {
+				images = append(images, map[string]any{"url": value})
+			}
+		}
+	}
+	if len(images) == 0 {
+		return nil, bad("image edits require an image file")
+	}
+	out["images"], _ = json.Marshal(images)
+	return out, nil
 }
 
 func (in textRequest) preflightUsage() priceUsage {
