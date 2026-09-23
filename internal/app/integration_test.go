@@ -245,6 +245,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testGateway(t, a, admin)
 	testNativeGateway(t, a, admin)
 	testEmbeddings(t, a, admin)
+	testImages(t, a, admin)
 	testResponses(t, a, admin)
 	testModelDiscovery(t, a, admin)
 	testModelPlaza(t, a, admin)

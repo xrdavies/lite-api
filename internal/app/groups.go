@@ -38,6 +38,7 @@ type groupInput struct {
 	FallbackGroupID  *int64               `json:"fallback_group_id"`
 	WebSearchPrice   *json.Number         `json:"web_search_price_per_call"`
 	SearchPrice      *json.Number         `json:"search_price_per_1k"`
+	AllowImage       *bool                `json:"allow_image_generation"`
 }
 
 type modelManifestConfig struct {
@@ -228,6 +229,7 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	codeOnly := in.ClaudeCodeOnly != nil && *in.ClaudeCodeOnly
+	allowImage := in.AllowImage != nil && *in.AllowImage
 	var searchPrice any
 	var searchPricePerThousand any
 	if in.SearchPrice != nil && rat(*in.SearchPrice).Sign() >= 0 {
@@ -236,7 +238,7 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if in.WebSearchPrice != nil && rat(*in.WebSearchPrice).Sign() >= 0 {
 		searchPrice = in.WebSearchPrice.String()
 	}
-	raw, err := jsonRow(tx.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings,claude_code_only,fallback_group_id,web_search_price_per_call,search_price_per_1k) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,CASE WHEN $19::bigint>0 THEN $19 ELSE NULL END,$20,$21) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings, codeOnly, in.FallbackGroupID, searchPrice, searchPricePerThousand))
+	raw, err := jsonRow(tx.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings,claude_code_only,fallback_group_id,web_search_price_per_call,search_price_per_1k,allow_image_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,CASE WHEN $19::bigint>0 THEN $19 ELSE NULL END,$20,$21,$22) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings, codeOnly, in.FallbackGroupID, searchPrice, searchPricePerThousand, allowImage))
 	if err != nil {
 		return err
 	}
@@ -283,6 +285,9 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 			price = in.SearchPrice.String()
 		}
 		add("search_price_per_1k", price)
+	}
+	if in.AllowImage != nil {
+		add("allow_image_generation", *in.AllowImage)
 	}
 	if in.ClaudeCodeOnly != nil {
 		add("claude_code_only", *in.ClaudeCodeOnly)

@@ -43,6 +43,7 @@ type gatewayGroup struct {
 	FallbackGroupID *int64              `json:"fallback_group_id"`
 	WebSearchPrice  *json.Number        `json:"web_search_price_per_call"`
 	SearchPrice     *json.Number        `json:"search_price_per_1k"`
+	AllowImage      bool                `json:"allow_image_generation"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -383,6 +384,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "alpha_search" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
+		if protocol == "images" {
+			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+		}
 		if grokSearchProtocol(protocol) {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
@@ -488,6 +492,9 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
 	}
+	for _, path := range []string{"/v1/images/generations", "/images/generations", "/backend-api/codex/images/generations"} {
+		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "images") })
+	}
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
 		a.mux.HandleFunc("GET "+path, a.responsesWebSocket)
 		for _, suffix := range []string{"", "/{action...}"} {
@@ -588,6 +595,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(&apiError{404, "this endpoint requires an OpenAI group"})
 		return
 	}
+	if protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "composite" {
+		fail(&apiError{404, "this endpoint requires an OpenAI group"})
+		return
+	}
+	if protocol == "images" && !g.Group.AllowImage {
+		fail(denied())
+		return
+	}
 	if !g.Group.allows(model) {
 		fail(denied())
 		return
@@ -663,12 +678,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 	}
-	if protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search") && g.Group.Platform != "openai" {
+	if protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search" || protocol == "images") && g.Group.Platform != "openai" {
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
 	if in.Search != nil && g.Group.Platform != "grok" {
 		fail(bad("this endpoint requires a Grok group"))
+		return
+	}
+	if protocol == "images" && !g.Group.AllowImage {
+		fail(denied())
 		return
 	}
 	if socketTurn(ctx) != nil && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
@@ -680,7 +699,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" && in.Search == nil {
+	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" && protocol != "images" && in.Search == nil {
 		if err = g.Group.reasoningPolicy.apply(request, model, g.Group.Platform); err == nil {
 			effort, err = requestEffort(request, protocol)
 		}

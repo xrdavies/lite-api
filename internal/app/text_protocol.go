@@ -28,11 +28,45 @@ func (in textRequest) compositeEndpoint() string {
 		}
 		return "messages"
 	}
+	if in.Protocol == "images" {
+		return "images"
+	}
 	return in.Protocol
 }
 
 func parseTextRequest(r *http.Request, protocol string, body map[string]json.RawMessage) (textRequest, error) {
 	in := textRequest{Protocol: protocol, Headers: http.Header{}}
+	if protocol == "images" {
+		if strings.HasSuffix(r.URL.Path, "/generations") {
+			in.Action = "generations"
+		} else {
+			return in, bad("image edits require multipart form data")
+		}
+		in.Scope = "images.generations"
+		if json.Unmarshal(body["model"], &in.Model) != nil || !validModelPattern(in.Model) || strings.Contains(in.Model, "*") {
+			return in, bad("invalid model")
+		}
+		var prompt string
+		if json.Unmarshal(body["prompt"], &prompt) != nil || strings.TrimSpace(prompt) == "" || len([]rune(prompt)) > 10000 {
+			return in, bad("prompt is required and must be at most 10000 characters")
+		}
+		if raw := body["n"]; raw != nil {
+			var n int
+			if json.Unmarshal(raw, &n) != nil || n < 1 || n > 10 {
+				return in, bad("n must be between 1 and 10")
+			}
+		}
+		if raw := body["response_format"]; raw != nil {
+			var format string
+			if json.Unmarshal(raw, &format) != nil || format != "b64_json" && format != "url" {
+				return in, bad("invalid image response_format")
+			}
+		}
+		if raw := body["stream"]; raw != nil && string(raw) != "false" {
+			return in, bad("image generation does not stream")
+		}
+		return in, nil
+	}
 	if grokSearchProtocol(protocol) {
 		var err error
 		in.Search, err = parseGrokSearch(body)
@@ -195,6 +229,8 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 		return "/v1/responses" + in.Action, nil
 	case "embeddings":
 		return "/v1/embeddings", nil
+	case "images":
+		return "/v1/images/generations", nil
 	case "anthropic":
 		if in.CountOnly {
 			return "/v1/messages/count_tokens", nil
@@ -216,6 +252,9 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 }
 
 func (in textRequest) preflightUsage() priceUsage {
+	if in.Protocol == "images" {
+		return priceUsage{Requests: 1}
+	}
 	if in.Protocol == "embeddings" {
 		return priceUsage{Input: 1}
 	}
@@ -290,6 +329,24 @@ func (o *textObservation) complete() bool {
 }
 
 func (o *textObservation) observe(data []byte) error {
+	if o.Protocol == "images" {
+		var result struct {
+			Data  []json.RawMessage `json:"data"`
+			Error json.RawMessage   `json:"error"`
+		}
+		if json.Unmarshal(data, &result) != nil || len(result.Data) == 0 || len(result.Data) > 10 || result.Error != nil && string(result.Error) != "null" {
+			return &apiError{502, "upstream image response is invalid"}
+		}
+		for _, item := range result.Data {
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(item, &fields) != nil || fields == nil {
+				return &apiError{502, "upstream image result is invalid"}
+			}
+		}
+		o.Usage = priceUsage{Requests: int64(len(result.Data))}
+		o.HasUsage = true
+		return nil
+	}
 	if o.Protocol == "alpha_search" {
 		var result map[string]json.RawMessage
 		if json.Unmarshal(data, &result) != nil || result == nil || (result["error"] != nil && string(result["error"]) != "null") {
