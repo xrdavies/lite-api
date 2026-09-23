@@ -136,6 +136,11 @@ func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccou
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "lite-api/1")
+	for _, name := range []string{"Content-Type", "Accept"} {
+		if value := headers.Get(name); value != "" {
+			req.Header.Set(name, value)
+		}
+	}
 	key := credentialString(account.Credentials, "api_key")
 	if key != "" {
 		switch account.protocol() {

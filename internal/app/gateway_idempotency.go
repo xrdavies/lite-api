@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -93,9 +94,23 @@ func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gat
 		if stream && responseStatus.Int64 == 200 {
 			contentType = "text/event-stream"
 		}
+		response := []byte(body.String)
+		if operation == "tts" && responseStatus.Int64 == 200 {
+			var audio struct {
+				ContentType string
+				Body        []byte
+			}
+			if json.Unmarshal(response, &audio) != nil {
+				return nil, nil, false, conflict("stored audio response is invalid")
+			}
+			if _, err := audioResponseType("tts", audio.ContentType); err != nil {
+				return nil, nil, false, conflict("stored audio content type is invalid")
+			}
+			contentType, response = audio.ContentType, audio.Body
+		}
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(int(responseStatus.Int64))
-		_, err = w.Write([]byte(body.String))
+		_, err = w.Write(response)
 		return nil, nil, true, err
 	}
 	if err != sql.ErrNoRows {
@@ -120,6 +135,17 @@ func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gat
 		var response any
 		if !writer.oversized {
 			response = writer.body.String()
+			if operation == "tts" && code == 200 && writer.succeeded {
+				raw, err := json.Marshal(struct {
+					ContentType string
+					Body        []byte
+				}{writer.Header().Get("Content-Type"), writer.body.Bytes()})
+				if err == nil {
+					response = string(raw)
+				} else {
+					response = nil
+				}
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

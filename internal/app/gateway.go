@@ -28,6 +28,7 @@ type gatewayKey struct {
 	Blacklist []string    `json:"ip_blacklist"`
 }
 type gatewayGroup struct {
+	audioPrices
 	reasoningPolicy
 	ID              int64               `json:"id"`
 	Platform        string              `json:"platform"`
@@ -229,6 +230,7 @@ func (g *gatewayGroup) routingAccounts(model, platform string) []int64 {
 }
 
 type gatewaySelection struct {
+	Audio                                      string
 	Search                                     string
 	Account                                    *upstreamAccount
 	Rate                                       json.Number
@@ -250,6 +252,10 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 	protocol := in.Protocol
 	routing := g.dispatchGroup()
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
+	if audioProtocol(protocol) {
+		s.Audio = protocol
+		s.ChannelModel = protocol
+	}
 	if protocol == "alpha_search" || grokSearchProtocol(protocol) {
 		s.Search = protocol
 	}
@@ -395,13 +401,16 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "images" {
 			matches = (u.Platform == "openai" || u.Platform == "grok") && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
-		if grokSearchProtocol(protocol) {
+		if grokSearchProtocol(protocol) || audioProtocol(protocol) {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if !matches {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
+		if audioProtocol(protocol) {
+			mapped, err = protocol, nil
+		}
 		if err != nil {
 			continue
 		}
@@ -483,7 +492,7 @@ func gatewayError(w http.ResponseWriter, err error) {
 }
 func (a *App) gatewayRoutes() {
 	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
-	for _, protocol := range []string{"web_search", "x_search"} {
+	for _, protocol := range []string{"web_search", "x_search", "tts", "stt"} {
 		for _, prefix := range []string{"/v1/", "/"} {
 			a.mux.HandleFunc("POST "+prefix+protocol, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, protocol) })
 		}
@@ -561,7 +570,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	bodyLimit := int64(4 << 20)
-	if protocol == "images" {
+	if protocol == "images" || audioProtocol(protocol) {
 		bodyLimit = 32 << 20
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
@@ -571,19 +580,30 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	var request map[string]json.RawMessage
-	if protocol == "images" && strings.HasSuffix(r.URL.Path, "/edits") && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+	var audioIn *audioRequest
+	if audioProtocol(protocol) {
+		audioIn, err = parseAudioRequest(protocol, r.Header.Get("Content-Type"), body)
+		request = map[string]json.RawMessage{}
+	} else if protocol == "images" && strings.HasSuffix(r.URL.Path, "/edits") && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
 		request, err = parseImageMultipart(body, r.Header.Get("Content-Type"))
 	} else {
 		err = json.Unmarshal(body, &request)
 	}
 	if err != nil || request == nil {
-		fail(bad("JSON object or image edit multipart form required"))
+		if audioProtocol(protocol) {
+			fail(err)
+		} else {
+			fail(bad("JSON object or image edit multipart form required"))
+		}
 		return
 	}
 	in, err := parseTextRequest(r, protocol, request)
 	if err != nil {
 		fail(err)
 		return
+	}
+	if audioIn != nil && audioIn.Model != "" {
+		in.Model = audioIn.Model
 	}
 	r = r.WithContext(context.WithValue(r.Context(), clientPolicyKey{}, clientPolicy{protocol, claudeCodeClient(r, request)}))
 	ctx = r.Context()
@@ -611,6 +631,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 	}
+	if audioProtocol(protocol) && g.Group.Platform != "grok" {
+		fail(&apiError{404, "voice endpoints require a Grok group"})
+		return
+	}
 	if protocol == "gemini" && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
 		fail(bad("Gemini native endpoints require a Gemini group"))
 		return
@@ -633,6 +657,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	canonical, _ := json.Marshal(request)
 	payload := string(canonical)
+	if audioIn != nil {
+		payload = audioIn.ContentType + "\n" + string(audioIn.Body)
+	}
 	if protocol == "gemini" {
 		payload = model + "\n" + payload
 	} else if protocol == "anthropic" {
@@ -702,7 +729,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 	}
-	if protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search") && g.Group.Platform != "openai" || protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
+	if audioProtocol(protocol) && g.Group.Platform != "grok" || protocol == "gemini" && g.Group.Platform != "gemini" || (protocol == "embeddings" || protocol == "alpha_search") && g.Group.Platform != "openai" || protocol == "images" && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
@@ -723,7 +750,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" && protocol != "images" && in.Search == nil {
+	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" && protocol != "images" && in.Search == nil && audioIn == nil {
 		if err = g.Group.reasoningPolicy.apply(request, model, g.Group.Platform); err == nil {
 			effort, err = requestEffort(request, protocol)
 		}
@@ -770,6 +797,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	excluded := map[int64]bool{}
 	catalog := a.prices.Load()
 	var resp *http.Response
+	var upstreamStarted time.Time
 	wireIn := in
 	var chatBridge *responseChatStream
 	var messagesBridge *chatMessagesStream
@@ -782,7 +810,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var responsesBridge *chatResponsesStream
 	var chatRequest *responsesChatRequest
 	maxAttempts := 3
-	if in.Search != nil {
+	if in.Search != nil || audioIn != nil {
 		maxAttempts = 4
 	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -1010,7 +1038,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if in.Search != nil {
 			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)
 		}
-		if !in.CountOnly && selected.Search == "" {
+		if audioIn != nil {
+			upstreamBody = audioIn.Body
+			wireIn.Headers = audioIn.headers()
+			if _, err = selected.audioCost(g.Group, billingModel, "1", started); err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+		}
+		if !in.CountOnly && selected.Search == "" && audioIn == nil {
 			preflight, priceErr := selected.price(billingModel)
 			if priceErr == nil && preflight.BillingMode != "per_request" {
 				_, priceErr = calculatePrice(preflight, wireIn.preflightUsage(), g.Group.Rate, tier, wireIn.Effort, "", started, g.Group.LongContext)
@@ -1043,6 +1080,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			fail(err)
 			return
 		}
+		upstreamStarted = time.Now()
 		if turn := socketTurn(ctx); turn != nil {
 			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
 		} else {
@@ -1064,7 +1102,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"))
 		}
 		selected.Release()
-		grokRetry := in.Search != nil && (status == 401 || status == 402 || status == 403 || status >= 500)
+		grokRetry := (in.Search != nil || audioIn != nil) && (status == 401 || status == 402 || status == 403 || status >= 500)
 		if !searchEndpointError && !grokRetry && status != 429 && status != 502 && status != 503 && status != 504 {
 			fail(&apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
 			return
@@ -1081,18 +1119,36 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	observation := textObservation{Protocol: wireIn.Protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action}
 	upstreamID := resp.Header.Get("X-Request-ID")
 	if upstreamID == "" {
+		upstreamID = resp.Header.Get("Xai-Request-Id")
+	}
+	if upstreamID == "" {
 		upstreamID = resp.Header.Get("Request-Id")
 	}
 	firstToken := int64(0)
 	observe := observation.observe
 	var responseBody []byte
 	var forwardErr error
+	responseType := "application/json"
 	done := false
 	terminal := ""
 	if !stream {
 		responseBody, err = io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 		if err != nil || len(responseBody) > 16<<20 {
 			forwardErr = &apiError{502, "upstream response interrupted or oversized"}
+			// TTS input is already consumed when audio arrives. Losing the rest
+			// of the response cannot erase this known charge.
+			if audioIn != nil && protocol == "tts" && len(responseBody) > 0 {
+				if _, typeErr := audioResponseType(protocol, resp.Header.Get("Content-Type")); typeErr == nil {
+					observation.Usage, _ = audioIn.usage(protocol, responseBody, time.Since(upstreamStarted))
+					observation.HasUsage = true
+				}
+			}
+		} else if audioIn != nil {
+			responseType, forwardErr = audioResponseType(protocol, resp.Header.Get("Content-Type"))
+			if forwardErr == nil {
+				observation.Usage, forwardErr = audioIn.usage(protocol, responseBody, time.Since(upstreamStarted))
+				observation.HasUsage = forwardErr == nil
+			}
 		} else if in.Search != nil {
 			responseBody, observation.Model, forwardErr = in.Search.response(responseBody)
 			if forwardErr == nil {
@@ -1458,7 +1514,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		writer.succeeded = true
 	}
 	if !stream {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", responseType)
 		_, _ = w.Write(responseBody)
 	} else {
 		committed = true

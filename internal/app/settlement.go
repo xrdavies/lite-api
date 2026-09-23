@@ -49,7 +49,10 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	var p modelPrice
 	var cost priceCost
 	var err error
-	if s.Search != "" {
+	if s.Audio != "" {
+		p.BillingMode = "per_request"
+		cost, err = s.audioCost(g.Group, model, u.AudioUnits, at)
+	} else if s.Search != "" {
 		p.BillingMode = "per_request"
 		cost, err = g.Group.searchCost(s.Search)
 		if grokSearchProtocol(s.Search) {

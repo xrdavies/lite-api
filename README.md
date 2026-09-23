@@ -202,3 +202,16 @@ Gemini API Key 分组可启用 `allow_batch_image_generation`，通过 `POST /v1
 提交时将可用余额转入 `frozen_balance`；单价快照按 `image_price_1k`（缺省取每图价卡）、有效图片倍率、账号倍率以及 `batch_image_discount_multiplier` 计算，冻结使用 `batch_image_hold_multiplier`，后者不得小于折扣。结果按成功条目结算并释放差额，失败和确认取消释放全部冻结；余额变化、去重、用量和终态在同一事务中写入。批量账务沿用独立冻结语义，不再按同步调用累加 Key/账号消费计数。
 
 PostgreSQL 保存加密请求、任务、结果索引和冻结凭据。单实例每 15 秒顺序处理最多 32 个任务；提交结果不明时通过上游任务列表查找原任务，不盲目重发，不能确认时保留冻结等待核查。重启可继续轮询和结算，价格编辑不改变已接收任务。未派发任务失去权限或账号会取消并释放余额；已派发任务须保留原上游账号和凭证以便恢复。完成后结果保留 72 小时，由 worker 清理上游文件；零余额仍可读取结果。下载会核对持久索引中的身份、数量和 MIME，结果缺失或变化返回错误；ZIP 限制 256 MiB，超限使用单图下载。
+
+
+## Grok HTTP 语音
+
+`POST /v1/tts`、`POST /v1/stt` 及根路径 `/tts`、`/stt` 接入 Grok API Key 账号。TTS 转发 JSON 并返回原始音频字节和音频 Content-Type；STT 保留 multipart 的 boundary、重复 keyterm 和文件字节，选项必须放在 file 前，也允许兼容中转的 JSON `url` 请求。网关不下载输入音频 URL。客户端 JSON 重复字段会在派发前归一，歧义文本字段拒绝；模型白名单检查显式 model，没有 model 时检查 tts/stt。账号的文本模型映射不限制语音能力，音频请求中的 model 原样交给上游。
+
+复用 Key/JWT 隔离、IP/用户/分组权限、余额/Key/平台额度、并发排队、RPM、账号状态和有限失败切换；仅 Grok 分组提供这两个接口。请求上限 32 MiB，响应上限 16 MiB，单次调用上限五分钟；HTTP 音频完整接收、结算后返回，当前不提供 TTS/STT WebSocket。协议参考 [xAI TTS](https://docs.x.ai/developers/model-capabilities/audio/text-to-speech) 与 [xAI STT](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text)。
+
+管理员创建/更新分组可设置 `audio_tts_price_per_million_chars`、`audio_stt_price_per_hour`，支持原 DECIMAL(20,8) 精度：0 免费，负数清除覆盖，省略或 null 保持已有配置。默认兼容价分别为 15 USD/百万字符、0.10 USD/小时，属于固定计费基线，不代表上游当前报价。渠道/分组模型的 per_request 价卡适用时按音频连续计量单位计费，支持 tts/stt 档位；否则使用音频专用价格，再乘用户专属/分组倍率。TTS 沿用去除首尾空白后的 Unicode 字符数；STT 优先使用上游 duration、duration_seconds、audio_duration 或 usage.seconds，缺少时沿用本次上游请求耗时估算，绝不信任客户端自报时长。缺时长估算具有兼容性局限，应优先使用返回真实 duration 的上游。
+
+`Idempotency-Key` 在两个路径别名间共用；TTS 音频以 Base64 JSON 封装保存在原幂等记录，重放恢复原字节和 Content-Type，不重复派发或扣费。已接收到音频的 TTS 断流仍结算已知输入消费；结算失败返回 503，持久待结算记录可恢复，恢复和错误重放都不再次生成。音频调用记录 per_request 账务及端点，不伪造 token 用量。
+
+本功能以本地真实 HTTP 上游模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实 Grok 语音 Key 联调；Realtime、自定义声音和视频执行链继续开发。

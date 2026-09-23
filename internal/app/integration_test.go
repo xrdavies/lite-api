@@ -247,6 +247,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testEmbeddings(t, a, admin)
 	testImages(t, a, admin)
 	testGrokImages(t, a, admin)
+	testGrokAudio(t, a, admin)
 	testImageTasks(t, a, admin)
 	testBatchImages(t, a, admin)
 	testResponses(t, a, admin)

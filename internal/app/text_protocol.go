@@ -42,6 +42,10 @@ func (in textRequest) compositeEndpoint() string {
 
 func parseTextRequest(r *http.Request, protocol string, body map[string]json.RawMessage) (textRequest, error) {
 	in := textRequest{Protocol: protocol, Headers: http.Header{}}
+	if audioProtocol(protocol) {
+		in.Model, in.Scope = protocol, protocol
+		return in, nil
+	}
 	if protocol == "images" {
 		if strings.HasSuffix(r.URL.Path, "/generations") {
 			in.Action, in.Scope = "generations", "images.generations"
@@ -270,6 +274,8 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 		return "/v1/responses" + in.Action, nil
 	case "embeddings":
 		return "/v1/embeddings", nil
+	case "tts", "stt":
+		return "/v1/" + in.Protocol, nil
 	case "images":
 		return "/v1/images/" + in.Action, nil
 	case "anthropic":

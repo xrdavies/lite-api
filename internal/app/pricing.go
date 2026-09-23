@@ -326,6 +326,7 @@ func (p *timePrice) multiplierAt(at time.Time) *big.Rat {
 
 // Context includes cached input. Output does not move a request into a higher tier.
 type priceUsage struct {
+	AudioUnits                                                       string
 	Input, Output, CacheWrite, CacheWrite5m, CacheWrite1h, CacheRead int64
 	ImageInput, ImageOutput                                          int64
 	Requests                                                         int64
@@ -420,7 +421,15 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 		if count == 0 {
 			count = 1
 		}
-		total.Mul(rat(*selected), big.NewRat(count, 1))
+		units := big.NewRat(count, 1)
+		if u.AudioUnits != "" {
+			var ok bool
+			units, ok = new(big.Rat).SetString(u.AudioUnits)
+			if !ok || units.Sign() < 0 {
+				return empty, bad("invalid audio usage units")
+			}
+		}
+		total.Mul(rat(*selected), units)
 		total.Mul(total, multiplier)
 	} else {
 		if !longContext {
