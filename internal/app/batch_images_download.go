@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,6 +59,60 @@ func (a *App) batchDownloadAccount(r *http.Request, g *gatewayIdentity) (batchIm
 	u, err := a.batchAccount(r.Context(), j, snap)
 	return j, u, err
 }
+
+// Downloads use the persisted index, so changed or missing provider images cannot
+// turn a settled result into a successful but incomplete response.
+func (a *App) readIndexedBatchOutput(ctx context.Context, j batchImageJob, u *upstreamAccount, visit func(int, batchImageResult) error) error {
+	rows, err := a.DB.QueryContext(ctx, "SELECT custom_id,image_count,COALESCE(mime_type,'') FROM batch_image_items WHERE job_id=$1 ORDER BY id", j.ID)
+	if err != nil {
+		return err
+	}
+	type indexed struct {
+		count, sequence int
+		mime            string
+	}
+	expected := map[string]indexed{}
+	sequence := 0
+	for rows.Next() {
+		var id string
+		var item indexed
+		if err = rows.Scan(&id, &item.count, &item.mime); err != nil {
+			rows.Close()
+			return err
+		}
+		if item.count > 0 {
+			sequence++
+			item.sequence = sequence
+		}
+		expected[id] = item
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	if err = a.readBatchOutput(ctx, u, j.Output, func(item batchImageResult) error {
+		stored, ok := expected[item.ID]
+		if !ok || seen[item.ID] || item.Count != stored.count || item.Count > 0 && item.MIME != stored.mime {
+			return &apiError{502, "provider batch results changed"}
+		}
+		seen[item.ID] = true
+		if item.Count > 0 {
+			return visit(stored.sequence, item)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for id, item := range expected {
+		if item.count > 0 && !seen[id] {
+			return &apiError{502, "batch download results are incomplete"}
+		}
+	}
+	return nil
+}
+
 func (a *App) batchImageContent(w http.ResponseWriter, r *http.Request, g *gatewayIdentity) error {
 	if !a.takeSlot("batch-download", g.UserID, 1) {
 		return &apiError{429, "another batch download is in progress"}
@@ -86,14 +141,8 @@ func (a *App) batchImageContent(w http.ResponseWriter, r *http.Request, g *gatew
 		return missing()
 	}
 	var data []byte
-	err = a.readBatchOutput(r.Context(), u, j.Output, func(item batchImageResult) error {
+	err = a.readIndexedBatchOutput(r.Context(), j, u, func(_ int, item batchImageResult) error {
 		if item.ID == id {
-			if index >= len(item.Images) {
-				return &apiError{502, "provider image result changed"}
-			}
-			if data != nil {
-				return &apiError{502, "duplicate batch result"}
-			}
 			data = item.Images[index]
 		}
 		return nil
@@ -128,35 +177,8 @@ func (a *App) downloadBatchImages(w http.ResponseWriter, r *http.Request, g *gat
 	defer os.Remove(file.Name())
 	defer file.Close()
 	archive := zip.NewWriter(file)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT custom_id FROM batch_image_items WHERE job_id=$1 AND status='success' ORDER BY id", j.ID)
-	if err != nil {
-		return err
-	}
-	expected := map[string]int{}
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		expected[id] = len(expected) + 1
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	seen := map[string]bool{}
 	var total int64
-	err = a.readBatchOutput(r.Context(), u, j.Output, func(item batchImageResult) error {
-		sequence := expected[item.ID]
-		if sequence == 0 {
-			return nil
-		}
-		if seen[item.ID] {
-			return &apiError{502, "duplicate batch result"}
-		}
-		seen[item.ID] = true
+	err = a.readIndexedBatchOutput(r.Context(), j, u, func(sequence int, item batchImageResult) error {
 		for i, data := range item.Images {
 			total += int64(len(data))
 			if total > 256<<20 {
@@ -176,10 +198,6 @@ func (a *App) downloadBatchImages(w http.ResponseWriter, r *http.Request, g *gat
 	if err != nil {
 		archive.Close()
 		return err
-	}
-	if len(seen) != len(expected) {
-		archive.Close()
-		return &apiError{502, "batch download results are incomplete"}
 	}
 	if err = archive.Close(); err != nil {
 		return err

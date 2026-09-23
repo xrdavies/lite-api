@@ -97,6 +97,12 @@ func (a *App) processBatchImage(ctx context.Context, id string) error {
 	}
 	u, err := a.batchAccount(ctx, j, snap)
 	if err != nil {
+		// No billable provider job exists in created state. Revoked credentials
+		// or a deleted account must not strand its unused balance hold.
+		var api *apiError
+		if j.Status == "created" && (errors.Is(err, sql.ErrNoRows) || errors.As(err, &api) && api.status >= 400 && api.status < 500) {
+			return a.failBatchImage(ctx, id, "cancelled", "ACCOUNT_UNAVAILABLE")
+		}
 		return err
 	}
 	if batchTerminal(j.Status) {
@@ -146,7 +152,7 @@ func (a *App) processBatchImage(ctx context.Context, id string) error {
 		if err = a.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM groups g JOIN account_groups ag ON ag.group_id=g.id JOIN accounts a ON a.id=ag.account_id WHERE g.id=$1 AND ag.account_id=$2 AND g.allow_batch_image_generation AND g.platform='gemini' AND g.status='active' AND g.deleted_at IS NULL AND a.status='active' AND a.schedulable AND a.deleted_at IS NULL AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now()) AND (a.overload_until IS NULL OR a.overload_until<=now()) AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now()))`, snap.GroupID, j.AccountID).Scan(&allowed); err != nil {
 			return err
 		}
-		if !g.Group.allows(j.Model) || !allowed {
+		if !g.Group.allows(j.Model) || !allowed || !accountQuotaAvailable(u.Extra, time.Now()) {
 			return a.failBatchImage(ctx, id, "cancelled", "RESOURCE_UNAVAILABLE")
 		}
 		data, err := snap.Request.jsonl()
@@ -258,7 +264,7 @@ func (a *App) failBatchImage(ctx context.Context, id, status, code string) error
 	if err = batchBalance(ctx, tx, j, "release", "0", j.Hash); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE batch_image_jobs SET status=$2,actual_cost=0,cancelled_count=CASE WHEN $2='cancelled' THEN item_count ELSE 0 END,fail_count=CASE WHEN $2='failed' THEN item_count ELSE 0 END,finished_at=now(),settled_at=now(),output_expires_at=now()+interval '72 hours',last_error_code=$3,updated_at=now(),version=version+1 WHERE batch_id=$1", id, status, code)
+	_, err = tx.ExecContext(ctx, "UPDATE batch_image_jobs SET status=$2::varchar,actual_cost=0,cancelled_count=CASE WHEN $2::varchar='cancelled' THEN item_count ELSE 0 END,fail_count=CASE WHEN $2::varchar='failed' THEN item_count ELSE 0 END,finished_at=now(),settled_at=now(),output_expires_at=now()+interval '72 hours',last_error_code=$3,updated_at=now(),version=version+1 WHERE batch_id=$1", id, status, code)
 	if err != nil {
 		return err
 	}

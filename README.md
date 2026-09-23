@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI 兼容图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务接口；批量任务、其他媒体、托管工具及扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI 兼容图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 批量图片任务；其他媒体、托管工具及扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -191,3 +191,14 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-integration.py
 数据库定义位于 `schema/baseline.sql`，固定来源及校验和位于 `schema/source.json`。新库省略两张插件表及其专属对象，其余业务表保留原结构和含义。`schema/contract.json` 固定表列、约束、索引、函数、触发器和序列定义；结构改变会拒绝启动。确需变更基线时，审核 SQL 后以 `scripts/check-schema.py --write-contract` 重新生成契约。正常运行不依赖其他项目目录。
 
 `reserve/` 是被 Git 忽略的本地规划目录。来源版权及许可证见 `NOTICE`、`LICENSE`、`COPYING`。
+
+
+## 批量图片任务
+
+Gemini API Key 分组可启用 `allow_batch_image_generation`，通过 `POST /v1/images/batches` 提交 `model`、`items`（`custom_id`、`prompt`、可选 `output_count` 和 `reference_images`）。当前支持 1K PNG，每项输出 1–4 张，展开后最多 200 项；支持原厂或兼容中转的原生批量接口，不使用 Vertex 身份。上游文件和任务协议依据 [Gemini Batch API](https://ai.google.dev/gemini-api/docs/batch-api)，本地 HTTP 模拟与 Docker 数据库已验证，尚未使用真实批量图片凭证联调。
+
+同一路径 GET 列出任务，`/models` 列出候选模型；`/{id}` 查询或 DELETE 隐藏终态记录，`/{id}/items` 查询条目，POST `/{id}/cancel` 请求取消，GET `/{id}/items/{custom_id}/content` 下载单图，GET `/{id}/download` 下载 ZIP，DELETE `/{id}/outputs` 删除上游结果。同一 Key 的 `Idempotency-Key` 重放原任务，改变请求返回 409；跨 Key 或用登录令牌访问拒绝。列表支持 `limit` 和数值 `cursor` 偏移，条目支持状态筛选。
+
+提交时将可用余额转入 `frozen_balance`；单价快照按 `image_price_1k`（缺省取每图价卡）、有效图片倍率、账号倍率以及 `batch_image_discount_multiplier` 计算，冻结使用 `batch_image_hold_multiplier`，后者不得小于折扣。结果按成功条目结算并释放差额，失败和确认取消释放全部冻结；余额变化、去重、用量和终态在同一事务中写入。批量账务沿用独立冻结语义，不再按同步调用累加 Key/账号消费计数。
+
+PostgreSQL 保存加密请求、任务、结果索引和冻结凭据。单实例每 15 秒顺序处理最多 32 个任务；提交结果不明时通过上游任务列表查找原任务，不盲目重发，不能确认时保留冻结等待核查。重启可继续轮询和结算，价格编辑不改变已接收任务。未派发任务失去权限或账号会取消并释放余额；已派发任务须保留原上游账号和凭证以便恢复。完成后结果保留 72 小时，由 worker 清理上游文件；零余额仍可读取结果。下载会核对持久索引中的身份、数量和 MIME，结果缺失或变化返回错误；ZIP 限制 256 MiB，超限使用单图下载。
