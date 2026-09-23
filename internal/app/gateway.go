@@ -371,6 +371,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "responses" && u.protocol() == "chat_completions" && chatResponsesPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
+		if protocol == "responses" && u.protocol() == "gemini" && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
+			matches = true
+		}
 		if protocol == "responses" && u.protocol() == "anthropic" && chatAnthropicPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
@@ -728,6 +731,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var chatBridge *responseChatStream
 	var messagesBridge *chatMessagesStream
 	var responsesMessages *responsesMessagesStream
+	var responsesGemini *responsesGeminiStream
 	var anthropicBridge *anthropicChatStream
 	var geminiBridge *geminiChatStream
 	var geminiMessages *geminiMessagesStream
@@ -814,6 +818,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		responsesBridge, chatRequest = nil, nil
 		messagesBridge = nil
 		responsesMessages = nil
+		responsesGemini = nil
 		if protocol == "anthropic" && selected.Account.protocol() == "gemini" {
 			upstreamBody, wireIn.Effort, err = messagesToGemini(request, reasoningInput, in.CountOnly)
 			if err == nil {
@@ -924,7 +929,26 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 			wireIn.Protocol = selected.Account.protocol()
 			path, _ = wireIn.upstreamPath(selected.UpstreamModel)
-			if wireIn.Protocol == "anthropic" {
+			if wireIn.Protocol == "gemini" {
+				var custom map[string]bool
+				upstreamBody, custom, wireIn.Effort, err = responsesGeminiRequest(chatRequest.Body)
+				if err != nil {
+					selected.Release()
+					fail(err)
+					return
+				}
+				wireIn.Action = "generateContent"
+				if stream {
+					wireIn.Action = "streamGenerateContent"
+				}
+				path, err = wireIn.upstreamPath(selected.UpstreamModel)
+				if err != nil {
+					selected.Release()
+					fail(err)
+					return
+				}
+				responsesGemini = newResponsesGeminiStream(model, custom)
+			} else if wireIn.Protocol == "anthropic" {
 				anthropicResponses = newAnthropicResponsesStream(model, chatRequest)
 			} else {
 				responsesBridge = newChatResponsesStream(model, chatRequest.Custom)
@@ -1061,6 +1085,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 					_, responseBody, forwardErr = geminiMessages.finish(observation.Usage)
 				}
 			}
+			if forwardErr == nil && responsesGemini != nil {
+				responseBody, forwardErr = responsesGemini.response(responseBody, observation.Usage)
+				observation.ResponseID = responsesGemini.Output.ID
+			}
 			if forwardErr == nil && anthropicResponses != nil {
 				responseBody, forwardErr = anthropicResponses.response(responseBody, observation.Usage)
 				observation.ResponseID = anthropicResponses.Output.ID
@@ -1156,6 +1184,26 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				if wire == "" {
 					return nil
 				}
+			}
+			if responsesGemini != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = responsesGemini.observe([]byte(data))
+				if err != nil {
+					return err
+				}
+				if wire == "" {
+					return nil
+				}
+			}
+			if responsesGemini != nil {
+				committed = true
+				if _, err := io.WriteString(w, wire); err != nil {
+					return err
+				}
+				return http.NewResponseController(w).Flush()
 			}
 			if messagesBridge != nil {
 				if data == "" {
@@ -1278,6 +1326,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			end, _, forwardErr = geminiMessages.finish(observation.Usage)
 			terminal += end
 		}
+		if forwardErr == nil && responsesGemini != nil {
+			var end string
+			end, _, forwardErr = responsesGemini.finish(observation.Usage)
+			terminal += end
+			observation.ResponseID = responsesGemini.Output.ID
+		}
 	}
 	if in.CountOnly {
 		// Token counts check eligibility but do not create consumption.
@@ -1326,7 +1380,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		} else if responsesBridge != nil {
 			err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesBridge.assistant()))
 		} else {
-			err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+			if responsesGemini != nil {
+				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
+			} else {
+				err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+			}
 		}
 		bindingCancel()
 		if err != nil {
