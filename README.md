@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和可用渠道查询。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket 和 alpha 独立搜索；协议转换、其他搜索、媒体、完整模型广场及扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索；其他协议转换、托管工具、媒体及扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -77,11 +77,15 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 客户端用自己创建的 Key 作为 Bearer 凭证调用 `POST /v1/chat/completions`，或兼容入口 `/chat/completions`、`/backend-api/codex/chat/completions`。Chat 入口选择同平台的 API Key 账号；Chat Completions 协议直接转发，OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Responses 协议账号可通过转换承接。网关检查用户/Key/分组权限、IP、到期、客户端模型白名单、余额、多层额度、RPM 和并发，按渠道及账号映射替换模型和上游凭证。
 
-Chat → Responses 转换支持 JSON/SSE、system/developer/user/assistant 消息、图片/文件输入、函数和自定义工具及结果、旧 functions/function_call、推理摘要、拒绝、结构化输出和服务等级。函数定义展开并默认显式 `strict=false`，`response_format` 映射为 `text.format`，`max_completion_tokens` 优先于 `max_tokens`，上游固定 `store=false`。字段映射依据 [OpenAI 迁移文档](https://developers.openai.com/api/docs/guides/migrate-to-responses)。没有等价映射的非默认控制（如多候选、stop、seed、logprobs）在派发前拒绝；原生 Chat 路径仍按原协议处理。托管工具计费、音频输出及反向 Responses → Chat 和其他协议转换继续开发。
+Chat → Responses 转换支持 JSON/SSE、system/developer/user/assistant 消息、图片/文件输入、函数和自定义工具及结果、旧 functions/function_call、推理摘要、拒绝、结构化输出和服务等级。函数定义展开并默认显式 `strict=false`，`response_format` 映射为 `text.format`，`max_completion_tokens` 优先于 `max_tokens`，上游固定 `store=false`。字段映射依据 [OpenAI 迁移文档](https://developers.openai.com/api/docs/guides/migrate-to-responses)。没有等价映射的非默认控制（如多候选、stop、seed、logprobs）在派发前拒绝；原生 Chat 路径仍按原协议处理。托管工具计费、音频输出和其他协议转换继续开发。
 
 转换输出保留客户端模型名，实际上游模型和 `/v1/responses` 单独写入用量；计价采用原分组/渠道快照与 Responses 实际 usage。SSE 保留增量文本、推理及工具参数，补齐只有终态出现的内容并避免重复；`incomplete` 映射为对应的 length/content_filter，失败或断流不伪造成功。只有结算成功才发送 finish_reason 和 `[DONE]`；usage 块由客户端 `stream_options.include_usage` 决定。三种 Chat 路径继续共享幂等重放，转换不会建立原生 Responses 的续接关联。此转换已通过本地协议服务和数据库验证，尚未新增真实上游转换联调。
 
-`POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，只选择配置 `credentials.api_protocol=responses` 的同平台账号。工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
+`POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
+
+OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、命名空间工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。
+
+转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 
 三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
 

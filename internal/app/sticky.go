@@ -209,7 +209,7 @@ func (a *App) bindSession(ctx context.Context, key string, u *upstreamAccount) e
 	if key == "" {
 		return nil
 	}
-	raw, _ := json.Marshal(responseBinding{u.ID, responseTarget(u)})
+	raw, _ := json.Marshal(responseBinding{AccountID: u.ID, Target: responseTarget(u)})
 	// ponytail: simultaneous first turns may choose different accounts; add a
 	// per-session queue only if serialized conversation dispatch is required.
 	if err := a.Redis.Set(ctx, key, raw, time.Hour).Err(); err != nil {

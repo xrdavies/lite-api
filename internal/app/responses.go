@@ -95,18 +95,38 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	}
 	// Hosted tools have separate charges and task lifecycles; accepting them before
 	// those meters exist would silently bill only their surrounding text tokens.
-	if raw := body["tools"]; raw != nil && string(raw) != "null" {
-		var tools []struct{ Type string }
-		if json.Unmarshal(raw, &tools) != nil {
-			return in, bad("invalid tools")
-		}
-		for _, tool := range tools {
-			if tool.Type != "function" && tool.Type != "custom" {
-				return in, bad("hosted tool billing is not yet available")
-			}
+	tools, err := responseClientTools(body)
+	if err != nil {
+		return in, err
+	}
+	for _, tool := range tools {
+		if kind := credentialString(tool, "type"); kind != "function" && kind != "custom" {
+			return in, bad("hosted tool billing is not yet available")
 		}
 	}
 	return in, nil
+}
+
+// Additional tools are subject to the same admission and billing rules as tools.
+func responseClientTools(body map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
+	var tools []map[string]json.RawMessage
+	if raw := body["tools"]; raw != nil && json.Unmarshal(raw, &tools) != nil {
+		return nil, bad("invalid tools")
+	}
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(body["input"], &items) == nil {
+		for _, item := range items {
+			if credentialString(item, "type") != "additional_tools" {
+				continue
+			}
+			var extra []map[string]json.RawMessage
+			if json.Unmarshal(item["tools"], &extra) != nil {
+				return nil, bad("invalid additional tools")
+			}
+			tools = append(tools, extra...)
+		}
+	}
+	return tools, nil
 }
 
 func validResponseID(id string) bool {
@@ -199,11 +219,12 @@ func (o *textObservation) observeResponses(data []byte) error {
 	return nil
 }
 
-// Bind only response metadata, never prompts. A missing/expired binding refuses
-// continuation instead of sending another tenant's ID to a shared upstream key.
+// Native responses bind only metadata; Chat conversions include encrypted history.
+// Missing/expired bindings refuse continuation across tenants or upstream sources.
 type responseBinding struct {
 	AccountID int64
 	Target    string
+	History   string `json:",omitempty"`
 }
 
 func responseBindingKey(g *gatewayIdentity, id string) string {
@@ -233,7 +254,11 @@ func (a *App) previousResponse(ctx context.Context, g *gatewayIdentity, id strin
 	return &binding, nil
 }
 func (a *App) bindResponse(ctx context.Context, g *gatewayIdentity, u *upstreamAccount, id string) error {
-	raw, _ := json.Marshal(responseBinding{u.ID, responseTarget(u)})
+	return a.storeResponseBinding(ctx, g, id, responseBinding{AccountID: u.ID, Target: responseTarget(u)})
+}
+
+func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id string, binding responseBinding) error {
+	raw, _ := json.Marshal(binding)
 	key := responseBindingKey(g, id)
 	// Atomic collision checking also protects against an upstream reusing IDs.
 	ok, err := a.Redis.Eval(ctx, `local old=redis.call('GET',KEYS[1]);if old and old~=ARGV[1] then return 0 end;redis.call('SET',KEYS[1],ARGV[1],'EX',2592000);return 1`, []string{key}, string(raw)).Int()

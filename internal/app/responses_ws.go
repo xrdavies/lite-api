@@ -65,7 +65,7 @@ func (s *responseSocket) remember(id string, u *upstreamAccount) {
 	if _, exists := s.responses[id]; !exists {
 		s.responseOrder = append(s.responseOrder, id)
 	}
-	s.responses[id] = responseBinding{u.ID, responseTarget(u)}
+	s.responses[id] = responseBinding{AccountID: u.ID, Target: responseTarget(u)}
 	// ponytail: keep 1024 connection-local IDs, older stored responses use Redis;
 	// nonstored chains older than this bound must resend full context.
 	if len(s.responseOrder) > 1024 {
@@ -283,7 +283,7 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 		}
 		conn.SetReadLimit(2 << 20)
 		s.upstream, s.proxyTarget = conn, proxyTarget
-		s.binding = &responseBinding{account.ID, responseTarget(account)}
+		s.binding = &responseBinding{AccountID: account.ID, Target: responseTarget(account)}
 	}
 	out := make(map[string]json.RawMessage, len(body))
 	for k, v := range body {

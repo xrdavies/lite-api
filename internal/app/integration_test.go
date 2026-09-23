@@ -261,6 +261,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAlphaSearch(t, a, admin)
 	testGrokSearch(t, a, admin)
 	testChatResponses(t, a, admin)
+	testResponsesChat(t, a, admin)
 	testLiveGateway(t, a, admin)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {

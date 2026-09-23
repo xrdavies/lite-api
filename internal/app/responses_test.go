@@ -212,6 +212,12 @@ func testResponses(t *testing.T, a *App, admin string) {
 	}
 	delete(body, "stream")
 	before := calls.Load()
+	for _, tools := range []any{[]any{map[string]any{"type": "web_search"}}, []any{nil}, "invalid"} {
+		hidden := map[string]any{"model": "client-response", "input": []any{map[string]any{"type": "additional_tools", "tools": tools}, map[string]any{"role": "user", "content": "hello"}}}
+		if w := call("/responses", key, hidden, ""); w.Code != 400 || calls.Load() != before {
+			t.Fatal("additional tools bypassed admission", w.Code, calls.Load())
+		}
+	}
 	for _, field := range []string{"background", "conversation", "input", "tools", "previous_response_id"} {
 		saved, exists := body[field]
 		body[field] = map[string]any{"background": true, "conversation": "conv_foreign", "input": []any{map[string]any{"type": "item_reference", "id": "msg_foreign"}}, "tools": []any{map[string]any{"type": "web_search"}}, "previous_response_id": "../escape"}[field]

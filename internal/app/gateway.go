@@ -237,7 +237,8 @@ type gatewaySelection struct {
 func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	return effectiveModelPrice(s.Catalog, s.GroupPricing, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
-func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model string, in textRequest, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+	protocol := in.Protocol
 	routing := g.dispatchGroup()
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
 	if protocol == "alpha_search" || grokSearchProtocol(protocol) {
@@ -356,6 +357,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		}
 		matches := u.protocol() == protocol
 		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
+			matches = true
+		}
+		if protocol == "responses" && u.protocol() == "chat_completions" && chatResponsesPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
 		if protocol == "embeddings" {
@@ -675,6 +679,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
+	history, err := a.chatHistory(g, in.Previous, binding)
+	if err != nil {
+		fail(err)
+		return
+	}
 	sticky, err := a.stickySession(ctx, session)
 	if err != nil {
 		fail(err)
@@ -697,12 +706,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var resp *http.Response
 	wireIn := in
 	var chatBridge *responseChatStream
+	var responsesBridge *chatResponsesStream
+	var chatRequest *responsesChatRequest
 	maxAttempts := 3
 	if in.Search != nil {
 		maxAttempts = 4
 	}
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, sticky, catalog)
+		selected, err = a.chooseAccount(ctx, g, routingModel, in, excluded, binding, sticky, catalog)
 		var busy *accountBusy
 		if errors.As(err, &busy) {
 			_, err = a.waitAdmission(ctx, "account", busy.ID, gatewayQueueTimeout, func(waitCtx context.Context) (bool, error) {
@@ -710,7 +721,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 					return false, err
 				}
 				var selectErr error
-				selected, selectErr = a.chooseAccount(waitCtx, g, routingModel, protocol, excluded, binding, sticky, catalog)
+				selected, selectErr = a.chooseAccount(waitCtx, g, routingModel, in, excluded, binding, sticky, catalog)
 				if selected != nil && waitCtx.Err() != nil {
 					selected.Release()
 					selected = nil
@@ -780,6 +791,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		upstreamBody, _ := json.Marshal(request)
 		wireIn, chatBridge = in, nil
+		responsesBridge, chatRequest = nil, nil
 		if protocol == "chat_completions" && selected.Account.protocol() == "responses" {
 			upstreamBody, err = chatToResponses(request)
 			if err != nil {
@@ -790,6 +802,28 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			wireIn.Protocol = "responses"
 			path = "/v1/responses"
 			chatBridge = newResponseChatStream(model, includeChatUsage)
+		}
+		if protocol == "responses" && selected.Account.protocol() == "chat_completions" {
+			chatRequest, err = responsesToChatRequest(request, history)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			upstreamBody, err = json.Marshal(chatRequest.Body)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			if in.Store && (len(upstreamBody) > 2<<20 || len(chatRequest.Messages) >= 256) {
+				selected.Release()
+				fail(bad("response history exceeds limit; use store=false"))
+				return
+			}
+			wireIn.Protocol = "chat_completions"
+			path = "/v1/chat/completions"
+			responsesBridge = newChatResponsesStream(model, chatRequest.Custom)
 		}
 		if in.Search != nil {
 			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)
@@ -878,6 +912,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if forwardErr == nil && chatBridge != nil {
 				responseBody, forwardErr = responsesToChat(responseBody, model)
 			}
+			if forwardErr == nil && responsesBridge != nil {
+				_, forwardErr = responsesBridge.observe(responseBody, false)
+				if forwardErr == nil {
+					_, responseBody, forwardErr = responsesBridge.finish()
+					observation.ResponseID = responsesBridge.ID
+				}
+			}
 		}
 	} else {
 		if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -903,6 +944,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			data := strings.Join(dataLines, "\n")
 			if wireIn.Protocol == "chat_completions" && data == "[DONE]" {
 				terminal = "data: [DONE]\n\n"
+				if responsesBridge != nil {
+					var err error
+					terminal, _, err = responsesBridge.finish()
+					if err != nil {
+						return err
+					}
+					observation.ResponseID = responsesBridge.ID
+				}
 				done = true
 				return nil
 			}
@@ -915,6 +964,19 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
+			if responsesBridge != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = responsesBridge.observe([]byte(data), true)
+				if err != nil {
+					return err
+				}
+				if wire == "" {
+					return nil
+				}
+			}
 			if chatBridge != nil {
 				if data == "" {
 					return nil
@@ -1012,7 +1074,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+		if responsesBridge != nil {
+			err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesBridge.assistant()))
+		} else {
+			err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+		}
 		bindingCancel()
 		if err != nil {
 			fail(err)
