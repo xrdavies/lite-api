@@ -86,6 +86,22 @@ func ipMatches(addr netip.Addr, rules []string) bool {
 }
 func (a *App) gatewayAuth(r *http.Request, spending bool) (*gatewayIdentity, error) {
 	token := bearer(r)
+	gemini := strings.HasPrefix(r.URL.Path, "/v1beta/")
+	if r.URL.Query().Get("api_key") != "" || !gemini && r.URL.Query().Get("key") != "" {
+		return nil, bad("use an API key header")
+	}
+	if token == "" {
+		token = r.Header.Get("X-Api-Key")
+	}
+	if gemini && r.Header.Get("X-Goog-Api-Key") != "" {
+		token = r.Header.Get("X-Goog-Api-Key")
+	}
+	if token == "" {
+		token = r.Header.Get("X-Goog-Api-Key")
+	}
+	if token == "" && gemini {
+		token = r.URL.Query().Get("key")
+	}
 	if token == "" || len(token) > 128 {
 		return nil, unauthorized()
 	}
@@ -191,7 +207,7 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	}
 	return modelPrice{}, &apiError{503, "model price is not configured"}
 }
-func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model string, exclude map[int64]bool) (*gatewaySelection, error) {
+func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool) (*gatewaySelection, error) {
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped"}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
@@ -263,7 +279,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if err != nil {
 			continue
 		}
-		if u.protocol() != "chat_completions" {
+		if u.protocol() != protocol {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
@@ -337,10 +353,13 @@ func gatewayError(w http.ResponseWriter, err error) {
 func (a *App) gatewayRoutes() {
 	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
 	for _, path := range []string{"/v1/chat/completions", "/chat/completions", "/backend-api/codex/chat/completions"} {
-		a.mux.HandleFunc("POST "+path, a.chatGateway)
+		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "chat_completions") })
 	}
+	a.mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
+	a.mux.HandleFunc("POST /v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
+	a.mux.HandleFunc("POST /v1beta/models/{action}", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "gemini") })
 }
-func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
+func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	id := randomToken(24)
@@ -357,10 +376,14 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 	fail := func(err error) {
 		a.recordGatewayError(id, g, selected, r, err, started)
 		if !committed {
-			gatewayError(w, err)
+			textGatewayError(w, protocol, err)
 		} else {
-			data, _ := json.Marshal(map[string]any{"error": map[string]string{"message": safeGatewayError(err), "type": "gateway_error"}})
+			data, _ := json.Marshal(textErrorBody(protocol, err))
+			if protocol == "anthropic" {
+				_, _ = io.WriteString(w, "event: error\n")
+			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+			_ = http.NewResponseController(w).Flush()
 		}
 	}
 	if err := a.checkInstance(r.Context()); err != nil {
@@ -390,27 +413,14 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 		fail(bad("JSON object required"))
 		return
 	}
-	var model, effort, tier string
-	var stream bool
-	if json.Unmarshal(request["model"], &model) != nil || !validModelPattern(model) || len(model) > 100 || strings.Contains(model, "*") {
-		fail(bad("invalid model"))
+	in, err := parseTextRequest(r, protocol, request)
+	if err != nil {
+		fail(err)
 		return
 	}
-	if raw := request["stream"]; raw != nil && json.Unmarshal(raw, &stream) != nil {
-		fail(bad("invalid stream flag"))
-		return
-	}
-	if raw := request["reasoning_effort"]; raw != nil && (json.Unmarshal(raw, &effort) != nil || len(effort) > 20) {
-		fail(bad("invalid reasoning_effort"))
-		return
-	}
-	if raw := request["service_tier"]; raw != nil && (json.Unmarshal(raw, &tier) != nil || len(tier) > 16) {
-		fail(bad("invalid service_tier"))
-		return
-	}
-	var messages []json.RawMessage
-	if json.Unmarshal(request["messages"], &messages) != nil || len(messages) == 0 {
-		fail(bad("messages are required"))
+	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
+	if protocol == "gemini" && g.Group.Platform != "gemini" {
+		fail(bad("Gemini native endpoints require a Gemini group"))
 		return
 	}
 	if !g.Group.allows(model) {
@@ -418,7 +428,13 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canonical, _ := json.Marshal(request)
-	writer, finish, replayed, claimErr := a.claimGatewayRequest(w, r, g, string(canonical), stream)
+	payload := string(canonical)
+	if protocol == "gemini" {
+		payload = model + "\n" + payload
+	} else if protocol == "anthropic" {
+		payload += "\n" + in.Headers.Get("Anthropic-Version") + "\n" + in.Headers.Get("Anthropic-Beta")
+	}
+	writer, finish, replayed, claimErr := a.claimGatewayRequest(w, r, g, in.Scope, payload, stream)
 	if claimErr != nil {
 		fail(claimErr)
 		return
@@ -450,7 +466,7 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 		fail(err)
 		return
 	}
-	if stream {
+	if stream && protocol == "chat_completions" {
 		options := map[string]json.RawMessage{}
 		if raw := request["stream_options"]; raw != nil && string(raw) != "null" {
 			if json.Unmarshal(raw, &options) != nil || options == nil {
@@ -464,7 +480,7 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 	excluded := map[int64]bool{}
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, model, excluded)
+		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded)
 		if err != nil {
 			fail(err)
 			return
@@ -481,18 +497,33 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 		if selected.BillingSource == "upstream" {
 			billingModel = selected.UpstreamModel
 		}
-		preflight, priceErr := selected.price(billingModel)
-		if priceErr == nil && preflight.BillingMode != "per_request" {
-			_, priceErr = calculatePrice(preflight, priceUsage{Input: 1, Output: 1, CacheRead: 1}, g.Group.Rate, tier, effort, "", started, g.Group.LongContext)
+		if !in.CountOnly {
+			preflight, priceErr := selected.price(billingModel)
+			if priceErr == nil && preflight.BillingMode != "per_request" {
+				_, priceErr = calculatePrice(preflight, in.preflightUsage(), g.Group.Rate, tier, effort, "", started, g.Group.LongContext)
+			}
+			if priceErr != nil {
+				selected.Release()
+				fail(priceErr)
+				return
+			}
 		}
-		if priceErr != nil {
+		path, pathErr := in.upstreamPath(selected.UpstreamModel)
+		if pathErr != nil {
 			selected.Release()
-			fail(priceErr)
+			fail(pathErr)
 			return
 		}
-		request["model"], _ = json.Marshal(selected.UpstreamModel)
+		if protocol != "gemini" {
+			request["model"], _ = json.Marshal(selected.UpstreamModel)
+		} else if in.CountOnly && request["generateContentRequest"] != nil {
+			var nested map[string]json.RawMessage
+			_ = json.Unmarshal(request["generateContentRequest"], &nested)
+			nested["model"], _ = json.Marshal("models/" + strings.TrimPrefix(selected.UpstreamModel, "models/"))
+			request["generateContentRequest"], _ = json.Marshal(nested)
+		}
 		upstreamBody, _ := json.Marshal(request)
-		resp, err = a.upstreamRequest(ctx, selected.Account, "POST", "/v1/chat/completions", upstreamBody)
+		resp, err = a.upstreamRequestHeaders(ctx, selected.Account, "POST", path, upstreamBody, in.Headers)
 		if err != nil {
 			selected.Release()
 			fail(err)
@@ -518,44 +549,17 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	defer selected.Release()
 	defer resp.Body.Close()
-	var usage priceUsage
-	hasUsage := false
-	responseModel := ""
-	responseTier := tier
+	observation := textObservation{Protocol: protocol, Tier: tier, CountOnly: in.CountOnly}
 	upstreamID := resp.Header.Get("X-Request-ID")
-	firstToken := int64(0)
-	observe := func(data []byte) error {
-		var event struct {
-			Model string          `json:"model"`
-			Tier  string          `json:"service_tier"`
-			Usage json.RawMessage `json:"usage"`
-			Error json.RawMessage `json:"error"`
-		}
-		if json.Unmarshal(data, &event) != nil {
-			return &apiError{502, "upstream returned invalid JSON"}
-		}
-		if event.Error != nil && string(event.Error) != "null" {
-			return &apiError{502, "upstream stream returned an error"}
-		}
-		if event.Model != "" {
-			responseModel = event.Model
-		}
-		if event.Tier != "" {
-			responseTier = event.Tier
-		}
-		if event.Usage != nil && string(event.Usage) != "null" {
-			var err error
-			usage, err = parseChatUsage(event.Usage)
-			if err != nil {
-				return err
-			}
-			hasUsage = true
-		}
-		return nil
+	if upstreamID == "" {
+		upstreamID = resp.Header.Get("Request-Id")
 	}
+	firstToken := int64(0)
+	observe := observation.observe
 	var responseBody []byte
 	var forwardErr error
 	done := false
+	terminal := ""
 	if !stream {
 		responseBody, err = io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 		if err != nil || len(responseBody) > 16<<20 {
@@ -585,7 +589,8 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			data := strings.Join(dataLines, "\n")
-			if data == "[DONE]" {
+			if protocol == "chat_completions" && data == "[DONE]" {
+				terminal = "data: [DONE]\n\n"
 				done = true
 				return nil
 			}
@@ -597,8 +602,17 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 					firstToken = time.Since(started).Milliseconds()
 				}
 			}
+			wire := strings.Join(frame, "\n") + "\n\n"
+			if protocol != "chat_completions" && (observation.complete() || terminal != "") {
+				terminal += wire
+				if len(terminal) > 2<<20 {
+					return &apiError{502, "upstream terminal frames exceed limit"}
+				}
+				done = protocol == "anthropic"
+				return nil
+			}
 			committed = true
-			if _, err := io.WriteString(w, strings.Join(frame, "\n")+"\n\n"); err != nil {
+			if _, err := io.WriteString(w, wire); err != nil {
 				return err
 			}
 			return http.NewResponseController(w).Flush()
@@ -624,6 +638,9 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 				frame = append(frame, line)
 			}
 		}
+		if protocol == "gemini" && observation.complete() {
+			done = true
+		}
 		if forwardErr == nil {
 			if scanner.Err() != nil {
 				forwardErr = &apiError{502, "upstream stream interrupted"}
@@ -632,13 +649,21 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if !hasUsage {
+	if in.CountOnly {
+		// Token counts check eligibility but do not create consumption.
+	} else if !observation.HasUsage {
 		if forwardErr == nil {
 			forwardErr = &apiError{502, "upstream usage is missing; billing requires review"}
 		}
 	} else {
-		receipt, err := a.makeReceipt(id, g, selected, model, responseModel, responseTier, effort, usage, stream, time.Since(started), firstToken, started, digest(string(body)), clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
+		payloadHash := digest(string(body))
+		if protocol == "gemini" {
+			payloadHash = digest(model + "\n" + string(body))
+		}
+		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, effort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
+			receipt.Upstream, _ = in.upstreamPath(selected.UpstreamModel)
+			receipt.Upstream, _, _ = strings.Cut(receipt.Upstream, "?")
 			billingCtx, billingCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err = a.saveReceipt(billingCtx, receipt)
 			billingCancel()
@@ -652,12 +677,15 @@ func (a *App) chatGateway(w http.ResponseWriter, r *http.Request) {
 		fail(forwardErr)
 		return
 	}
+	if writer != nil {
+		writer.succeeded = true
+	}
 	if !stream {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(responseBody)
 	} else {
 		committed = true
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, terminal)
 		_ = http.NewResponseController(w).Flush()
 	}
 }

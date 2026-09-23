@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -15,6 +14,7 @@ type gatewayResponse struct {
 	status    int
 	body      bytes.Buffer
 	oversized bool
+	succeeded bool
 }
 
 func (w *gatewayResponse) WriteHeader(status int) {
@@ -46,7 +46,7 @@ func (w *gatewayResponse) Flush() {
 
 // Claim and completion use short transactions. A surviving "processing" row means
 // the previous process may have sent an upstream request, so it is never stolen.
-func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, payload string, stream bool) (*gatewayResponse, func(), bool, error) {
+func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, operation, payload string, stream bool) (*gatewayResponse, func(), bool, error) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		return nil, nil, false, nil
@@ -59,9 +59,9 @@ func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gat
 			return nil, nil, false, bad("invalid Idempotency-Key")
 		}
 	}
-	scope := fmt.Sprintf("gateway.chat.%d", g.Key.ID)
+	scope := fmt.Sprintf("gateway.%s.%d", operation, g.Key.ID)
 	keyHash := digest(key)
-	fingerprint := digest("chat\n" + payload)
+	fingerprint := digest(operation + "\n" + payload)
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
 		return nil, nil, false, err
@@ -114,7 +114,7 @@ func (a *App) claimGatewayRequest(w http.ResponseWriter, r *http.Request, g *gat
 			code = 500
 		}
 		state := "failed"
-		if code == 200 && (!stream || strings.HasSuffix(writer.body.String(), "data: [DONE]\n\n")) {
+		if code == 200 && writer.succeeded {
 			state = "succeeded"
 		}
 		var response any

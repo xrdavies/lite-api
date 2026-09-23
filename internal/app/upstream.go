@@ -99,6 +99,8 @@ func upstreamURL(base, path string) (string, error) {
 	if strings.HasPrefix(path, "/v1beta/") && strings.HasSuffix(prefix, "/v1beta") {
 		path = strings.TrimPrefix(path, "/v1beta")
 	}
+	path, query, _ := strings.Cut(path, "?")
+	u.RawQuery = query
 	u.Path = prefix + path
 	u.RawPath = ""
 	return u.String(), nil
@@ -107,6 +109,9 @@ func upstreamURL(base, path string) (string, error) {
 // A small connection pool per request keeps proxy changes immediately effective.
 // ponytail: per-request transports; cache by immutable account transport revision if handshake cost dominates.
 func (a *App) upstreamRequest(ctx context.Context, account *upstreamAccount, method, path string, body []byte) (*http.Response, error) {
+	return a.upstreamRequestHeaders(ctx, account, method, path, body, nil)
+}
+func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccount, method, path string, body []byte, headers http.Header) (*http.Response, error) {
 	base, err := account.baseURL()
 	if err != nil {
 		return nil, err
@@ -174,6 +179,11 @@ func (a *App) upstreamRequest(ctx context.Context, account *upstreamAccount, met
 			}
 		}
 	}
+	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
+		if value := headers.Get(name); value != "" {
+			req.Header.Set(name, value)
+		}
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("User-Agent", "lite-api/1")
@@ -182,7 +192,9 @@ func (a *App) upstreamRequest(ctx context.Context, account *upstreamAccount, met
 		switch account.protocol() {
 		case "anthropic":
 			req.Header.Set("x-api-key", key)
-			req.Header.Set("anthropic-version", "2023-06-01")
+			if req.Header.Get("Anthropic-Version") == "" {
+				req.Header.Set("anthropic-version", "2023-06-01")
+			}
 		case "gemini":
 			req.Header.Set("x-goog-api-key", key)
 		default:
