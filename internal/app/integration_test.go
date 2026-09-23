@@ -241,6 +241,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 		t.Fatal("user deletion did not revoke key", err)
 	}
 	testUpstreamManagement(t, a, admin, otherToken, gid)
+	testChannelManagement(t, a, admin, otherToken, gid)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

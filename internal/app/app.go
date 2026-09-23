@@ -310,9 +310,7 @@ func (a *App) routes() {
 		}
 		return reply(w, map[string]string{"status": "ok"})
 	})
-	a.route("GET /api/v1/settings/public", "public", func(w http.ResponseWriter, r *http.Request) error {
-		return reply(w, map[string]any{"registration_enabled": false, "site_name": "lite-api", "email_verify_enabled": false, "backend_mode_enabled": false})
-	})
+	a.settingsRoutes()
 	a.route("GET /api/v1/version", "public", func(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, map[string]string{"version": "dev"})
 	})
@@ -320,6 +318,7 @@ func (a *App) routes() {
 	a.userRoutes()
 	a.keyRoutes()
 	a.groupRoutes()
+	a.channelRoutes()
 	a.accountRoutes()
 	a.proxyRoutes()
 	a.testPlanRoutes()
