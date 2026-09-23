@@ -85,6 +85,10 @@ Chat 入口也支持 Anthropic 平台，以及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMa
 
 转换默认 max_tokens=8192，显式 max_completion_tokens 优先。xhigh 转为 max 并按实际 effort 计价；thinking budget 限制在输出上限以内，上限不够时拒绝。缓存标记传到 Anthropic；不透明思考签名不作为 Chat 文本输出。跨厂商 file_id、非默认多候选及没有对应含义的控制在派发前拒绝。协议依据 [Anthropic 流式文档](https://platform.claude.com/docs/en/build-with-claude/streaming) 与 [结构化输出文档](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)，已做本地协议及数据库验证，尚未使用真实 Anthropic 凭证联调。
 
+Chat 三个入口也支持 Gemini 账号，通过原生 `generateContent` / `streamGenerateContent` 返回 Chat JSON/SSE，复合路由和模型发现同步支持。转换保留系统指令、文本、图片/PDF、函数及 custom 工具、工具结果、停止序列、JSON 输出；schema 使用原生 JSON Schema 字段，避免删减约束。客户端函数签名通过 `tool_calls[].extra_content.google.thought_signature` 回传，缺少签名的历史调用使用兼容标记；网关不拉取客户端媒体 URL，URL 可访问性由上游决定。原生字段见 [Gemini generateContent](https://ai.google.dev/api/generate-content)。
+
+Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；xhigh/max 映射 high，minimal 在 Pro 上映射 low，未指定时沿用模型默认。禁止关闭强制思考，不能映射的多候选、托管工具或禁用并行函数调用等控制在派发前拒绝；预算映射参考 [Gemini OpenAI 兼容文档](https://ai.google.dev/gemini-api/docs/openai)。Chat 输入用量含缓存读，输出用量含思考；扣费使用原生互斥计量和实际 effort。文本/思考增量实时返回，工具调用、finish_reason、usage 和 DONE 等待结算成功。缺用量或断流返回错误，已知消费仍持久结算并支持恢复。本地协议服务及 Docker 数据库验证已通过，尚未使用真实 Gemini Key 联调。
+
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。

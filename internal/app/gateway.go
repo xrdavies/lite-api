@@ -356,6 +356,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			continue
 		}
 		matches := u.protocol() == protocol
+		if protocol == "chat_completions" && u.protocol() == "gemini" {
+			matches = true
+		}
 		if protocol == "anthropic" && !in.CountOnly && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
 			matches = true
 		}
@@ -726,6 +729,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var messagesBridge *chatMessagesStream
 	var responsesMessages *responsesMessagesStream
 	var anthropicBridge *anthropicChatStream
+	var geminiBridge *geminiChatStream
 	var anthropicResponses *anthropicResponsesStream
 	var responsesBridge *chatResponsesStream
 	var chatRequest *responsesChatRequest
@@ -803,10 +807,28 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		wireIn, chatBridge = in, nil
 		wireIn.Effort = effort
 		anthropicBridge = nil
+		geminiBridge = nil
 		anthropicResponses = nil
 		responsesBridge, chatRequest = nil, nil
 		messagesBridge = nil
 		responsesMessages = nil
+		if protocol == "chat_completions" && selected.Account.protocol() == "gemini" {
+			var custom map[string]bool
+			upstreamBody, custom, wireIn.Effort, err = chatToGemini(request)
+			if err == nil {
+				wireIn.Protocol, wireIn.Headers, wireIn.Action = "gemini", nil, "generateContent"
+				if stream {
+					wireIn.Action = "streamGenerateContent"
+				}
+				path, err = wireIn.upstreamPath(selected.UpstreamModel)
+			}
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			geminiBridge = newGeminiChatStream(model, includeChatUsage, custom)
+		}
 		if protocol == "anthropic" && selected.Account.protocol() == "responses" {
 			upstreamBody, wireIn.Effort, err = messagesToResponses(request, reasoningInput)
 			if err != nil {
@@ -996,6 +1018,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if forwardErr == nil && anthropicBridge != nil {
 				responseBody, forwardErr = anthropicBridge.response(responseBody, observation.Usage)
 			}
+			if forwardErr == nil && geminiBridge != nil {
+				_, forwardErr = geminiBridge.observe(responseBody)
+				if forwardErr == nil {
+					_, responseBody, forwardErr = geminiBridge.finish(observation.Usage)
+				}
+			}
 			if forwardErr == nil && anthropicResponses != nil {
 				responseBody, forwardErr = anthropicResponses.response(responseBody, observation.Usage)
 				observation.ResponseID = anthropicResponses.Output.ID
@@ -1059,6 +1087,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
+			if geminiBridge != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = geminiBridge.observe([]byte(data))
+				if err != nil {
+					return err
+				}
+			}
 			if responsesMessages != nil {
 				if data == "" {
 					return nil
@@ -1173,7 +1211,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				frame = append(frame, line)
 			}
 		}
-		if protocol == "gemini" && observation.complete() {
+		if wireIn.Protocol == "gemini" && observation.complete() {
 			done = true
 		}
 		if forwardErr == nil {
@@ -1182,6 +1220,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			} else if !done {
 				forwardErr = &apiError{502, "upstream stream ended without completion"}
 			}
+		}
+		if forwardErr == nil && geminiBridge != nil {
+			var end string
+			end, _, forwardErr = geminiBridge.finish(observation.Usage)
+			terminal += end
 		}
 	}
 	if in.CountOnly {
@@ -1198,7 +1241,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			payloadHash = digest(model + "\n" + string(body))
 		}
 		billingEffort := effort
-		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil {
+		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil || geminiBridge != nil {
 			billingEffort = wireIn.Effort
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
