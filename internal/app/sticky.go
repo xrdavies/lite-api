@@ -15,6 +15,25 @@ import (
 
 var legacySessionUser = regexp.MustCompile(`^user_[a-fA-F0-9]{64}_account_[a-fA-F0-9-]*_session_([a-fA-F0-9-]{36})$`)
 
+func anthropicMetadataSession(body map[string]json.RawMessage) string {
+	var metadata struct {
+		UserID string `json:"user_id"`
+	}
+	_ = json.Unmarshal(body["metadata"], &metadata)
+	raw := strings.TrimSpace(metadata.UserID)
+	var fields struct {
+		Device  string `json:"device_id"`
+		Session string `json:"session_id"`
+	}
+	if json.Unmarshal([]byte(raw), &fields) == nil && fields.Device != "" && fields.Session != "" {
+		return fields.Session
+	}
+	if match := legacySessionUser.FindStringSubmatch(raw); match != nil {
+		return match[1]
+	}
+	return ""
+}
+
 // This is only a scheduling preference. Responses continuation has its own
 // mandatory binding, and every candidate still passes normal admission checks.
 func gatewaySessionKey(r *http.Request, g *gatewayIdentity, in textRequest, body map[string]json.RawMessage) (string, error) {
@@ -23,18 +42,8 @@ func gatewaySessionKey(r *http.Request, g *gatewayIdentity, in textRequest, body
 	}
 	seed := ""
 	if in.Protocol == "anthropic" {
-		var metadata struct {
-			UserID string `json:"user_id"`
-		}
-		_ = json.Unmarshal(body["metadata"], &metadata)
-		var fields struct {
-			Device  string `json:"device_id"`
-			Session string `json:"session_id"`
-		}
-		if json.Unmarshal([]byte(strings.TrimSpace(metadata.UserID)), &fields) == nil && fields.Device != "" && fields.Session != "" {
-			seed = "explicit:" + fields.Session
-		} else if match := legacySessionUser.FindStringSubmatch(metadata.UserID); match != nil {
-			seed = "explicit:" + match[1]
+		if session := anthropicMetadataSession(body); session != "" {
+			seed = "explicit:" + session
 		}
 	} else {
 		for _, name := range []string{"Session-Id", "Session_id", "Conversation_id", "X-Session-Affinity", "X-Session-Id", "X-OpenCode-Session", "X-Conversation-Id", "X-Grok-Conv-Id"} {
@@ -72,6 +81,9 @@ func gatewaySessionKey(r *http.Request, g *gatewayIdentity, in textRequest, body
 	}
 	// No client IDs, prompts or credentials are stored. Tenant, group, platform
 	// and protocol boundaries prevent unrelated clients from steering each other.
+	if g.RoutingGroup != nil {
+		seed = fmt.Sprintf("fallback:%d:%s", g.RoutingGroup.ID, seed)
+	}
 	return fmt.Sprintf("gateway:session:%d:%d:%s:%s:%s", g.Key.ID, g.Key.GroupID, g.Group.Platform, in.Protocol, digest(seed)), nil
 }
 

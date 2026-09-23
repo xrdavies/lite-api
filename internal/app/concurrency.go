@@ -132,7 +132,7 @@ func (a *App) acquireGatewayUser(r *http.Request, g *gatewayIdentity, model stri
 			if err != nil {
 				return false, err
 			}
-			if g.Key.ID != initial.Key.ID || g.Key.GroupID != initial.Key.GroupID || g.UserID != initial.UserID {
+			if g.Key.ID != initial.Key.ID || g.Key.GroupID != initial.Key.GroupID || g.UserID != initial.UserID || !sameRoutingGroup(g, initial) {
 				return false, conflict("API key assignment changed while queued; retry the request")
 			}
 		}
@@ -169,21 +169,24 @@ func (a *App) revalidateQueuedRequest(r *http.Request, g *gatewayIdentity, group
 	if err != nil {
 		return err
 	}
-	if fresh.Key.ID != g.Key.ID || fresh.Key.GroupID != g.Key.GroupID || fresh.UserID != g.UserID || !reflect.DeepEqual(fresh.Group, group) {
+	if fresh.Key.ID != g.Key.ID || fresh.Key.GroupID != g.Key.GroupID || fresh.UserID != g.UserID || !reflect.DeepEqual(fresh.Group, group) || !sameRoutingGroup(fresh, g) {
 		return conflict("gateway policy changed while queued; retry the request")
 	}
 	if !fresh.Group.allows(in.Model) {
 		return denied()
 	}
-	if group.Platform == "composite" {
-		config, err := a.loadComposite(r.Context(), g.Key.GroupID)
+	routing := fresh.dispatchGroup()
+	if routing.Platform == "composite" {
+		config, err := a.loadComposite(r.Context(), routing.ID)
 		if err != nil {
 			return err
 		}
-		decision := config.resolve(g.Key.GroupID, in.Model, in.compositeEndpoint())
+		decision := config.resolve(routing.ID, in.Model, in.compositeEndpoint())
 		if !decision.Matched || decision.TargetPlatform != g.Group.Platform || decision.UpstreamModel != routingModel {
 			return conflict("composite route changed while queued; retry the request")
 		}
+	}
+	if fresh.Group.Platform == "composite" {
 		if err = a.checkPlatformQuota(r.Context(), g.UserID, g.Group.Platform); err != nil {
 			return err
 		}

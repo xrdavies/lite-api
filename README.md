@@ -31,7 +31,11 @@ go build -o bin/lite-api ./cmd/lite-api
 
 复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini，图片执行随后续媒体功能交付。
 
-复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换、fallback 与媒体继续开发。
+复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换与媒体继续开发。
+
+分组可配置 `claude_code_only` 和 `fallback_group_id`。Messages 使用 CLI User-Agent、必要请求头、system 特征和 metadata 识别客户端，兼容单 token 探测及 count_tokens 辅助请求。这是客户端分类规则，所有请求仍必须通过 API Key 鉴权。非匹配客户端在配置 fallback 时使用目标组账号，未配置返回 403；Chat、Responses、Embedding 入口在开启限制时直接拒绝。模型发现和用量查询仍属于原 Key 分组。
+
+fallback 仅委托调度：原 Key 归属、模型白名单、用户价格/倍率、RPM 和用量 group_id 保持原分组；目标组账号必须满足平台、协议、健康、并发、额度和目标渠道模型限制。管理员可指定私有目标组，但用户不会因此获得在目标组建 Key 的权限。平台额度继续按原具体平台计量，原分组为 composite 时按解析平台计量。目标组停用/删除立即停止新派发；排队期间关系或策略变化会重新检查并拒绝旧请求，在途消费按开始时的价格结算。fallback ID 省略/null 保持，0 或负数清除；配置拒绝自引用、循环、受限目标及范围外资源。上游 HTTP 400/503 不触发跨分组 fallback。
 
 分组可配置 `model_routing_enabled` 和 `model_routing`，例如 `{"gpt-*": [12, 18]}`。规则匹配渠道改写后的模型名，区分大小写，精确项优先，其次最长尾部 `*` 前缀；空列表不形成优先池。规则用于 OpenAI、Anthropic 目标平台，复合分组按解析平台执行。优先池内仍按账号优先级和最后使用时间选择，数组顺序不代表优先级；不可用时回退同组其他合格账号，所有权限、协议、额度、并发和渠道模型限制继续生效。规则中的未关联、已删除或其他平台账号不会被调用。省略或 `null` 保留配置，`{}` 清空；开关关闭时保留规则。Responses 续接优先遵守原账号绑定，原账号不可用时拒绝转投。
 

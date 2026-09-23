@@ -29,16 +29,18 @@ type gatewayKey struct {
 }
 type gatewayGroup struct {
 	reasoningPolicy
-	ID             int64               `json:"id"`
-	Platform       string              `json:"platform"`
-	Rate           json.Number         `json:"rate_multiplier"`
-	RPM            int                 `json:"rpm_limit"`
-	LongContext    bool                `json:"long_context_pricing_enabled"`
-	Allowlist      modelAllowlist      `json:"model_allowlist"`
-	Manifest       modelManifestConfig `json:"codex_models_manifest_config"`
-	Pricing        []modelPrice        `json:"model_pricing"`
-	ModelRouting   map[string][]int64  `json:"model_routing"`
-	RoutingEnabled bool                `json:"model_routing_enabled"`
+	ID              int64               `json:"id"`
+	Platform        string              `json:"platform"`
+	Rate            json.Number         `json:"rate_multiplier"`
+	RPM             int                 `json:"rpm_limit"`
+	LongContext     bool                `json:"long_context_pricing_enabled"`
+	Allowlist       modelAllowlist      `json:"model_allowlist"`
+	Manifest        modelManifestConfig `json:"codex_models_manifest_config"`
+	Pricing         []modelPrice        `json:"model_pricing"`
+	ModelRouting    map[string][]int64  `json:"model_routing"`
+	RoutingEnabled  bool                `json:"model_routing_enabled"`
+	ClaudeCodeOnly  bool                `json:"claude_code_only"`
+	FallbackGroupID *int64              `json:"fallback_group_id"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -77,6 +79,8 @@ type gatewayIdentity struct {
 	Group            gatewayGroup
 	UserID           int64
 	Concurrency, RPM int
+	RoutingGroup     *gatewayGroup
+	SourcePlatform   string
 }
 
 func ipMatches(addr netip.Addr, rules []string) bool {
@@ -156,6 +160,10 @@ func (a *App) gatewayAuth(r *http.Request, spending bool) (*gatewayIdentity, err
 	if ipMatches(addr, g.Key.Blacklist) || len(g.Key.Whitelist) > 0 && !ipMatches(addr, g.Key.Whitelist) {
 		return nil, denied()
 	}
+	g.SourcePlatform = g.Group.Platform
+	if err = a.resolveClientGroup(r, g); err != nil {
+		return nil, err
+	}
 	if spending {
 		if !balanceOK {
 			return nil, &apiError{402, "insufficient balance"}
@@ -224,6 +232,7 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	return effectiveModelPrice(s.Catalog, s.GroupPricing, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
 func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+	routing := g.dispatchGroup()
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
@@ -255,7 +264,11 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 			s.BillingSource = config.Source
 		}
 
-		for pattern, target := range config.Mapping[g.Group.Platform] {
+		platform := g.Group.Platform
+		if g.RoutingGroup != nil {
+			platform = g.SourcePlatform
+		}
+		for pattern, target := range config.Mapping[platform] {
 			if patternMatches(pattern, model) {
 				if target != "" && target != "*" {
 					s.ChannelModel = target
@@ -264,7 +277,15 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 			}
 		}
 	}
-	rows, err := a.DB.QueryContext(ctx, `SELECT a.id,a.concurrency,a.rate_multiplier::text FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND a.platform=$2 AND a.type='apikey' AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now()) AND (a.overload_until IS NULL OR a.overload_until<=now()) AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now()) ORDER BY ag.priority,a.priority,a.last_used_at NULLS FIRST,a.id`, g.Key.GroupID, g.Group.Platform)
+	var fallbackPrices []modelPrice
+	var fallbackSource string
+	if g.RoutingGroup != nil {
+		fallbackPrices, fallbackSource, err = a.fallbackChannelRestriction(ctx, routing.ID, g.Group.Platform, model)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rows, err := a.DB.QueryContext(ctx, `SELECT a.id,a.concurrency,a.rate_multiplier::text FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND a.platform=$2 AND a.type='apikey' AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now()) AND (a.overload_until IS NULL OR a.overload_until<=now()) AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now()) ORDER BY ag.priority,a.priority,a.last_used_at NULLS FIRST,a.id`, routing.ID, g.Group.Platform)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +308,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 	if err != nil {
 		return nil, err
 	}
-	preferred := g.Group.routingAccounts(s.ChannelModel, g.Group.Platform)
+	preferred := routing.routingAccounts(s.ChannelModel, g.Group.Platform)
 	if sticky != nil {
 		u, err := a.loadAccount(ctx, sticky.AccountID)
 		if err != nil || responseTarget(u) != sticky.Target {
@@ -331,6 +352,11 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		mapped, err := u.mappedModel(s.ChannelModel)
 		if err != nil {
 			continue
+		}
+		if fallbackSource == "upstream" {
+			if _, ok := matchPrice(fallbackPrices, u.Platform, mapped); !ok {
+				continue
+			}
 		}
 		if s.Restrict && s.BillingSource == "upstream" {
 			s.Account = u
@@ -479,6 +505,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), clientPolicyKey{}, clientPolicy{protocol, claudeCodeClient(r, request)}))
+	ctx = r.Context()
+	if err = a.resolveClientGroup(r, g); err != nil {
+		fail(err)
+		return
+	}
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
 	originalEffort := requestedEffort(request, model)
 	if protocol == "gemini" && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
@@ -541,20 +573,24 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	defer a.releaseSlot("user", g.UserID)
 	groupSnapshot := g.Group
+	routingGroup := g.dispatchGroup()
+	g.Group.Platform = routingGroup.Platform
 	// Look up affinity after the idempotent replay check: replay needs no upstream.
 	routingModel := model
 	if g.Group.Platform == "composite" {
-		config, err := a.loadComposite(ctx, g.Key.GroupID)
+		config, err := a.loadComposite(ctx, routingGroup.ID)
 		if err != nil {
 			fail(err)
 			return
 		}
-		decision := config.resolve(g.Key.GroupID, model, in.compositeEndpoint())
+		decision := config.resolve(routingGroup.ID, model, in.compositeEndpoint())
 		if !decision.Matched {
 			fail(&apiError{404, decision.Reason})
 			return
 		}
 		g.Group.Platform, routingModel = decision.TargetPlatform, decision.UpstreamModel
+	}
+	if g.SourcePlatform == "composite" {
 		if err = a.checkPlatformQuota(ctx, g.UserID, g.Group.Platform); err != nil {
 			fail(err)
 			return

@@ -54,6 +54,9 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 		return nil, err
 	}
 	r := &usageReceipt{RequestID: id, PayloadHash: payload, UserID: g.UserID, KeyID: g.Key.ID, AccountID: s.Account.ID, GroupID: g.Key.GroupID, ChannelID: s.ChannelID, Platform: s.Account.Platform, Model: model, RequestedModel: requested, UpstreamModel: s.UpstreamModel, ResponseModel: response, ServiceTier: tier, Effort: effort, Cost: cost, UserRate: g.Group.Rate.String(), AccountRate: s.Rate.String(), Usage: u, Stream: stream, Duration: duration.Milliseconds(), FirstToken: first, At: at, IP: ip, UserAgent: truncate(agent, 512), Inbound: inbound, UpstreamRequestID: truncate(upstreamID, 128), BillingMode: p.BillingMode}
+	if g.RoutingGroup != nil && g.SourcePlatform != "composite" {
+		r.Platform = g.SourcePlatform
+	}
 	if r.BillingMode == "" {
 		r.BillingMode = "token"
 	}

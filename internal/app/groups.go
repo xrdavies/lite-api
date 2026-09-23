@@ -34,6 +34,8 @@ type groupInput struct {
 	MaxEffort        *string              `json:"max_reasoning_effort"`
 	OverLimit        *string              `json:"max_reasoning_effort_over_limit"`
 	EffortMappings   *[]effortMapping     `json:"reasoning_effort_mappings"`
+	ClaudeCodeOnly   *bool                `json:"claude_code_only"`
+	FallbackGroupID  *int64               `json:"fallback_group_id"`
 }
 
 type modelManifestConfig struct {
@@ -202,8 +204,27 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 		raw, _ := json.Marshal(in.EffortMappings)
 		effortMappings = string(raw)
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings))
+	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), "SELECT pg_advisory_xact_lock(720035)"); err != nil {
+		return err
+	}
+	codeOnly := in.ClaudeCodeOnly != nil && *in.ClaudeCodeOnly
+	raw, err := jsonRow(tx.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings,claude_code_only,fallback_group_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,CASE WHEN $19::bigint>0 THEN $19 ELSE NULL END) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings, codeOnly, in.FallbackGroupID))
+	if err != nil {
+		return err
+	}
+	var created struct{ ID int64 }
+	if err = json.Unmarshal(raw, &created); err != nil {
+		return err
+	}
+	if err = validateGroupFallback(r.Context(), tx, created.ID, true); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	return reply(w, raw)
@@ -225,6 +246,16 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	add := func(field string, v any) {
 		args = append(args, v)
 		sets = append(sets, fmt.Sprintf("%s=$%d", field, len(args)))
+	}
+	if in.ClaudeCodeOnly != nil {
+		add("claude_code_only", *in.ClaudeCodeOnly)
+	}
+	if in.FallbackGroupID != nil {
+		var fallback any
+		if *in.FallbackGroupID > 0 {
+			fallback = *in.FallbackGroupID
+		}
+		add("fallback_group_id", fallback)
 	}
 	if in.MaxEffort != nil || in.OverLimit != nil || in.EffortMappings != nil {
 		var platform string
@@ -313,7 +344,15 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 		args = append(args, string(raw))
 		sets = append(sets, fmt.Sprintf("codex_models_manifest_config=codex_models_manifest_config || $%d::jsonb", len(args)))
 	}
-	result, err := a.DB.ExecContext(r.Context(), "UPDATE groups SET "+strings.Join(sets, ",")+" WHERE id=$1 AND deleted_at IS NULL", args...)
+	tx, err := a.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), "SELECT pg_advisory_xact_lock(720035)"); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(r.Context(), "UPDATE groups SET "+strings.Join(sets, ",")+" WHERE id=$1 AND deleted_at IS NULL", args...)
 	if err != nil {
 		return err
 	}
@@ -323,6 +362,12 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	}
 	if n == 0 {
 		return missing()
+	}
+	if err = validateGroupFallback(r.Context(), tx, id, in.FallbackGroupID != nil && *in.FallbackGroupID > 0); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
 	}
 	return a.getGroup(w, r)
 }
