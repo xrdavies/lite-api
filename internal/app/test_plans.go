@@ -202,6 +202,7 @@ func (a *App) startWorkers() {
 	a.workerCancel = cancel
 	a.workerDone = make(chan struct{})
 	a.startImageTasks(ctx)
+	a.startBatchImages(ctx)
 	go func() {
 		defer close(a.workerDone)
 		if err := a.recoverReceipts(ctx); err != nil {
