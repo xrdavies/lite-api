@@ -41,7 +41,11 @@ go build -o bin/lite-api ./cmd/lite-api
 
 价格支持 token、per_request、image，缓存读写及 1h 写入价、上下文阶梯、时段/服务等级/推理倍率。上下文阶梯按 `(min_tokens, max_tokens]` 匹配；时段使用显式时区与 `[start_time, end_time)`，结束 `00:00` 表示当天结束。账号成本规则单独保存，不改变用户价格。配置缺失与显式零价有不同含义，尚无全局参考价目录回落。
 
-`PUT /api/v1/admin/settings` 目前支持 `site_name` 和 `available_channels_enabled`。后者默认关闭，开启后用户可通过 `/api/v1/channels/available` 查询可访问分组下的具体模型和价格，包含映射别名和本人倍率；私有分组、其他平台模型、内部账号成本规则及映射目标不向无权限用户返回。模型广场完整能力继续开发。
+`PUT /api/v1/admin/settings` 支持 `site_name`、`available_channels_enabled` 及模型广场开关。可用渠道默认关闭，开启后用户可通过 `/api/v1/channels/available` 查询可访问分组下的具体模型和价格，包含映射别名和本人倍率；私有分组、其他平台模型、内部账号成本规则及映射目标不向无权限用户返回。
+
+`GET /api/v1/model-plaza` 是分组模型价格目录，由 `model_plaza_enabled`（默认关闭）、`model_plaza_require_auth` 和 `model_plaza_description` 控制。匿名只见公开分组；使用登录令牌可查询已授权专属分组和本人的 `user_rate_multiplier`，受公开分组限制的用户仍需授权。无效令牌明确拒绝，API Key 不能代替登录。目录每个 IP 每分钟最多 60 次，响应禁止缓存；不调用上游或产生消费，也不保证列出的模型当前可调度。
+
+广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。当前支持已配置渠道价，缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。全局参考价及媒体分组专用价格仍待后续实现，当前 `official_pricing` 为 `null`。
 
 ## 网关、用量与账务
 

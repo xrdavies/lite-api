@@ -468,18 +468,7 @@ func (a *App) availableChannels(w http.ResponseWriter, r *http.Request) error {
 				}
 				var pricing any
 				if model.Pricing != nil {
-					b, _ := json.Marshal(model.Pricing)
-					var visible map[string]json.RawMessage
-					_ = json.Unmarshal(b, &visible)
-					delete(visible, "platform")
-					delete(visible, "models")
-					var intervals []map[string]json.RawMessage
-					_ = json.Unmarshal(visible["intervals"], &intervals)
-					for _, iv := range intervals {
-						delete(iv, "sort_order")
-					}
-					visible["intervals"], _ = json.Marshal(intervals)
-					pricing = visible
+					pricing = publicPricing(*model.Pricing)
 				}
 				models = append(models, map[string]any{"name": model.Name, "platform": platform, "pricing": pricing})
 			}
@@ -488,6 +477,21 @@ func (a *App) availableChannels(w http.ResponseWriter, r *http.Request) error {
 		out = append(out, map[string]any{"name": ch.name, "description": ch.description, "platforms": sections})
 	}
 	return reply(w, out)
+}
+
+func publicPricing(p modelPrice) map[string]json.RawMessage {
+	b, _ := json.Marshal(p)
+	var visible map[string]json.RawMessage
+	_ = json.Unmarshal(b, &visible)
+	delete(visible, "platform")
+	delete(visible, "models")
+	var intervals []map[string]json.RawMessage
+	_ = json.Unmarshal(visible["intervals"], &intervals)
+	for _, iv := range intervals {
+		delete(iv, "sort_order")
+	}
+	visible["intervals"], _ = json.Marshal(intervals)
+	return visible
 }
 func (a *App) channelRoutes() {
 	a.route("POST /api/v1/admin/channels", "admin", a.saveChannel)

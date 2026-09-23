@@ -338,6 +338,22 @@ func resolvedPrice(base, override, multiplier *json.Number) *big.Rat {
 	return new(big.Rat).Mul(rat(*base), decimalOr(multiplier, "1"))
 }
 
+// Both billing and the price directory resolve the same mutually exclusive tiers.
+func tokenPrices(p modelPrice, iv *priceInterval) [5]*big.Rat {
+	if iv == nil {
+		iv = &priceInterval{}
+	}
+	write1h := p.CacheWrite1h
+	if write1h == nil {
+		write1h = p.CacheWrite
+	}
+	hour := resolvedPrice(write1h, iv.CacheWrite1h, iv.WriteMultiplier)
+	if iv.CacheWrite != nil && iv.CacheWrite1h == nil {
+		hour = rat(*iv.CacheWrite)
+	}
+	return [5]*big.Rat{resolvedPrice(p.Input, iv.Input, iv.InputMultiplier), resolvedPrice(p.Output, iv.Output, iv.OutputMultiplier), resolvedPrice(p.CacheWrite, iv.CacheWrite, iv.WriteMultiplier), hour, resolvedPrice(p.CacheRead, iv.CacheRead, iv.ReadMultiplier)}
+}
+
 // calculatePrice requires a resolved price card. Missing prices for consumed units
 // are errors; an explicit zero remains free. Catalog fallback belongs to resolution.
 func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, effort, label string, at time.Time, longContext bool) (priceCost, error) {
@@ -393,22 +409,9 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 		if !longContext {
 			contextTokens = 1
 		}
-		iv := p.interval(contextTokens)
-		if iv == nil {
-			iv = &priceInterval{}
-		}
-		prices := [6]*big.Rat{resolvedPrice(p.Input, iv.Input, iv.InputMultiplier), resolvedPrice(p.Output, iv.Output, iv.OutputMultiplier), resolvedPrice(p.CacheWrite, iv.CacheWrite, iv.WriteMultiplier), resolvedPrice(p.CacheRead, iv.CacheRead, iv.ReadMultiplier), nil, nil}
-		write1h := p.CacheWrite1h
-		if write1h == nil {
-			write1h = p.CacheWrite
-		}
-		if iv.CacheWrite != nil && iv.CacheWrite1h == nil {
-			write1h = iv.CacheWrite
-		}
-		hourPrice := resolvedPrice(write1h, iv.CacheWrite1h, iv.WriteMultiplier)
-		if iv.CacheWrite != nil && iv.CacheWrite1h == nil {
-			hourPrice = rat(*iv.CacheWrite)
-		}
+		unitPrices := tokenPrices(p, p.interval(contextTokens))
+		prices := [6]*big.Rat{unitPrices[0], unitPrices[1], unitPrices[2], unitPrices[4], nil, nil}
+		hourPrice := unitPrices[3]
 		if p.ImageInput != nil && rat(*p.ImageInput).Sign() > 0 {
 			prices[4] = rat(*p.ImageInput)
 		} else {
