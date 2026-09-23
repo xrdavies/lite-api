@@ -9,9 +9,8 @@ func messagesChatPlatform(platform string) bool {
 	return chatResponsesPlatform(platform) || platform == "grok"
 }
 
-// Messages clients carry their conversation on every request. No provider
-// signature is usable on Chat, and no server-side conversation is created.
-func messagesToChat(body map[string]json.RawMessage) ([]byte, string, error) {
+// Shared controls retain the same validation and effort mapping on both targets.
+func messagesOpenAIOptions(body map[string]json.RawMessage) (map[string]any, string, error) {
 	out := map[string]any{"model": body["model"], "stream": false, "store": false, "max_completion_tokens": body["max_tokens"]}
 	for _, name := range []string{"stream", "temperature", "top_p", "service_tier"} {
 		if body[name] != nil {
@@ -70,6 +69,69 @@ func messagesToChat(body map[string]json.RawMessage) ([]byte, string, error) {
 			}
 			out["response_format"] = map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "response", "schema": f["schema"], "strict": true}}
 		}
+	}
+	var tools []map[string]json.RawMessage
+	if raw := body["tools"]; raw != nil && json.Unmarshal(raw, &tools) != nil {
+		return nil, "", bad("invalid tools")
+	}
+	declared := map[string]bool{}
+	converted := []any{}
+	for _, tool := range tools {
+		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
+		if kind != "" && kind != "custom" {
+			return nil, "", bad("hosted tools require native tool billing")
+		}
+		var schema map[string]json.RawMessage
+		if name == "" || len(name) > 256 || declared[name] || json.Unmarshal(tool["input_schema"], &schema) != nil || schema == nil {
+			return nil, "", bad("invalid or duplicate tool definition")
+		}
+		declared[name] = true
+		f := map[string]any{"name": name, "parameters": tool["input_schema"], "strict": false}
+		for _, key := range []string{"description", "strict"} {
+			if tool[key] != nil {
+				f[key] = tool[key]
+			}
+		}
+		converted = append(converted, map[string]any{"type": "function", "function": f})
+	}
+	if len(converted) > 0 {
+		out["tools"] = converted
+	}
+	if raw := body["tool_choice"]; raw != nil && string(raw) != "null" {
+		var c struct {
+			Type, Name string
+			Disable    *bool `json:"disable_parallel_tool_use"`
+		}
+		if json.Unmarshal(raw, &c) != nil {
+			return nil, "", bad("invalid tool_choice")
+		}
+		switch c.Type {
+		case "auto", "none":
+			out["tool_choice"] = c.Type
+		case "any":
+			if len(declared) == 0 {
+				return nil, "", bad("tool_choice requires tools")
+			}
+			out["tool_choice"] = "required"
+		case "tool":
+			if !declared[c.Name] {
+				return nil, "", bad("tool_choice references an undeclared tool")
+			}
+			out["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": c.Name}}
+		default:
+			return nil, "", bad("invalid tool_choice")
+		}
+		if c.Disable != nil {
+			out["parallel_tool_calls"] = !*c.Disable
+		}
+	}
+	return out, effort, nil
+}
+
+func messagesToChat(body map[string]json.RawMessage) ([]byte, string, error) {
+	out, effort, err := messagesOpenAIOptions(body)
+	if err != nil {
+		return nil, "", err
 	}
 	messages := []convertedChatMessage{}
 	if raw := body["system"]; raw != nil && string(raw) != "null" {
@@ -220,61 +282,6 @@ func messagesToChat(body map[string]json.RawMessage) ([]byte, string, error) {
 		return nil, "", bad("messages contain no convertible content")
 	}
 	out["messages"] = messages
-	var tools []map[string]json.RawMessage
-	if raw := body["tools"]; raw != nil && json.Unmarshal(raw, &tools) != nil {
-		return nil, "", bad("invalid tools")
-	}
-	declared := map[string]bool{}
-	converted := []any{}
-	for _, tool := range tools {
-		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
-		if kind != "" && kind != "custom" {
-			return nil, "", bad("hosted tools require native tool billing")
-		}
-		var schema map[string]json.RawMessage
-		if name == "" || len(name) > 256 || declared[name] || json.Unmarshal(tool["input_schema"], &schema) != nil || schema == nil {
-			return nil, "", bad("invalid or duplicate tool definition")
-		}
-		declared[name] = true
-		f := map[string]any{"name": name, "parameters": tool["input_schema"], "strict": false}
-		for _, key := range []string{"description", "strict"} {
-			if tool[key] != nil {
-				f[key] = tool[key]
-			}
-		}
-		converted = append(converted, map[string]any{"type": "function", "function": f})
-	}
-	if len(converted) > 0 {
-		out["tools"] = converted
-	}
-	if raw := body["tool_choice"]; raw != nil && string(raw) != "null" {
-		var c struct {
-			Type, Name string
-			Disable    *bool `json:"disable_parallel_tool_use"`
-		}
-		if json.Unmarshal(raw, &c) != nil {
-			return nil, "", bad("invalid tool_choice")
-		}
-		switch c.Type {
-		case "auto", "none":
-			out["tool_choice"] = c.Type
-		case "any":
-			if len(declared) == 0 {
-				return nil, "", bad("tool_choice requires tools")
-			}
-			out["tool_choice"] = "required"
-		case "tool":
-			if !declared[c.Name] {
-				return nil, "", bad("tool_choice references an undeclared tool")
-			}
-			out["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": c.Name}}
-		default:
-			return nil, "", bad("invalid tool_choice")
-		}
-		if c.Disable != nil {
-			out["parallel_tool_calls"] = !*c.Disable
-		}
-	}
 	raw, err := json.Marshal(out)
 	return raw, effort, err
 }

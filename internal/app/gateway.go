@@ -356,7 +356,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			continue
 		}
 		matches := u.protocol() == protocol
-		if protocol == "anthropic" && !in.CountOnly && u.protocol() == "chat_completions" && messagesChatPlatform(u.Platform) {
+		if protocol == "anthropic" && !in.CountOnly && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
 			matches = true
 		}
 		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
@@ -688,6 +688,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
+	var reasoningInput map[string]json.RawMessage
+	if protocol == "anthropic" {
+		reasoningInput, binding, err = a.messagesReasoningInput(g, request)
+		if err != nil {
+			fail(err)
+			return
+		}
+	}
 	history, err := a.chatHistory(g, in.Previous, binding)
 	if err != nil {
 		fail(err)
@@ -716,6 +724,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	wireIn := in
 	var chatBridge *responseChatStream
 	var messagesBridge *chatMessagesStream
+	var responsesMessages *responsesMessagesStream
 	var anthropicBridge *anthropicChatStream
 	var anthropicResponses *anthropicResponsesStream
 	var responsesBridge *chatResponsesStream
@@ -797,6 +806,20 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		anthropicResponses = nil
 		responsesBridge, chatRequest = nil, nil
 		messagesBridge = nil
+		responsesMessages = nil
+		if protocol == "anthropic" && selected.Account.protocol() == "responses" {
+			upstreamBody, wireIn.Effort, err = messagesToResponses(request, reasoningInput)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			wireIn.Protocol, wireIn.Headers = "responses", nil
+			path = "/v1/responses"
+			responsesMessages = newResponsesMessagesStream(model, func(item json.RawMessage) (string, error) {
+				return a.sealMessagesReasoning(g, selected.Account, item)
+			})
+		}
 		if protocol == "anthropic" && selected.Account.protocol() == "chat_completions" {
 			upstreamBody, wireIn.Effort, err = messagesToChat(request)
 			if err != nil {
@@ -967,6 +990,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 					_, responseBody, forwardErr = messagesBridge.finish(observation.Usage)
 				}
 			}
+			if forwardErr == nil && responsesMessages != nil {
+				responseBody, forwardErr = responsesMessages.response(responseBody, observation.Usage)
+			}
 			if forwardErr == nil && anthropicBridge != nil {
 				responseBody, forwardErr = anthropicBridge.response(responseBody, observation.Usage)
 			}
@@ -1033,6 +1059,19 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
+			if responsesMessages != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = responsesMessages.event([]byte(data), observation.Usage)
+				if err != nil {
+					return err
+				}
+				if wire == "" {
+					return nil
+				}
+			}
 			if messagesBridge != nil {
 				if data == "" {
 					return nil
@@ -1159,7 +1198,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			payloadHash = digest(model + "\n" + string(body))
 		}
 		billingEffort := effort
-		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil {
+		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil {
 			billingEffort = wireIn.Effort
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)

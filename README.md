@@ -121,6 +121,10 @@ Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账
 
 该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。
 
+Messages 也可直接调用上述六个平台的 Responses 协议账号，支持 JSON/SSE、系统/图文/PDF、工具及包含图片的工具结果、结构化输出。请求使用 `store=false` 与 `include=["reasoning.encrypted_content"]`，不经过 Chat 格式；工具 ID 与数字精度保持。文本及思考摘要增量返回，工具块和后续内容等结算成功后发送；length/filter 分别成为 max_tokens/refusal，原始 Responses 用量参与扣费。该转换不支持非空 stop_sequences、托管工具或原生 count_tokens。
+
+Responses 思考密文通过 AES-GCM 封装为 Messages 的 signature，绑定当前客户端 Key/分组和上游账号/凭证来源，30 天有效。客户端携带该签名续接时只能选择原来源；跨 Key/组、篡改、到期、部署密钥或上游凭证轮换会拒绝，原账号不可用时不改投。外部厂商签名不作为 Responses 密文转发。服务端不为此保存新会话表或明文历史；相同响应的幂等重放保留原签名。完整 reasoning item 的 ID、summary 和 encrypted_content 用于重放，行为依据 [OpenAI reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)。已用本地 HTTP 上游和数据库验证，尚未进行真实上游联调。
+
 Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（SSE）和 `:countTokens`，模型映射同时应用于 URL 与嵌套 token 计数请求。输出 token 包含思考 token，缓存 token 从普通输入中拆分；原生流保持 Gemini 事件形态，不添加 Chat 的 `[DONE]`。当前原生端点支持文本生成及其多模态输入，媒体生成输出和协议转换继续开发。
 
 `GET /v1/models`、`/models` 及其 `/{model}` 返回当前 Key 分组可见的模型，应用渠道/账号映射和客户端白名单。`/v1beta/models` 及详情返回 Gemini 原生格式，支持 `pageSize`/`pageToken`；上游模型目录按账号及配置版本缓存一分钟，支持上游分页。目录不产生消费，零余额仍可查询，禁用或到期的身份不可查询；ETag 命中也先验证权限。中转没有模型目录接口时可配置账号模型映射，通配映射需有具体目录或白名单模型才能枚举。
