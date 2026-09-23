@@ -244,6 +244,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testChannelManagement(t, a, admin, otherToken, gid)
 	testGateway(t, a, admin)
 	testNativeGateway(t, a, admin)
+	testEmbeddings(t, a, admin)
 	testLiveGateway(t, a, admin)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {

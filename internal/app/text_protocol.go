@@ -103,6 +103,25 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	if raw := body["service_tier"]; raw != nil && (json.Unmarshal(raw, &in.Tier) != nil || len(in.Tier) > 16) {
 		return in, bad("invalid service_tier")
 	}
+	if protocol == "embeddings" {
+		in.Scope = "embeddings"
+		if in.Stream || !validEmbeddingInput(body["input"]) {
+			return in, bad("embeddings require nonempty input and do not stream")
+		}
+		if raw := body["encoding_format"]; raw != nil {
+			var format string
+			if json.Unmarshal(raw, &format) != nil || format != "float" && format != "base64" {
+				return in, bad("invalid embedding encoding_format")
+			}
+		}
+		if raw := body["dimensions"]; raw != nil {
+			var n int64
+			if json.Unmarshal(raw, &n) != nil || n < 1 || n > 2147483647 {
+				return in, bad("invalid embedding dimensions")
+			}
+		}
+		return in, nil
+	}
 	var messages []json.RawMessage
 	if json.Unmarshal(body["messages"], &messages) != nil || len(messages) == 0 {
 		return in, bad("messages are required")
@@ -124,6 +143,8 @@ func validNativeModel(model string) bool {
 
 func (in textRequest) upstreamPath(model string) (string, error) {
 	switch in.Protocol {
+	case "embeddings":
+		return "/v1/embeddings", nil
 	case "anthropic":
 		if in.CountOnly {
 			return "/v1/messages/count_tokens", nil
@@ -145,6 +166,9 @@ func (in textRequest) upstreamPath(model string) (string, error) {
 }
 
 func (in textRequest) preflightUsage() priceUsage {
+	if in.Protocol == "embeddings" {
+		return priceUsage{Input: 1}
+	}
 	u := priceUsage{Input: 1, Output: 1, CacheRead: 1}
 	if in.Protocol == "anthropic" {
 		u.CacheWrite = 1
@@ -305,13 +329,83 @@ func (o *textObservation) observe(data []byte) error {
 		return nil
 	}
 	if event.Usage != nil && string(event.Usage) != "null" {
-		u, err := parseChatUsage(event.Usage)
+		usage := event.Usage
+		if o.Protocol == "embeddings" {
+			var values map[string]json.RawMessage
+			if json.Unmarshal(usage, &values) != nil || values == nil {
+				return &apiError{502, "upstream usage is invalid"}
+			}
+			if values["prompt_tokens"] == nil {
+				values["prompt_tokens"] = values["input_tokens"]
+				if values["prompt_tokens"] == nil {
+					values["prompt_tokens"] = values["total_tokens"]
+				}
+			}
+			if values["completion_tokens"] == nil {
+				values["completion_tokens"] = json.RawMessage("0")
+				if values["output_tokens"] != nil {
+					values["completion_tokens"] = values["output_tokens"]
+				}
+			}
+			if values["prompt_tokens_details"] == nil {
+				values["prompt_tokens_details"] = values["input_tokens_details"]
+			}
+			usage, _ = json.Marshal(values)
+		}
+		u, err := parseChatUsage(usage)
 		if err != nil {
 			return err
 		}
 		o.Usage, o.HasUsage = u, true
 	}
 	return nil
+}
+
+func validEmbeddingInput(raw json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text != ""
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(raw, &list) != nil || len(list) == 0 {
+		return false
+	}
+	// One token sequence, a batch of token sequences, or a batch of strings.
+	if validTokenSequence(raw) {
+		return true
+	}
+	if len(list) > 2048 {
+		return false
+	}
+	var texts []string
+	if json.Unmarshal(raw, &texts) == nil {
+		for _, text := range texts {
+			if text == "" {
+				return false
+			}
+		}
+		return true
+	}
+	for _, tokens := range list {
+		if !validTokenSequence(tokens) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTokenSequence(raw json.RawMessage) bool {
+	var tokens []json.RawMessage
+	if json.Unmarshal(raw, &tokens) != nil || len(tokens) == 0 {
+		return false
+	}
+	for _, token := range tokens {
+		n, err := json.Number(string(token)).Int64()
+		if err != nil || !tokenCountsValid(n) {
+			return false
+		}
+	}
+	return true
 }
 
 func tokenCountsValid(counts ...int64) bool {

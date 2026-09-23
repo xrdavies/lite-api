@@ -279,7 +279,11 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		if err != nil {
 			continue
 		}
-		if u.protocol() != protocol {
+		matches := u.protocol() == protocol
+		if protocol == "embeddings" {
+			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+		}
+		if !matches {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
@@ -358,6 +362,9 @@ func (a *App) gatewayRoutes() {
 	a.mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
 	a.mux.HandleFunc("POST /v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
 	a.mux.HandleFunc("POST /v1beta/models/{action}", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "gemini") })
+	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
+		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
+	}
 }
 func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol string) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -421,6 +428,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
 	if protocol == "gemini" && g.Group.Platform != "gemini" {
 		fail(bad("Gemini native endpoints require a Gemini group"))
+		return
+	}
+	if protocol == "embeddings" && g.Group.Platform != "openai" {
+		fail(&apiError{404, "embeddings require an OpenAI group"})
 		return
 	}
 	if !g.Group.allows(model) {
