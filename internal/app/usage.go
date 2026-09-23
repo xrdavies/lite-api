@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 func usageFilters(r *http.Request) (string, []any, error) {
@@ -131,6 +133,12 @@ func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
 	return pageReply(w, items, total, page, size)
 }
 func (a *App) usageRoutes() {
+	a.route("POST /api/v1/usage/dashboard/api-keys-usage", "user", a.keyUsageCosts)
+	a.route("GET /api/v1/user/api-keys/{id}/usage/daily", "user", a.keyDailyUsage)
+	a.route("GET /api/v1/admin/usage/search-users", "admin", a.usageSearch)
+	a.route("GET /api/v1/admin/usage/search-api-keys", "admin", a.usageSearch)
+	a.route("GET /api/v1/admin/audit-logs", "admin", a.auditLogs)
+	a.route("GET /api/v1/admin/audit-logs/{id}", "admin", a.auditLogs)
 	a.route("GET /api/v1/usage", "user", a.listUsage)
 	a.route("GET /api/v1/usage/{id}", "user", a.getUsage)
 	a.route("GET /api/v1/usage/stats", "user", a.usageStats)
@@ -138,6 +146,102 @@ func (a *App) usageRoutes() {
 	a.route("GET /api/v1/usage/errors/{id}", "user", a.usageErrors)
 	a.route("GET /api/v1/admin/usage", "admin", a.listUsage)
 	a.route("GET /api/v1/admin/usage/stats", "admin", a.usageStats)
+}
+
+func (a *App) keyUsageCosts(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		IDs *[]int64 `json:"api_key_ids"`
+	}
+	if err := decode(w, r, &in); err != nil {
+		return err
+	}
+	if in.IDs == nil || len(*in.IDs) > 100 {
+		return bad("api_key_ids must contain at most 100 IDs")
+	}
+	for _, id := range *in.IDs {
+		if id < 1 {
+			return bad("invalid API key ID")
+		}
+	}
+	now := time.Now()
+	day, _ := quotaStarts(now)
+	// The existing total field is the trailing 30 days, not lifetime spend.
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT jsonb_build_object('stats',COALESCE(jsonb_object_agg(k.id::text,jsonb_build_object('api_key_id',k.id,'today_actual_cost',c.today,'total_actual_cost',c.total)),'{}'::jsonb)) FROM api_keys k CROSS JOIN LATERAL (SELECT COALESCE(sum(actual_cost) FILTER (WHERE created_at >= $3),0) AS today,COALESCE(sum(actual_cost) FILTER (WHERE created_at >= $4 AND created_at < $5),0) AS total FROM usage_logs WHERE api_key_id=k.id AND user_id=$1 AND created_at >= LEAST($3,$4)) c WHERE k.user_id=$1 AND k.id=ANY($2) AND k.deleted_at IS NULL`, current(r).ID, pq.Array(*in.IDs), day, now.AddDate(0, 0, -30), now))
+	if err != nil {
+		return err
+	}
+	return reply(w, raw)
+}
+
+func (a *App) keyDailyUsage(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	days := 30
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		days, err = strconv.Atoi(raw)
+		if err != nil || days < 1 || days > 90 {
+			return bad("days must be between 1 and 90")
+		}
+	}
+	zone := r.URL.Query().Get("timezone")
+	if zone == "" {
+		zone = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil || zone == "Local" {
+		return bad("invalid timezone")
+	}
+	var owner int64
+	if err = a.DB.QueryRowContext(r.Context(), "SELECT user_id FROM api_keys WHERE id=$1 AND deleted_at IS NULL", id).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != current(r).ID {
+		return denied()
+	}
+	now := time.Now().In(loc)
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	start, end := day.AddDate(0, 0, 1-days), day.AddDate(0, 0, 1)
+	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(d) FROM (SELECT to_char(created_at AT TIME ZONE $5,'YYYY-MM-DD') AS date,count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(cache_read_tokens) AS cache_read_tokens,sum(cache_creation_tokens) AS cache_write_tokens,sum(input_tokens::bigint+output_tokens+cache_read_tokens+cache_creation_tokens) AS total_tokens,sum(total_cost) AS cost,sum(actual_cost) AS actual_cost FROM usage_logs WHERE user_id=$1 AND api_key_id=$2 AND created_at >= $3 AND created_at < $4 GROUP BY date ORDER BY date)d`, owner, id, start, end, zone)
+	if err != nil {
+		return err
+	}
+	items, err := jsonRows(rows)
+	if err != nil {
+		return err
+	}
+	return reply(w, map[string]any{"items": items, "days": days, "start_date": start.Format("2006-01-02"), "end_date": day.Format("2006-01-02")})
+}
+
+func (a *App) usageSearch(w http.ResponseWriter, r *http.Request) error {
+	query := r.URL.Query().Get("q")
+	if len(query) > 255 {
+		return bad("search query is too long")
+	}
+	statement := "SELECT jsonb_build_object('id',id,'email',email,'deleted',deleted_at IS NOT NULL) FROM users WHERE $1<>'' AND (strpos(lower(email),lower($1))>0 OR strpos(lower(username),lower($1))>0) ORDER BY email,id LIMIT 30"
+	args := []any{query}
+	if strings.HasSuffix(r.URL.Path, "search-api-keys") {
+		uid := int64(0)
+		if raw := r.URL.Query().Get("user_id"); raw != "" {
+			var err error
+			uid, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || uid < 1 {
+				return bad("invalid user_id")
+			}
+		}
+		statement = "SELECT jsonb_build_object('id',id,'name',name,'user_id',user_id) FROM api_keys WHERE ($2::bigint=0 OR user_id=$2) AND ($1='' OR strpos(lower(name),lower($1))>0) ORDER BY id DESC LIMIT 30"
+		args = append(args, uid)
+	}
+	rows, err := a.DB.QueryContext(r.Context(), statement, args...)
+	if err != nil {
+		return err
+	}
+	items, err := jsonRows(rows)
+	if err != nil {
+		return err
+	}
+	return reply(w, items)
 }
 func (a *App) gatewayBilling(w http.ResponseWriter, r *http.Request) {
 	if err := a.checkInstance(r.Context()); err != nil {

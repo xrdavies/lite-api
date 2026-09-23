@@ -468,4 +468,65 @@ func testGateway(t *testing.T, a *App, admin string) {
 	if err = a.DB.QueryRow("SELECT quota_used::text FROM api_keys WHERE id=$1", int64(noLimit["id"].(float64))).Scan(&used); err != nil || used != "0.00000000" {
 		t.Fatal("unconfigured quota counter changed", used, err)
 	}
+	// Queries use the authenticated owner; requested IDs never broaden that scope.
+	foreign := must("POST", "/api/v1/keys", admin, map[string]any{"name": "Query ownership", "group_id": gid})
+	foreignID := int64(foreign["id"].(float64))
+	costs := must("POST", "/api/v1/usage/dashboard/api-keys-usage", token, map[string]any{"api_key_ids": []int64{kid, kid, foreignID}})["stats"].(map[string]any)
+	if len(costs) != 1 || costs[fmt.Sprint(kid)].(map[string]any)["total_actual_cost"].(float64) <= 0 {
+		t.Fatal("key costs escaped owner or lost consumption", costs)
+	}
+	emptyCosts := must("POST", "/api/v1/usage/dashboard/api-keys-usage", token, map[string]any{"api_key_ids": []int64{}})["stats"].(map[string]any)
+	if len(emptyCosts) != 0 {
+		t.Fatal("empty key selection was broadened")
+	}
+	if w := call("POST", "/api/v1/usage/dashboard/api-keys-usage", token, map[string]any{"api_key_ids": make([]int64, 101)}); w.Code != 400 {
+		t.Fatal("key cost query bound", w.Code)
+	}
+	dailyPath := fmt.Sprintf("/api/v1/user/api-keys/%d/usage/daily", kid)
+	daily := must("GET", dailyPath+"?days=1&timezone=UTC", token, nil)
+	points := daily["items"].([]any)
+	if len(points) != 1 || points[0].(map[string]any)["actual_cost"].(float64) <= 0 {
+		t.Fatal("daily usage missing", daily)
+	}
+	for _, path := range []string{dailyPath + "?days=91", dailyPath + "?timezone=Invalid/Zone"} {
+		if w := call("GET", path, token, nil); w.Code != 400 {
+			t.Fatal("daily query validation", path, w.Code)
+		}
+	}
+	if w := call("GET", dailyPath, admin, nil); w.Code != 403 {
+		t.Fatal("daily usage ownership bypass", w.Code)
+	}
+	// Old consumption is excluded from the 30-day total while raw logs remain intact.
+	if _, err = a.DB.Exec("UPDATE usage_logs SET created_at=now()-interval '31 days' WHERE api_key_id=$1", kid); err != nil {
+		t.Fatal(err)
+	}
+	costs = must("POST", "/api/v1/usage/dashboard/api-keys-usage", token, map[string]any{"api_key_ids": []int64{kid}})["stats"].(map[string]any)
+	if costs[fmt.Sprint(kid)].(map[string]any)["total_actual_cost"].(float64) != 0 {
+		t.Fatal("30-day total reinterpreted as lifetime total")
+	}
+	audit := must("GET", "/api/v1/admin/audit-logs?q=scheduled-test-plans&method=post&success=true&page_size=500", admin, nil)
+	if audit["total"].(float64) < 1 || audit["page_size"].(float64) != 200 {
+		t.Fatal("audit filters or page size", audit)
+	}
+	entry := audit["items"].([]any)[0].(map[string]any)
+	if entry["method"] != "POST" || entry["status_code"].(float64) >= 400 || !strings.Contains(entry["path"].(string), "scheduled-test-plans") {
+		t.Fatal("audit filter mismatch", entry)
+	}
+	auditPath := fmt.Sprintf("/api/v1/admin/audit-logs/%d", int64(entry["id"].(float64)))
+	must("GET", auditPath, admin, nil)
+	if w := call("GET", auditPath, token, nil); w.Code != 403 {
+		t.Fatal("nonadmin audit access", w.Code)
+	}
+	if w := call("GET", "/api/v1/admin/audit-logs?actor_user_id=invalid", admin, nil); w.Code != 400 {
+		t.Fatal("audit ID validation", w.Code)
+	}
+	for _, path := range []string{"/api/v1/admin/usage/search-users?q=gateway", "/api/v1/admin/usage/search-api-keys?user_id=" + fmt.Sprint(uid)} {
+		w := call("GET", path, admin, nil)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"id"`) || strings.Contains(w.Body.String(), key) || strings.Contains(w.Body.String(), "password") {
+			t.Fatal("usage search failed or exposed credentials", w.Code)
+		}
+		if w := call("GET", path, token, nil); w.Code != 403 {
+			t.Fatal("nonadmin usage search", w.Code)
+		}
+	}
 }
