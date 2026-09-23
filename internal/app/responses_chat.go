@@ -69,6 +69,20 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			out.Body[name] = raw
 		}
 	}
+	if raw := body["modalities"]; raw != nil && string(raw) != "null" {
+		var modes []string
+		if json.Unmarshal(raw, &modes) != nil || len(modes) < 1 || len(modes) > 2 {
+			return nil, bad("invalid Responses modalities")
+		}
+		seen := map[string]bool{}
+		for _, mode := range modes {
+			if mode != "text" && mode != "image" || seen[mode] {
+				return nil, bad("unsupported Responses modality")
+			}
+			seen[mode] = true
+		}
+		out.Body["modalities"] = raw
+	}
 	for _, name := range []string{"prompt", "context_management"} {
 		if raw := body[name]; raw != nil && string(raw) != "null" {
 			return nil, bad(name + " requires a native Responses account")

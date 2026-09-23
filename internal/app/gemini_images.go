@@ -55,6 +55,84 @@ func geminiImageSize(body map[string]json.RawMessage) (string, string, error) {
 	return size, "input", nil
 }
 
+// Compatibility endpoints expose only the native image controls here. Keep
+// sampling, reasoning and tool conversion in their existing protocol paths.
+func geminiOutputOptions(config map[string]any, body map[string]json.RawMessage) error {
+	var native map[string]json.RawMessage
+	if raw := body["generationConfig"]; raw != nil && (json.Unmarshal(raw, &native) != nil || native == nil) {
+		return bad("invalid generationConfig")
+	}
+	for field := range native {
+		if field != "responseModalities" && field != "imageConfig" {
+			return bad("converted generationConfig only supports imageConfig and responseModalities")
+		}
+	}
+	raw := native["responseModalities"]
+	if modes := body["modalities"]; modes != nil {
+		if raw != nil {
+			return bad("choose modalities or generationConfig.responseModalities")
+		}
+		raw = modes
+	}
+	modes := []string{"TEXT"}
+	if geminiImageModel(credentialString(body, "model")) || native["imageConfig"] != nil {
+		modes = append(modes, "IMAGE")
+	}
+	if raw != nil {
+		if json.Unmarshal(raw, &modes) != nil || len(modes) < 1 || len(modes) > 2 {
+			return bad("Gemini modalities must contain text or image")
+		}
+		seen := map[string]bool{}
+		for i, mode := range modes {
+			mode = strings.ToUpper(strings.TrimSpace(mode))
+			if mode != "TEXT" && mode != "IMAGE" || seen[mode] {
+				return bad("invalid or duplicate Gemini modality")
+			}
+			seen[mode], modes[i] = true, mode
+		}
+	}
+	config["responseModalities"] = modes
+	if raw := native["imageConfig"]; raw != nil {
+		var image map[string]json.RawMessage
+		if json.Unmarshal(raw, &image) != nil || image == nil {
+			return bad("invalid imageConfig")
+		}
+		if _, _, err := geminiImageSize(body); err != nil {
+			return err
+		}
+		config["imageConfig"] = image
+	}
+	return nil
+}
+
+func geminiImageText(part map[string]json.RawMessage) (string, error) {
+	raw := part["inlineData"]
+	if raw == nil {
+		raw = part["inline_data"]
+	}
+	var inline map[string]json.RawMessage
+	if json.Unmarshal(raw, &inline) != nil || inline == nil {
+		return "", &apiError{502, "invalid Gemini inline image"}
+	}
+	kind := credentialString(inline, "mimeType")
+	if kind == "" {
+		kind = credentialString(inline, "mime_type")
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "image/png", "image/jpeg", "image/webp", "image/gif":
+	default:
+		return "", &apiError{502, "unsupported Gemini image type"}
+	}
+	data := credentialString(inline, "data")
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || len(decoded) == 0 {
+		return "", &apiError{502, "invalid Gemini image encoding"}
+	}
+	// Canonical base64 cannot inject Markdown delimiters or line breaks.
+	return "![image](data:" + kind + ";base64," + base64.StdEncoding.EncodeToString(decoded) + ")", nil
+}
+
 func (s *gatewaySelection) geminiImagePrice(g gatewayGroup, model, size string) (modelPrice, json.Number, error) {
 	if s.Restrict {
 		if _, ok := matchPrice(s.Pricing, s.Account.Platform, model); !ok {

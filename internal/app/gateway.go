@@ -1046,6 +1046,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			path, _ = wireIn.upstreamPath(selected.UpstreamModel)
 			if wireIn.Protocol == "gemini" {
 				var custom map[string]bool
+				for _, field := range []string{"generationConfig", "modalities"} {
+					if raw := request[field]; raw != nil {
+						chatRequest.Body[field] = raw
+					}
+				}
 				upstreamBody, custom, wireIn.Effort, err = responsesGeminiRequest(chatRequest.Body)
 				if err != nil {
 					selected.Release()
@@ -1083,8 +1088,21 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
-		if wireIn.Protocol == "gemini" && wireIn.ImageSize == "" {
-			wireIn.ImageSize, wireIn.ImageSizeSource = "2K", "default"
+		if wireIn.Protocol == "gemini" && protocol != "gemini" {
+			// Use the converted wire request for both validation and billing size;
+			// client aliases and ignored native options must not change the tariff.
+			var native map[string]json.RawMessage
+			_ = json.Unmarshal(upstreamBody, &native)
+			probe := r.Clone(ctx)
+			probe.SetPathValue("action", selected.UpstreamModel+":"+wireIn.Action)
+			parsed, parseErr := parseTextRequest(probe, "gemini", native)
+			if parseErr != nil {
+				selected.Release()
+				fail(parseErr)
+				return
+			}
+			wireIn.ImageGeneration, wireIn.ImageSize = parsed.ImageGeneration, parsed.ImageSize
+			wireIn.ImageSizeSource, wireIn.ImageInputSize = parsed.ImageSizeSource, parsed.ImageInputSize
 		}
 		wireIn.ImageGeneration = wireIn.ImageGeneration || wireIn.Protocol == "gemini" && geminiImageModel(selected.UpstreamModel)
 		if !in.CountOnly && selected.Search == "" && audioIn == nil {

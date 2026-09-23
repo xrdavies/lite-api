@@ -13,6 +13,7 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 		copy[k] = v
 	}
 	delete(copy, "stop")
+	delete(copy, "modalities")
 	raw, err := normalizeChatInput(copy, false)
 	if err != nil {
 		return nil, nil, "", err
@@ -25,6 +26,9 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 	}
 	out, custom, effort, err := geminiOptions(in, body["stop"], effort)
 	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := geminiOutputOptions(out["generationConfig"].(map[string]any), body); err != nil {
 		return nil, nil, "", err
 	}
 	names := map[string]bool{}
@@ -407,6 +411,26 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 				return "", &apiError{502, "converted stream exceeds limit"}
 			}
 			var tool map[string]any
+			if p["inlineData"] != nil || p["inline_data"] != nil {
+				if p["text"] != nil || p["functionCall"] != nil || p["inlineData"] != nil && p["inline_data"] != nil {
+					return "", &apiError{502, "ambiguous Gemini image part"}
+				}
+				text, err := geminiImageText(p)
+				if err != nil {
+					return "", err
+				}
+				if s.Part != nil {
+					partWire, err := s.Part(p, nil)
+					if err != nil {
+						return "", err
+					}
+					wire.WriteString(partWire)
+				} else {
+					s.Text.WriteString(text)
+					wire.WriteString(s.Chat.chunk(map[string]any{"content": text}, nil, nil))
+				}
+				continue
+			}
 			switch {
 			case p["text"] != nil:
 				var text string
@@ -480,7 +504,7 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 				}
 			case "MAX_TOKENS":
 				s.Finish = "length"
-			case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT":
+			case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "NO_IMAGE", "IMAGE_OTHER", "IMAGE_RECITATION":
 				s.Finish = "content_filter"
 			default:
 				return "", &apiError{502, "Gemini generation did not complete successfully"}
@@ -495,6 +519,9 @@ func (s *geminiChatStream) finish(u priceUsage) (string, []byte, error) {
 	}
 	usage := anthropicChatUsage(u)
 	usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": s.ReasoningTokens}
+	if u.ImageOutput > 0 {
+		usage["completion_tokens_details"].(map[string]any)["image_tokens"] = u.ImageOutput
+	}
 	message := map[string]any{"role": "assistant", "content": s.Text.String()}
 	if s.Thought.Len() > 0 {
 		message["reasoning_content"] = s.Thought.String()

@@ -90,6 +90,9 @@ func messagesToGemini(body map[string]json.RawMessage, saved map[string]json.Raw
 		return nil, "", err
 	}
 	config := out["generationConfig"].(map[string]any)
+	if err := geminiOutputOptions(config, body); err != nil {
+		return nil, "", err
+	}
 	if raw := body["top_k"]; raw != nil && string(raw) != "null" {
 		var n int64
 		if json.Unmarshal(raw, &n) != nil || n < 1 || n > 2147483647 {
@@ -327,7 +330,14 @@ func newGeminiMessagesStream(model string, seal func(json.RawMessage) (string, e
 }
 func (s *geminiMessagesStream) part(part map[string]json.RawMessage, tool map[string]any) (string, error) {
 	block := map[string]any{"type": "text", "text": credentialString(part, "text")}
-	if string(part["thought"]) == "true" || part["text"] == nil && tool == nil {
+	image := part["inlineData"] != nil || part["inline_data"] != nil
+	if image {
+		text, err := geminiImageText(part)
+		if err != nil {
+			return "", err
+		}
+		block["text"] = text
+	} else if string(part["thought"]) == "true" || part["text"] == nil && tool == nil {
 		block = map[string]any{"type": "thinking", "thinking": credentialString(part, "text"), "signature": ""}
 	}
 	if tool != nil {
