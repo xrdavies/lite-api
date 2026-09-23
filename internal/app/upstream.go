@@ -179,7 +179,7 @@ func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccou
 			}
 		}
 	}
-	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
+	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta", "X-Codex-Beta-Features"} {
 		if value := headers.Get(name); value != "" {
 			req.Header.Set(name, value)
 		}

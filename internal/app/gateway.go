@@ -207,7 +207,7 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	}
 	return modelPrice{}, &apiError{503, "model price is not configured"}
 }
-func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool) (*gatewaySelection, error) {
+func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding *responseBinding) (*gatewaySelection, error) {
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped"}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
@@ -272,11 +272,14 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		return nil, err
 	}
 	for _, c := range candidates {
-		if exclude[c.id] {
+		if exclude[c.id] || binding != nil && binding.AccountID != c.id {
 			continue
 		}
 		u, err := a.loadAccount(ctx, c.id)
 		if err != nil {
+			continue
+		}
+		if binding != nil && binding.Target != responseTarget(u) {
 			continue
 		}
 		matches := u.protocol() == protocol
@@ -365,6 +368,11 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
 	}
+	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		for _, suffix := range []string{"", "/{action...}"} {
+			a.mux.HandleFunc("POST "+path+suffix, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "responses") })
+		}
+	}
 }
 func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol string) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -385,8 +393,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if !committed {
 			textGatewayError(w, protocol, err)
 		} else {
-			data, _ := json.Marshal(textErrorBody(protocol, err))
-			if protocol == "anthropic" {
+			errorBody := textErrorBody(protocol, err)
+			if protocol == "responses" {
+				errorBody = map[string]any{"type": "error", "code": "gateway_error", "message": safeGatewayError(err), "param": nil}
+			}
+			data, _ := json.Marshal(errorBody)
+			if protocol == "anthropic" || protocol == "responses" {
 				_, _ = io.WriteString(w, "event: error\n")
 			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
@@ -466,6 +478,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(denied())
 		return
 	}
+	// Look up affinity after the idempotent replay check: replay needs no upstream.
+	binding, err := a.previousResponse(ctx, g, in.Previous)
+	if err != nil {
+		fail(err)
+		return
+	}
 
 	// Single-instance concurrency remains held through settlement, including client cancellation.
 	if !a.takeSlot("user", g.UserID, g.Concurrency) {
@@ -491,7 +509,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	excluded := map[int64]bool{}
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded)
+		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded, binding)
 		if err != nil {
 			fail(err)
 			return
@@ -560,7 +578,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	defer selected.Release()
 	defer resp.Body.Close()
-	observation := textObservation{Protocol: protocol, Tier: tier, CountOnly: in.CountOnly}
+	observation := textObservation{Protocol: protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action}
 	upstreamID := resp.Header.Get("X-Request-ID")
 	if upstreamID == "" {
 		upstreamID = resp.Header.Get("Request-Id")
@@ -577,6 +595,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			forwardErr = &apiError{502, "upstream response interrupted or oversized"}
 		} else {
 			forwardErr = observe(responseBody)
+			if forwardErr == nil && protocol == "responses" && !in.CountOnly && !observation.complete() {
+				forwardErr = &apiError{502, "upstream response is not complete"}
+			}
 		}
 	} else {
 		if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -619,7 +640,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				if len(terminal) > 2<<20 {
 					return &apiError{502, "upstream terminal frames exceed limit"}
 				}
-				done = protocol == "anthropic"
+				done = protocol == "anthropic" || protocol == "responses"
 				return nil
 			}
 			committed = true
@@ -673,6 +694,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, effort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
+			receipt.NativeCompaction = in.NativeCompaction
 			receipt.Upstream, _ = in.upstreamPath(selected.UpstreamModel)
 			receipt.Upstream, _, _ = strings.Cut(receipt.Upstream, "?")
 			billingCtx, billingCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -687,6 +709,15 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if forwardErr != nil {
 		fail(forwardErr)
 		return
+	}
+	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
+		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+		bindingCancel()
+		if err != nil {
+			fail(err)
+			return
+		}
 	}
 	if writer != nil {
 		writer.succeeded = true
@@ -711,16 +742,26 @@ func parseChatUsage(raw []byte) (priceUsage, error) {
 	var u struct {
 		Input        *int64 `json:"prompt_tokens"`
 		Output       *int64 `json:"completion_tokens"`
+		CacheWrite   int64  `json:"cache_creation_input_tokens"`
 		InputDetails struct {
-			Cached int64 `json:"cached_tokens"`
-			Image  int64 `json:"image_tokens"`
+			Cached int64  `json:"cached_tokens"`
+			Write  *int64 `json:"cache_write_tokens"`
+			Image  int64  `json:"image_tokens"`
 		} `json:"prompt_tokens_details"`
 		OutputDetails struct {
-			Image int64 `json:"image_tokens"`
+			Image     int64 `json:"image_tokens"`
+			Reasoning int64 `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
 	}
 	if json.Unmarshal(raw, &u) != nil || u.Input == nil || u.Output == nil || *u.Input < 0 || *u.Output < 0 || *u.Input > 2147483647 || *u.Output > 2147483647 || u.InputDetails.Cached < 0 || u.InputDetails.Cached > *u.Input || u.InputDetails.Image < 0 || u.OutputDetails.Image < 0 || u.OutputDetails.Image > *u.Output {
 		return priceUsage{}, &apiError{502, "upstream usage is invalid"}
 	}
-	return priceUsage{Input: *u.Input - u.InputDetails.Cached, Output: *u.Output, CacheRead: u.InputDetails.Cached, ImageInput: min(u.InputDetails.Image, *u.Input-u.InputDetails.Cached), ImageOutput: u.OutputDetails.Image}, nil
+	if u.InputDetails.Write != nil {
+		u.CacheWrite = *u.InputDetails.Write
+	}
+	if !tokenCountsValid(u.CacheWrite, u.OutputDetails.Reasoning) || u.CacheWrite > *u.Input-u.InputDetails.Cached || u.OutputDetails.Reasoning > *u.Output {
+		return priceUsage{}, &apiError{502, "upstream usage is invalid"}
+	}
+	input := *u.Input - u.InputDetails.Cached - u.CacheWrite
+	return priceUsage{Input: input, Output: *u.Output, CacheRead: u.InputDetails.Cached, CacheWrite: u.CacheWrite, ImageInput: min(u.InputDetails.Image, input), ImageOutput: u.OutputDetails.Image}, nil
 }

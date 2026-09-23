@@ -10,6 +10,9 @@ import (
 
 type textRequest struct {
 	Protocol, Scope, Model, Effort, Tier, Action string
+	Previous                                     string
+	Store                                        bool
+	NativeCompaction                             bool
 	Stream, CountOnly                            bool
 	Headers                                      http.Header
 }
@@ -103,6 +106,9 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	if raw := body["service_tier"]; raw != nil && (json.Unmarshal(raw, &in.Tier) != nil || len(in.Tier) > 16) {
 		return in, bad("invalid service_tier")
 	}
+	if protocol == "responses" {
+		return parseResponsesRequest(r, in, body)
+	}
 	if protocol == "embeddings" {
 		in.Scope = "embeddings"
 		if in.Stream || !validEmbeddingInput(body["input"]) {
@@ -143,6 +149,8 @@ func validNativeModel(model string) bool {
 
 func (in textRequest) upstreamPath(model string) (string, error) {
 	switch in.Protocol {
+	case "responses":
+		return "/v1/responses" + in.Action, nil
 	case "embeddings":
 		return "/v1/embeddings", nil
 	case "anthropic":
@@ -213,6 +221,7 @@ func textGatewayError(w http.ResponseWriter, protocol string, err error) {
 // reasoning/signature or content events forwarded to the client.
 type textObservation struct {
 	Protocol, Model, Tier string
+	ResponseID, Action    string
 	Usage                 priceUsage
 	HasUsage, CountOnly   bool
 	started, stopped      bool
@@ -221,7 +230,7 @@ type textObservation struct {
 }
 
 func (o *textObservation) complete() bool {
-	if o.Protocol == "anthropic" {
+	if o.Protocol == "anthropic" || o.Protocol == "responses" {
 		return o.stopped
 	}
 	if o.blocked {
@@ -239,6 +248,9 @@ func (o *textObservation) complete() bool {
 }
 
 func (o *textObservation) observe(data []byte) error {
+	if o.Protocol == "responses" {
+		return o.observeResponses(data)
+	}
 	var event struct {
 		Type, Model, ModelVersion string
 		Tier                      string          `json:"service_tier"`
