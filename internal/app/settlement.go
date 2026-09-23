@@ -330,7 +330,11 @@ func (a *App) applyReceipt(ctx context.Context, r *usageReceipt) error {
 	}
 	return tx.Commit()
 }
-func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, status int, retry string) {
+func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, status int, retry string, body []byte) {
+	if balanceFailure(s.Account.Platform, status, body) {
+		a.markBalanceFailure(ctx, s.Account)
+		return
+	}
 	seconds := int64(30)
 	if n, err := strconv.ParseInt(retry, 10, 64); err == nil && n > 0 {
 		seconds = min(n, 3600)

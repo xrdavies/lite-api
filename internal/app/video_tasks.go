@@ -630,7 +630,7 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		complete = resp.StatusCode >= 400 && resp.StatusCode < 500
-		a.markGatewayFailure(ctx, s, resp.StatusCode, resp.Header.Get("Retry-After"))
+		a.markGatewayFailure(ctx, s, resp.StatusCode, resp.Header.Get("Retry-After"), nil)
 		status := resp.StatusCode
 		if status < 400 || status > 599 {
 			status = 502

@@ -236,6 +236,14 @@ TTS 使用创建返回的 `voice_id`，会固定到原账号；未知、他人�
 协议依据 [xAI Custom Voices](https://docs.x.ai/developers/model-capabilities/audio/custom-voices) 和 [Voice API](https://docs.x.ai/developers/rest-api-reference/inference/voice)。原厂创建接口要求上游账号具备相应权限；本功能通过本地 HTTP/WebSocket 模拟验证，尚未使用真实 xAI Key 联调。
 
 
+## 上游余额和调度
+
+管理员可用 `GET /api/v1/admin/cn-providers/accounts/{id}/balance` 查询 Kimi、DeepSeek 按量账号余额。结果包含 `success/persisted`、主币种及完整币种明细，写入账号原有 `extra` 余额快照；金额解析和阈值比较保留十进制精度。手动查询只更新快照。接口分别对接 [Kimi 余额查询](https://platform.moonshot.cn/docs/api/balance) 和 [DeepSeek 余额查询](https://api-docs.deepseek.com/api/get-user-balance)，始终使用账号配置的上游地址和代理；中转须支持相同余额端点，不会将中转 Key 发往其他厂商域名。没有此端点的账号返回明确错误。
+
+后台默认每 10 分钟检查可调度的 Kimi/DeepSeek 按量账号，任一币种余额达到 0.5 即可保持调度，不做汇率换算。全部低于阈值或 DeepSeek 返回不可用时，临时停调两个检查周期；恢复后只清除 `cn_balance_low` 原因的临时停调。失败、无效/超大响应不改变已有快照或健康状态，探测期间的账号编辑和更新的余额失败信号不会被旧结果覆盖。人工禁用、认证错误、其他冷却、RPM 和消费计数不会被余额探测清除。
+
+环境变量 `GATEWAY_CN_PROVIDERS_BALANCE_CHECK_ENABLED`（默认 `true`）、`GATEWAY_CN_PROVIDERS_BALANCE_THRESHOLD`（默认 `0.5`）、`GATEWAY_CN_PROVIDERS_BALANCE_CHECK_INTERVAL_MINUTES`（默认 `10`，允许 1–1440）控制后台检查；关闭后台不关闭管理员手动查询或请求失败保护。单账号 15 秒超时，响应上限 256 KiB，顺序检查且同账号不并发探测。Kimi、DeepSeek、Zhipu、MiniMax 请求返回 402 或余额不足的 429 时，记录临时停调并在现有重试上限内尝试其他账号；普通 429 继续使用原限流冷却。该分支不恢复 Coding Plan。通过本地 HTTP 上游模拟及 Docker PostgreSQL/Redis 验证，未使用真实余额凭证联调。
+
 ## 视频与 Seedance
 
 Grok API Key 及路由到 Grok 的 composite 分组支持 `POST /v1/videos`、`/v1/videos/generations`、`/v1/videos/edits`、`/v1/videos/extensions`，均有去掉 `/v1` 的别名。创建使用 JSON，返回网关 `request_id`；GET `/v1/videos/{request_id}` 查询，追加 `/content` 下载。查询及下载也支持 `/videos/generations|edits|extensions/{request_id}` 前缀。创建受原 `allow_image_generation` 开关控制，编辑/扩展要求 `video.url`；不会下载客户端输入视频。单次请求最多 32 MiB，输出下载最多 64 MiB，仅接受视频或二进制响应，不跟随跳转或向内容 URL 发送 API Key。协议依据 [xAI 视频生成](https://docs.x.ai/developers/model-capabilities/video/generation)、[编辑](https://docs.x.ai/developers/model-capabilities/video/editing)及[扩展](https://docs.x.ai/developers/model-capabilities/video/extension)。

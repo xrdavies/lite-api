@@ -26,45 +26,57 @@ import (
 	"github.com/xrdavies/lite-api/schema"
 )
 
-type Config struct{ DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs, PricingFile string }
+type Config struct {
+	DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs, PricingFile string
+	BalanceCheckEnabled, BalanceThreshold, BalanceCheckIntervalMinutes              string
+}
 
 func ConfigFromEnv() Config {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	return Config{os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), addr, os.Getenv("JWT_SECRET"), os.Getenv("UPSTREAM_PRIVATE_CIDRS"), os.Getenv("PRICING_FILE")}
+	return Config{
+		DatabaseURL: os.Getenv("DATABASE_URL"), RedisURL: os.Getenv("REDIS_URL"), ListenAddr: addr,
+		JWTSecret: os.Getenv("JWT_SECRET"), UpstreamPrivateCIDRs: os.Getenv("UPSTREAM_PRIVATE_CIDRS"), PricingFile: os.Getenv("PRICING_FILE"),
+		BalanceCheckEnabled:         os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_ENABLED"),
+		BalanceThreshold:            os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_THRESHOLD"),
+		BalanceCheckIntervalMinutes: os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_INTERVAL_MINUTES"),
+	}
 }
 
 type App struct {
-	DB               *sql.DB
-	Redis            *redis.Client
-	instanceLock     *sql.Conn
-	secret           []byte
-	mux              *http.ServeMux
-	privateUpstreams []netip.Prefix
-	workerCancel     context.CancelFunc
-	workerDone       chan struct{}
-	imageWorkerDone  chan struct{}
-	imageTaskMu      sync.Mutex
-	batchMu          sync.Mutex
-	batchWorkerDone  chan struct{}
-	videoWorkerDone  chan struct{}
-	planMu           sync.Mutex
-	instanceLost     atomic.Bool
-	ingressFailures  atomic.Uint64
-	ingressDropped   atomic.Uint64
-	gatewayMu        sync.Mutex
-	gatewayActive    map[string]int
-	gatewayWaiting   map[string]int
-	gatewayQueued    int
-	gatewayWake      chan struct{}
-	gatewayStopped   bool
-	websockets       map[*responseSocket]context.CancelFunc
-	websocketDone    sync.WaitGroup
-	priceFile        string
-	priceMu          sync.Mutex
-	prices           atomic.Pointer[priceCatalog]
+	DB                *sql.DB
+	Redis             *redis.Client
+	instanceLock      *sql.Conn
+	secret            []byte
+	mux               *http.ServeMux
+	privateUpstreams  []netip.Prefix
+	workerCancel      context.CancelFunc
+	workerDone        chan struct{}
+	imageWorkerDone   chan struct{}
+	imageTaskMu       sync.Mutex
+	batchMu           sync.Mutex
+	batchWorkerDone   chan struct{}
+	videoWorkerDone   chan struct{}
+	balanceWorkerDone chan struct{}
+	balancePolicy     balanceCheckPolicy
+	balanceMu         sync.Mutex
+	planMu            sync.Mutex
+	instanceLost      atomic.Bool
+	ingressFailures   atomic.Uint64
+	ingressDropped    atomic.Uint64
+	gatewayMu         sync.Mutex
+	gatewayActive     map[string]int
+	gatewayWaiting    map[string]int
+	gatewayQueued     int
+	gatewayWake       chan struct{}
+	gatewayStopped    bool
+	websockets        map[*responseSocket]context.CancelFunc
+	websocketDone     sync.WaitGroup
+	priceFile         string
+	priceMu           sync.Mutex
+	prices            atomic.Pointer[priceCatalog]
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -86,6 +98,10 @@ func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
 }
 
 func New(ctx context.Context, cfg Config) (*App, error) {
+	balancePolicy, err := parseBalancePolicy(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if len(cfg.JWTSecret) < 32 {
 		return nil, errors.New("JWT_SECRET must contain at least 32 bytes")
 	}
@@ -127,6 +143,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return fail(errors.New("Redis connection failed"))
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
+	a.balancePolicy = balancePolicy
 	a.priceFile = cfg.PricingFile
 	a.prices.Store(pricing.prices.Load())
 	for _, raw := range strings.Split(cfg.UpstreamPrivateCIDRs, ",") {
@@ -152,6 +169,7 @@ func (a *App) Close() {
 	<-a.imageWorkerDone
 	<-a.batchWorkerDone
 	<-a.videoWorkerDone
+	<-a.balanceWorkerDone
 	a.Redis.Close()
 	a.instanceLock.Close()
 	a.DB.Close()

@@ -416,7 +416,7 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 			a.recordUpstreamFailure(id, g, selected, r, in, path, resp.StatusCode, started)
 			// 403 can mean this account lacks voice creation permission, not a bad Key.
 			if resp.StatusCode != 403 {
-				a.markGatewayFailure(ctx, selected, resp.StatusCode, resp.Header.Get("Retry-After"))
+				a.markGatewayFailure(ctx, selected, resp.StatusCode, resp.Header.Get("Retry-After"), nil)
 			}
 			completed = resp.StatusCode >= 400 && resp.StatusCode < 500
 			status := resp.StatusCode

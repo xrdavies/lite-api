@@ -1131,14 +1131,20 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		status := resp.StatusCode
 		a.recordUpstreamFailure(id, g, selected, r, in, path, status, started)
+		var failureBody []byte
+		if cnPaygPlatform(selected.Account.Platform) && status == http.StatusTooManyRequests {
+			// Only inspect bounded error text for provider-specific balance signals;
+			// it is never persisted or exposed to the client.
+			failureBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxBalanceBody))
+		}
 		resp.Body.Close()
 		searchEndpointError := protocol == "alpha_search" && (status == 401 || status == 404 || status == 405)
 		if !searchEndpointError {
-			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"))
+			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
 		}
 		selected.Release()
 		grokRetry := (in.Search != nil || audioIn != nil) && (status == 401 || status == 402 || status == 403 || status >= 500)
-		if !searchEndpointError && !grokRetry && status != 429 && status != 502 && status != 503 && status != 504 {
+		if !searchEndpointError && !grokRetry && !balanceFailure(selected.Account.Platform, status, failureBody) && status != 429 && status != 502 && status != 503 && status != 504 {
 			fail(&apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
 			return
 		}

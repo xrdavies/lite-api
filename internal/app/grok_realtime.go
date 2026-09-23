@@ -252,7 +252,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 			retry = resp.Header.Get("Retry-After")
 		}
 		a.recordUpstreamFailure(id, g, selected, r, in, "/v1/realtime", status, started)
-		a.markGatewayFailure(ctx, selected, status, retry)
+		a.markGatewayFailure(ctx, selected, status, retry, nil)
 		selected.Release()
 		excluded[selected.Account.ID] = true
 	}

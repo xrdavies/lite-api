@@ -509,6 +509,7 @@ func (a *App) accountState(w http.ResponseWriter, r *http.Request) error {
 	return a.getAccount(w, r)
 }
 func (a *App) accountRoutes() {
+	a.route("GET /api/v1/admin/cn-providers/accounts/{id}/balance", "admin", a.accountBalance)
 	a.route("GET /api/v1/admin/accounts", "admin", a.listAccounts)
 	a.route("POST /api/v1/admin/accounts", "admin", a.createAccount)
 	a.route("GET /api/v1/admin/accounts/{id}", "admin", a.getAccount)
