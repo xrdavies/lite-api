@@ -173,7 +173,7 @@ func testModelRouting(t *testing.T, a *App, admin string) {
 	a.releaseSlot("account", preferred)
 	check(busy, first)
 	prefPath := fmt.Sprintf("/api/v1/admin/accounts/%d", preferred)
-	for _, patch := range []map[string]any{{"status": "inactive"}, {"extra": map[string]any{"quota_limit": "1"}}, {"credentials": map[string]any{"api_protocol": "anthropic"}}} {
+	for _, patch := range []map[string]any{{"status": "inactive"}, {"extra": map[string]any{"quota_limit": "1"}}, {"expires_at": 1, "auto_pause_on_expired": true}} {
 		must("PUT", prefPath, admin, patch)
 		if patch["extra"] != nil {
 			if _, err := a.DB.Exec(`UPDATE accounts SET extra=extra||'{"quota_used":1}'::jsonb WHERE id=$1`, preferred); err != nil {
@@ -181,7 +181,7 @@ func testModelRouting(t *testing.T, a *App, admin string) {
 			}
 		}
 		check(call("POST", "/v1/chat/completions", key, body), first)
-		must("PUT", prefPath, admin, map[string]any{"status": "active", "extra": map[string]any{"quota_limit": "0"}, "credentials": map[string]any{"api_protocol": "chat_completions"}})
+		must("PUT", prefPath, admin, map[string]any{"status": "active", "expires_at": 0, "extra": map[string]any{"quota_limit": "0"}, "credentials": map[string]any{"api_protocol": "chat_completions"}})
 	}
 	route(outside, 99999999)
 	check(call("POST", "/v1/chat/completions", key, body), first)

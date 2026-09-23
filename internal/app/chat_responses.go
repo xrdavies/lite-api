@@ -14,6 +14,10 @@ func chatResponsesPlatform(platform string) bool {
 }
 
 func chatToResponses(body map[string]json.RawMessage) ([]byte, error) {
+	return normalizeChatInput(body, false)
+}
+
+func normalizeChatInput(body map[string]json.RawMessage, keepCache bool) ([]byte, error) {
 	var messages []struct {
 		Role, Name string
 		Content    json.RawMessage
@@ -87,7 +91,7 @@ func chatToResponses(body map[string]json.RawMessage) ([]byte, error) {
 		default:
 			return nil, bad("invalid Chat message role")
 		}
-		content, err := chatResponsesContent(msg.Content, msg.Role)
+		content, err := chatResponsesContent(msg.Content, msg.Role, keepCache)
 		if err != nil {
 			return nil, err
 		}
@@ -244,7 +248,7 @@ func chatToResponses(body map[string]json.RawMessage) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func chatResponsesContent(raw json.RawMessage, role string) (any, error) {
+func chatResponsesContent(raw json.RawMessage, role string, keepCache bool) (any, error) {
 	var text string
 	if len(raw) == 0 || string(raw) == "null" {
 		text = ""
@@ -265,7 +269,11 @@ func chatResponsesContent(raw json.RawMessage, role string) (any, error) {
 				if role == "assistant" {
 					kind = "output_text"
 				}
-				out = append(out, map[string]any{"type": kind, "text": text})
+				v := map[string]any{"type": kind, "text": text}
+				if keepCache && part["cache_control"] != nil {
+					v["cache_control"] = part["cache_control"]
+				}
+				out = append(out, v)
 			case "image_url":
 				if role != "user" {
 					return nil, bad("image content requires a user message")
@@ -275,6 +283,9 @@ func chatResponsesContent(raw json.RawMessage, role string) (any, error) {
 					return nil, bad("invalid image content")
 				}
 				v := map[string]any{"type": "input_image", "image_url": image.URL}
+				if keepCache && part["cache_control"] != nil {
+					v["cache_control"] = part["cache_control"]
+				}
 				if image.Detail != "" {
 					v["detail"] = image.Detail
 				}
@@ -285,6 +296,9 @@ func chatResponsesContent(raw json.RawMessage, role string) (any, error) {
 					return nil, bad("invalid file content")
 				}
 				file["type"] = json.RawMessage(`"input_file"`)
+				if keepCache && part["cache_control"] != nil {
+					file["cache_control"] = part["cache_control"]
+				}
 				out = append(out, file)
 			default:
 				return nil, bad("unsupported message content for Responses conversion")

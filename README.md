@@ -81,6 +81,10 @@ Chat → Responses 转换支持 JSON/SSE、system/developer/user/assistant 消�
 
 转换输出保留客户端模型名，实际上游模型和 `/v1/responses` 单独写入用量；计价采用原分组/渠道快照与 Responses 实际 usage。SSE 保留增量文本、推理及工具参数，补齐只有终态出现的内容并避免重复；`incomplete` 映射为对应的 length/content_filter，失败或断流不伪造成功。只有结算成功才发送 finish_reason 和 `[DONE]`；usage 块由客户端 `stream_options.include_usage` 决定。三种 Chat 路径继续共享幂等重放，转换不会建立原生 Responses 的续接关联。此转换已通过本地协议服务和数据库验证，尚未新增真实上游转换联调。
 
+Chat 入口也支持 Anthropic 平台，以及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 `api_protocol=anthropic` 账号。请求转为 `/v1/messages`，支持系统指令、文本/图片/PDF、函数和自定义工具及结果、停止序列和结构化输出；输出转回 Chat JSON/SSE。缓存读写按 Anthropic 原始 usage 分别结算，Chat usage 的 prompt_tokens 包含缓存部分；流式完成标记仍等待扣费成功。复合路由和模型目录采用相同准入。
+
+转换默认 max_tokens=8192，显式 max_completion_tokens 优先。xhigh 转为 max 并按实际 effort 计价；thinking budget 限制在输出上限以内，上限不够时拒绝。缓存标记传到 Anthropic；不透明思考签名不作为 Chat 文本输出。跨厂商 file_id、非默认多候选及没有对应含义的控制在派发前拒绝。协议依据 [Anthropic 流式文档](https://platform.claude.com/docs/en/build-with-claude/streaming) 与 [结构化输出文档](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)，已做本地协议及数据库验证，尚未使用真实 Anthropic 凭证联调。
+
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。

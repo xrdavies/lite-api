@@ -359,6 +359,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
 			matches = true
 		}
+		if protocol == "chat_completions" && u.protocol() == "anthropic" && chatAnthropicPlatform(u.Platform) {
+			matches = true
+		}
 		if protocol == "responses" && u.protocol() == "chat_completions" && chatResponsesPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
@@ -706,6 +709,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var resp *http.Response
 	wireIn := in
 	var chatBridge *responseChatStream
+	var anthropicBridge *anthropicChatStream
 	var responsesBridge *chatResponsesStream
 	var chatRequest *responsesChatRequest
 	maxAttempts := 3
@@ -757,17 +761,6 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
-		if !in.CountOnly && selected.Search == "" {
-			preflight, priceErr := selected.price(billingModel)
-			if priceErr == nil && preflight.BillingMode != "per_request" {
-				_, priceErr = calculatePrice(preflight, in.preflightUsage(), g.Group.Rate, tier, effort, "", started, g.Group.LongContext)
-			}
-			if priceErr != nil {
-				selected.Release()
-				fail(priceErr)
-				return
-			}
-		}
 		if selected.Search != "" {
 			if _, err = g.Group.searchCost(selected.Search); err != nil {
 				selected.Release()
@@ -791,7 +784,21 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		upstreamBody, _ := json.Marshal(request)
 		wireIn, chatBridge = in, nil
+		wireIn.Effort = effort
+		anthropicBridge = nil
 		responsesBridge, chatRequest = nil, nil
+		if protocol == "chat_completions" && selected.Account.protocol() == "anthropic" {
+			var custom map[string]bool
+			upstreamBody, custom, wireIn.Effort, err = chatToAnthropic(request)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			wireIn.Protocol = "anthropic"
+			path = "/v1/messages"
+			anthropicBridge = newAnthropicChatStream(model, includeChatUsage, custom)
+		}
 		if protocol == "chat_completions" && selected.Account.protocol() == "responses" {
 			upstreamBody, err = chatToResponses(request)
 			if err != nil {
@@ -829,6 +836,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		if in.Search != nil {
 			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)
+		}
+		if !in.CountOnly && selected.Search == "" {
+			preflight, priceErr := selected.price(billingModel)
+			if priceErr == nil && preflight.BillingMode != "per_request" {
+				_, priceErr = calculatePrice(preflight, wireIn.preflightUsage(), g.Group.Rate, tier, wireIn.Effort, "", started, g.Group.LongContext)
+			}
+			if priceErr != nil {
+				selected.Release()
+				fail(priceErr)
+				return
+			}
 		}
 		if _, err = a.admissionWake(); err != nil || ctx.Err() != nil {
 			selected.Release()
@@ -914,6 +932,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if forwardErr == nil && chatBridge != nil {
 				responseBody, forwardErr = responsesToChat(responseBody, model)
 			}
+			if forwardErr == nil && anthropicBridge != nil {
+				responseBody, forwardErr = anthropicBridge.response(responseBody, observation.Usage)
+			}
 			if forwardErr == nil && responsesBridge != nil {
 				_, forwardErr = responsesBridge.observe(responseBody, false)
 				if forwardErr == nil {
@@ -966,6 +987,19 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
+			if anthropicBridge != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = anthropicBridge.event([]byte(data), observation.Usage)
+				if err != nil {
+					return err
+				}
+				if wire == "" {
+					return nil
+				}
+			}
 			if responsesBridge != nil {
 				if data == "" {
 					return nil
@@ -1051,7 +1085,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if protocol == "gemini" {
 			payloadHash = digest(model + "\n" + string(body))
 		}
-		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, effort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
+		billingEffort := effort
+		if anthropicBridge != nil {
+			billingEffort = wireIn.Effort
+		}
+		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
 			receipt.WebSocket = socketTurn(ctx) != nil
 			receipt.RequestedEffort = originalEffort

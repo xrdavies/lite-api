@@ -261,6 +261,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAlphaSearch(t, a, admin)
 	testGrokSearch(t, a, admin)
 	testChatResponses(t, a, admin)
+	testChatAnthropic(t, a, admin)
 	testResponsesChat(t, a, admin)
 	testClientToolSearch(t, a, admin)
 	testLiveGateway(t, a, admin)
