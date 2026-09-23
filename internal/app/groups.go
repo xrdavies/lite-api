@@ -37,6 +37,7 @@ type groupInput struct {
 	ClaudeCodeOnly   *bool                `json:"claude_code_only"`
 	FallbackGroupID  *int64               `json:"fallback_group_id"`
 	WebSearchPrice   *json.Number         `json:"web_search_price_per_call"`
+	SearchPrice      *json.Number         `json:"search_price_per_1k"`
 }
 
 type modelManifestConfig struct {
@@ -81,6 +82,12 @@ func (a *App) validateModelManifest(r *http.Request, id int64, platform string, 
 }
 
 func (in *groupInput) validate(create bool) error {
+	if in.SearchPrice != nil && !validPrice(in.SearchPrice, 12, 8) {
+		value := json.Number(strings.TrimPrefix(in.SearchPrice.String(), "-"))
+		if !strings.HasPrefix(in.SearchPrice.String(), "-") || !validPrice(&value, 12, 8) {
+			return bad("invalid search price per thousand calls")
+		}
+	}
 	if in.WebSearchPrice != nil && !validPrice(in.WebSearchPrice, 12, 8) {
 		// A negative value clears an optional group price; null/omission preserves it.
 		value := json.Number(strings.TrimPrefix(in.WebSearchPrice.String(), "-"))
@@ -222,10 +229,14 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	}
 	codeOnly := in.ClaudeCodeOnly != nil && *in.ClaudeCodeOnly
 	var searchPrice any
+	var searchPricePerThousand any
+	if in.SearchPrice != nil && rat(*in.SearchPrice).Sign() >= 0 {
+		searchPricePerThousand = in.SearchPrice.String()
+	}
 	if in.WebSearchPrice != nil && rat(*in.WebSearchPrice).Sign() >= 0 {
 		searchPrice = in.WebSearchPrice.String()
 	}
-	raw, err := jsonRow(tx.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings,claude_code_only,fallback_group_id,web_search_price_per_call) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,CASE WHEN $19::bigint>0 THEN $19 ELSE NULL END,$20) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings, codeOnly, in.FallbackGroupID, searchPrice))
+	raw, err := jsonRow(tx.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing,model_routing,model_routing_enabled,max_reasoning_effort,max_reasoning_effort_over_limit,reasoning_effort_mappings,claude_code_only,fallback_group_id,web_search_price_per_call,search_price_per_1k) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,CASE WHEN $19::bigint>0 THEN $19 ELSE NULL END,$20,$21) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing, routing, routingEnabled, maxEffort, overLimit, effortMappings, codeOnly, in.FallbackGroupID, searchPrice, searchPricePerThousand))
 	if err != nil {
 		return err
 	}
@@ -265,6 +276,13 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 			price = in.WebSearchPrice.String()
 		}
 		add("web_search_price_per_call", price)
+	}
+	if in.SearchPrice != nil {
+		var price any
+		if rat(*in.SearchPrice).Sign() >= 0 {
+			price = in.SearchPrice.String()
+		}
+		add("search_price_per_1k", price)
 	}
 	if in.ClaudeCodeOnly != nil {
 		add("claude_code_only", *in.ClaudeCodeOnly)

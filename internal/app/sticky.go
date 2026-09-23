@@ -37,7 +37,7 @@ func anthropicMetadataSession(body map[string]json.RawMessage) string {
 // This is only a scheduling preference. Responses continuation has its own
 // mandatory binding, and every candidate still passes normal admission checks.
 func gatewaySessionKey(r *http.Request, g *gatewayIdentity, in textRequest, body map[string]json.RawMessage) (string, error) {
-	if in.CountOnly || in.Protocol == "embeddings" {
+	if in.CountOnly || in.Protocol == "embeddings" || grokSearchProtocol(in.Protocol) {
 		return "", nil
 	}
 	seed := ""

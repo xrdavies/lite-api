@@ -15,6 +15,7 @@ type textRequest struct {
 	NativeCompaction                             bool
 	Stream, CountOnly                            bool
 	Headers                                      http.Header
+	Search                                       *grokSearchRequest
 }
 
 func (in textRequest) compositeEndpoint() string {
@@ -32,6 +33,12 @@ func (in textRequest) compositeEndpoint() string {
 
 func parseTextRequest(r *http.Request, protocol string, body map[string]json.RawMessage) (textRequest, error) {
 	in := textRequest{Protocol: protocol, Headers: http.Header{}}
+	if grokSearchProtocol(protocol) {
+		var err error
+		in.Search, err = parseGrokSearch(body)
+		in.Model, in.Scope = "grok-4.6", protocol
+		return in, err
+	}
 	if protocol == "gemini" {
 		model, action, ok := strings.Cut(r.PathValue("action"), ":")
 		if !ok || !validNativeModel(model) {
@@ -180,6 +187,8 @@ func validNativeModel(model string) bool {
 
 func (in textRequest) upstreamPath(model string) (string, error) {
 	switch in.Protocol {
+	case "web_search", "x_search":
+		return "/v1/responses", nil
 	case "alpha_search":
 		return "/v1/alpha/search", nil
 	case "responses":

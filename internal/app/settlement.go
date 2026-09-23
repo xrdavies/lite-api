@@ -49,9 +49,12 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	var p modelPrice
 	var cost priceCost
 	var err error
-	if s.AlphaSearch {
+	if s.Search != "" {
 		p.BillingMode = "per_request"
-		cost, err = alphaSearchCost(g.Group.WebSearchPrice, g.Group.Rate)
+		cost, err = g.Group.searchCost(s.Search)
+		if grokSearchProtocol(s.Search) {
+			model = "grok-" + strings.ReplaceAll(s.Search, "_", "-")
+		}
 	} else {
 		p, err = s.price(model)
 		if err == nil {
@@ -122,10 +125,28 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 }
 
 func alphaSearchCost(price *json.Number, rate json.Number) (priceCost, error) {
+	return standaloneSearchCost(price, rate, false)
+}
+
+func (g gatewayGroup) searchCost(protocol string) (priceCost, error) {
+	if grokSearchProtocol(protocol) {
+		return standaloneSearchCost(g.SearchPrice, g.Rate, true)
+	}
+	return alphaSearchCost(g.WebSearchPrice, g.Rate)
+}
+
+func standaloneSearchCost(price *json.Number, rate json.Number, perThousand bool) (priceCost, error) {
+	fallback := "0.01"
+	if perThousand {
+		fallback = "5"
+	}
 	if !validPrice(price, 12, 8) || !validPrice(&rate, 6, 4) {
 		return priceCost{}, bad("invalid search price or multiplier")
 	}
-	total := decimalOr(price, "0.01")
+	total := decimalOr(price, fallback)
+	if perThousand {
+		total.Quo(total, big.NewRat(1000, 1))
+	}
 	actual := new(big.Rat).Mul(total, rat(rate))
 	return priceCost{Input: "0", Output: "0", CacheWrite: "0", CacheRead: "0", ImageInput: "0", ImageOutput: "0", Total: total.FloatString(10), Actual: actual.FloatString(10), Debit: actual.FloatString(8), totalValue: total}, nil
 }

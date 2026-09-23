@@ -42,6 +42,7 @@ type gatewayGroup struct {
 	ClaudeCodeOnly  bool                `json:"claude_code_only"`
 	FallbackGroupID *int64              `json:"fallback_group_id"`
 	WebSearchPrice  *json.Number        `json:"web_search_price_per_call"`
+	SearchPrice     *json.Number        `json:"search_price_per_1k"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -219,7 +220,7 @@ func (g *gatewayGroup) routingAccounts(model, platform string) []int64 {
 }
 
 type gatewaySelection struct {
-	AlphaSearch                                bool
+	Search                                     string
 	Account                                    *upstreamAccount
 	Rate                                       json.Number
 	ChannelID                                  *int64
@@ -238,7 +239,10 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 }
 func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
 	routing := g.dispatchGroup()
-	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing, AlphaSearch: protocol == "alpha_search"}
+	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
+	if protocol == "alpha_search" || grokSearchProtocol(protocol) {
+		s.Search = protocol
+	}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
 	if err != nil && err != sql.ErrNoRows {
@@ -357,6 +361,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		if protocol == "alpha_search" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
+		if grokSearchProtocol(protocol) {
+			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+		}
 		if !matches {
 			continue
 		}
@@ -442,6 +449,11 @@ func gatewayError(w http.ResponseWriter, err error) {
 }
 func (a *App) gatewayRoutes() {
 	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
+	for _, protocol := range []string{"web_search", "x_search"} {
+		for _, prefix := range []string{"/v1/", "/"} {
+			a.mux.HandleFunc("POST "+prefix+protocol, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, protocol) })
+		}
+	}
 	for _, path := range []string{"/v1/alpha/search", "/alpha/search", "/backend-api/codex/alpha/search"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "alpha_search") })
 	}
@@ -528,6 +540,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
 	originalEffort := requestedEffort(request, model)
+	if in.Search != nil {
+		originalEffort = nil
+		if g.Group.Platform != "grok" {
+			fail(&apiError{404, "this endpoint requires a Grok group"})
+			return
+		}
+	}
 	if protocol == "gemini" && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
 		fail(bad("Gemini native endpoints require a Gemini group"))
 		return
@@ -615,6 +634,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
+	if in.Search != nil && g.Group.Platform != "grok" {
+		fail(bad("this endpoint requires a Grok group"))
+		return
+	}
 	if socketTurn(ctx) != nil && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
 		fail(bad("Responses WebSocket requires an OpenAI or Grok target"))
 		return
@@ -624,7 +647,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" {
+	if protocol != "gemini" && protocol != "embeddings" && protocol != "alpha_search" && in.Search == nil {
 		if err = g.Group.reasoningPolicy.apply(request, model, g.Group.Platform); err == nil {
 			effort, err = requestEffort(request, protocol)
 		}
@@ -658,7 +681,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	excluded := map[int64]bool{}
 	catalog := a.prices.Load()
 	var resp *http.Response
-	for attempt := 0; attempt < 3; attempt++ {
+	maxAttempts := 3
+	if in.Search != nil {
+		maxAttempts = 4
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, sticky, catalog)
 		var busy *accountBusy
 		if errors.As(err, &busy) {
@@ -703,7 +730,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
-		if !in.CountOnly && protocol != "alpha_search" {
+		if !in.CountOnly && selected.Search == "" {
 			preflight, priceErr := selected.price(billingModel)
 			if priceErr == nil && preflight.BillingMode != "per_request" {
 				_, priceErr = calculatePrice(preflight, in.preflightUsage(), g.Group.Rate, tier, effort, "", started, g.Group.LongContext)
@@ -714,8 +741,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
-		if protocol == "alpha_search" {
-			if _, err = alphaSearchCost(g.Group.WebSearchPrice, g.Group.Rate); err != nil {
+		if selected.Search != "" {
+			if _, err = g.Group.searchCost(selected.Search); err != nil {
 				selected.Release()
 				fail(err)
 				return
@@ -736,6 +763,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			request["generateContentRequest"], _ = json.Marshal(nested)
 		}
 		upstreamBody, _ := json.Marshal(request)
+		if in.Search != nil {
+			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)
+		}
 		if _, err = a.admissionWake(); err != nil || ctx.Err() != nil {
 			selected.Release()
 			if err == nil {
@@ -778,7 +808,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"))
 		}
 		selected.Release()
-		if !searchEndpointError && status != 429 && status != 502 && status != 503 && status != 504 {
+		grokRetry := in.Search != nil && (status == 401 || status == 402 || status == 403 || status >= 500)
+		if !searchEndpointError && !grokRetry && status != 429 && status != 502 && status != 503 && status != 504 {
 			fail(&apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
 			return
 		}
@@ -806,6 +837,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		responseBody, err = io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
 		if err != nil || len(responseBody) > 16<<20 {
 			forwardErr = &apiError{502, "upstream response interrupted or oversized"}
+		} else if in.Search != nil {
+			responseBody, observation.Model, forwardErr = in.Search.response(responseBody)
+			if forwardErr == nil {
+				observation.Usage, observation.HasUsage = priceUsage{Requests: 1}, true
+			}
 		} else {
 			forwardErr = observe(responseBody)
 			if forwardErr == nil && protocol == "responses" && !in.CountOnly && !observation.complete() {

@@ -66,7 +66,7 @@ func (a *App) resolveClientGroup(r *http.Request, g *gatewayIdentity) error {
 	if !ok || !g.Group.ClaudeCodeOnly {
 		return nil
 	}
-	if policy.Protocol == "chat_completions" || policy.Protocol == "responses" || policy.Protocol == "embeddings" || policy.Protocol == "alpha_search" {
+	if policy.Protocol == "chat_completions" || policy.Protocol == "responses" || policy.Protocol == "embeddings" || policy.Protocol == "alpha_search" || grokSearchProtocol(policy.Protocol) {
 		return &apiError{403, "this group requires the Claude Code Messages endpoint"}
 	}
 	if policy.Code {
