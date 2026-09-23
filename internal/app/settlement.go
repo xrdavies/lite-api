@@ -46,11 +46,18 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 			model = response
 		}
 	}
-	p, err := s.price(model)
-	if err != nil {
-		return nil, err
+	var p modelPrice
+	var cost priceCost
+	var err error
+	if s.AlphaSearch {
+		p.BillingMode = "per_request"
+		cost, err = alphaSearchCost(g.Group.WebSearchPrice, g.Group.Rate)
+	} else {
+		p, err = s.price(model)
+		if err == nil {
+			cost, err = calculatePrice(p, u, g.Group.Rate, tier, effort, "", at, g.Group.LongContext)
+		}
 	}
-	cost, err := calculatePrice(p, u, g.Group.Rate, tier, effort, "", at, g.Group.LongContext)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +119,15 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	}
 	r.Fingerprint = r.fingerprint()
 	return r, nil
+}
+
+func alphaSearchCost(price *json.Number, rate json.Number) (priceCost, error) {
+	if !validPrice(price, 12, 8) || !validPrice(&rate, 6, 4) {
+		return priceCost{}, bad("invalid search price or multiplier")
+	}
+	total := decimalOr(price, "0.01")
+	actual := new(big.Rat).Mul(total, rat(rate))
+	return priceCost{Input: "0", Output: "0", CacheWrite: "0", CacheRead: "0", ImageInput: "0", ImageOutput: "0", Total: total.FloatString(10), Actual: actual.FloatString(10), Debit: actual.FloatString(8), totalValue: total}, nil
 }
 func truncate(s string, n int) string {
 	r := []rune(strings.ToValidUTF8(s, ""))

@@ -258,6 +258,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testGatewayQueues(t, a, admin)
 	testGroupFallback(t, a, admin)
 	testResponsesWebSocket(t, a, admin)
+	testAlphaSearch(t, a, admin)
 	testLiveGateway(t, a, admin)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {

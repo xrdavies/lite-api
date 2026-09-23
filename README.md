@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和可用渠道查询。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；Responses WS、协议转换、媒体、完整模型广场及扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和可用渠道查询。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket 和 alpha 独立搜索；协议转换、其他搜索、媒体、完整模型广场及扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -81,7 +81,13 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
 
-`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。后台 Responses、conversation/item_reference、内置搜索/图片等托管工具及 WS 仍待对应持久任务、隔离和计费实现，当前明确拒绝，未作为已完成能力。
+`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。后台 Responses、conversation/item_reference、内置搜索/图片等托管工具仍待对应持久任务、隔离和计费实现，当前明确拒绝，未作为已完成能力。
+
+三个 Responses 前缀的 GET 支持 WebSocket 升级。账号需使用 Responses 协议、OpenAI/Grok 平台，并设置 `extra.openai_apikey_responses_websockets_v2_mode="passthrough"`；默认关闭，`openai_ws_force_http=true` 禁止该路径。复合分组按实际目标平台检查。连接私有且逐轮重新鉴权，每个 `response.create` 复用 HTTP 的额度、路由、计价及结算；同一连接串行执行，可用 `stream_id` 关联客户端事件。`generate=false` 无 usage 的预热不扣费，`store=false` 的续接仅在本连接保留。每 Key 最多 4 条连接、进程 128 条；连接上限一小时，客户端空闲五分钟关闭。连接不接受请求幂等头；已发送的轮次不自动重试。下游断开后最多等待 15 秒收取已产生用量，数据库失败仍由待结算记录恢复。原厂 WebSocket 尚无真实凭证验证，当前验证使用本地协议服务。
+
+`POST /v1/alpha/search`、`/alpha/search`、`/backend-api/codex/alpha/search` 提供独立 JSON 搜索代理。请求必须包含 `model`，搜索命令及扩展字段透传；移除不属于独立搜索的 `prompt_cache_key`、`prompt_cache_retention`、`store`。选择 OpenAI 平台 Chat/Responses 协议的 API Key 账号，上游路径为 `/v1/alpha/search`；复合路由使用 responses 端点并仅允许 OpenAI 目标。该入口不支持流式，不代表任意上游已提供此端点。
+
+alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token usage。管理员通过分组 `web_search_price_per_call` 设置 USD/次：未配置默认 0.01，0 为免费，负数清除覆盖值，省略/null 保持。默认值是固定兼容计价规则，不代表上游报价。费用为单价乘本人专属/分组倍率，渠道与分组模型 token 价格不替代搜索单价，渠道模型限制仍生效；金额按既有 10/8 位口径记录和扣减。三种别名共享幂等与账务，失败不记成功消费。401/404/405 可尝试其他合格账号且不改变原账号全局健康状态；429/502/503/504 使用既有有限切换，网络结果不明时不重发。
 
 `POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 代理 token 计数。账号需配置 Anthropic 协议；按量兼容平台可使用 `credentials.api_protocol=anthropic`。版本和 beta 协议头受长度限制后转发，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
 

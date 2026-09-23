@@ -18,6 +18,9 @@ type textRequest struct {
 }
 
 func (in textRequest) compositeEndpoint() string {
+	if in.Protocol == "alpha_search" {
+		return "responses"
+	}
 	if in.Protocol == "anthropic" {
 		if in.CountOnly {
 			return "count_tokens"
@@ -104,6 +107,17 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	if json.Unmarshal(body["model"], &in.Model) != nil || !validModelPattern(in.Model) || len(in.Model) > 100 || strings.Contains(in.Model, "*") {
 		return in, bad("invalid model")
 	}
+	if protocol == "alpha_search" {
+		in.Scope = protocol
+		if raw := body["stream"]; raw != nil && (string(raw) != "false") {
+			return in, bad("alpha search does not stream")
+		}
+		// This is an independent search command, not a Responses request.
+		for _, field := range []string{"prompt_cache_key", "prompt_cache_retention", "store"} {
+			delete(body, field)
+		}
+		return in, nil
+	}
 	if raw := body["stream"]; raw != nil && json.Unmarshal(raw, &in.Stream) != nil {
 		return in, bad("invalid stream flag")
 	}
@@ -166,6 +180,8 @@ func validNativeModel(model string) bool {
 
 func (in textRequest) upstreamPath(model string) (string, error) {
 	switch in.Protocol {
+	case "alpha_search":
+		return "/v1/alpha/search", nil
 	case "responses":
 		return "/v1/responses" + in.Action, nil
 	case "embeddings":
@@ -265,6 +281,15 @@ func (o *textObservation) complete() bool {
 }
 
 func (o *textObservation) observe(data []byte) error {
+	if o.Protocol == "alpha_search" {
+		var result map[string]json.RawMessage
+		if json.Unmarshal(data, &result) != nil || result == nil || (result["error"] != nil && string(result["error"]) != "null") {
+			return &apiError{502, "upstream search response is invalid"}
+		}
+		// A successful standalone search is one billable call, with no token usage.
+		o.Usage, o.HasUsage = priceUsage{Requests: 1}, true
+		return nil
+	}
 	if o.Protocol == "responses" {
 		return o.observeResponses(data)
 	}

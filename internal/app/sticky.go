@@ -41,6 +41,12 @@ func gatewaySessionKey(r *http.Request, g *gatewayIdentity, in textRequest, body
 		return "", nil
 	}
 	seed := ""
+	if in.Protocol == "alpha_search" {
+		seed = credentialString(body, "id")
+		if seed != "" {
+			seed = "explicit:" + seed
+		}
+	}
 	if in.Protocol == "anthropic" {
 		if session := anthropicMetadataSession(body); session != "" {
 			seed = "explicit:" + session
