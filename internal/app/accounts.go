@@ -260,6 +260,7 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	if in.Platform != nil && *in.Platform != u.Platform {
 		return bad("account platform is immutable")
 	}
+	oldTarget := responseTarget(u)
 	for key, value := range in.Credentials {
 		u.Credentials[key] = value
 	}
@@ -329,8 +330,17 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 		if entry.value != nil {
 			b, _ := json.Marshal(entry.value)
 			args = append(args, string(b))
-			sets = append(sets, fmt.Sprintf("%s=%s || $%d::jsonb", entry.name, entry.name, len(args)))
+			expression := fmt.Sprintf("%s || $%d::jsonb", entry.name, len(args))
+			if entry.name == "extra" && oldTarget != responseTarget(u) {
+				expression = "(" + expression + ") - 'upstream_model_metadata'"
+			}
+			sets = append(sets, entry.name+"="+expression)
 		}
+	}
+	if oldTarget != responseTarget(u) && in.Extra == nil {
+		// Capability snapshots belong to the previous upstream credential/root.
+		// Configuration patches cannot retain them after the upstream changes.
+		sets = append(sets, "extra=extra - 'upstream_model_metadata'")
 	}
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {

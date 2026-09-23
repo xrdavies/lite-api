@@ -27,12 +27,13 @@ type gatewayKey struct {
 	Blacklist []string    `json:"ip_blacklist"`
 }
 type gatewayGroup struct {
-	ID          int64          `json:"id"`
-	Platform    string         `json:"platform"`
-	Rate        json.Number    `json:"rate_multiplier"`
-	RPM         int            `json:"rpm_limit"`
-	LongContext bool           `json:"long_context_pricing_enabled"`
-	Allowlist   modelAllowlist `json:"model_allowlist"`
+	ID          int64               `json:"id"`
+	Platform    string              `json:"platform"`
+	Rate        json.Number         `json:"rate_multiplier"`
+	RPM         int                 `json:"rpm_limit"`
+	LongContext bool                `json:"long_context_pricing_enabled"`
+	Allowlist   modelAllowlist      `json:"model_allowlist"`
+	Manifest    modelManifestConfig `json:"codex_models_manifest_config"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`

@@ -16,17 +16,59 @@ func supportedPlatform(platform string) bool {
 }
 
 type groupInput struct {
-	Name             *string         `json:"name"`
-	Description      *string         `json:"description"`
-	Platform         *string         `json:"platform"`
-	Status           *string         `json:"status"`
-	SubscriptionType *string         `json:"subscription_type"`
-	Rate             *json.Number    `json:"rate_multiplier"`
-	Exclusive        *bool           `json:"is_exclusive"`
-	RPMLimit         *int            `json:"rpm_limit"`
-	SortOrder        *int            `json:"sort_order"`
-	Allowlist        *modelAllowlist `json:"model_allowlist"`
-	LongContext      *bool           `json:"long_context_pricing_enabled"`
+	Name             *string              `json:"name"`
+	Description      *string              `json:"description"`
+	Platform         *string              `json:"platform"`
+	Status           *string              `json:"status"`
+	SubscriptionType *string              `json:"subscription_type"`
+	Rate             *json.Number         `json:"rate_multiplier"`
+	Exclusive        *bool                `json:"is_exclusive"`
+	RPMLimit         *int                 `json:"rpm_limit"`
+	SortOrder        *int                 `json:"sort_order"`
+	Allowlist        *modelAllowlist      `json:"model_allowlist"`
+	LongContext      *bool                `json:"long_context_pricing_enabled"`
+	Manifest         *modelManifestConfig `json:"codex_models_manifest_config"`
+}
+
+type modelManifestConfig struct {
+	Enabled  bool    `json:"enabled"`
+	Accounts []int64 `json:"account_ids"`
+	Fallback bool    `json:"fallback_to_scheduler"`
+}
+
+func (a *App) validateModelManifest(r *http.Request, id int64, platform string, cfg *modelManifestConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if platform != "openai" {
+		*cfg = modelManifestConfig{}
+		return nil
+	}
+	seen := map[int64]bool{}
+	ids := []int64{}
+	for _, id := range cfg.Accounts {
+		if id > 0 && !seen[id] {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	cfg.Accounts = ids
+	if !cfg.Enabled {
+		return nil
+	}
+	if len(ids) == 0 || len(ids) > 10 {
+		return bad("enabled model manifest requires 1 to 10 accounts")
+	}
+	for _, aid := range ids {
+		var member bool
+		if err := a.DB.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE a.id=$1 AND ag.group_id=$2 AND a.platform='openai' AND a.type='apikey' AND a.status='active' AND a.deleted_at IS NULL)`, aid, id).Scan(&member); err != nil {
+			return err
+		}
+		if !member {
+			return bad("model manifest accounts must be active OpenAI members of the group")
+		}
+	}
+	return nil
 }
 
 func (in *groupInput) validate(create bool) error {
@@ -97,7 +139,15 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if in.LongContext != nil {
 		longContext = *in.LongContext
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext))
+	if err := a.validateModelManifest(r, 0, platform, in.Manifest); err != nil {
+		return err
+	}
+	manifest := "{}"
+	if in.Manifest != nil {
+		raw, _ := json.Marshal(in.Manifest)
+		manifest = string(raw)
+	}
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest))
 	if err != nil {
 		return err
 	}
@@ -158,6 +208,18 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 		if platform != *in.Platform {
 			return bad("platform cannot change for an existing group")
 		}
+	}
+	if in.Manifest != nil {
+		var platform string
+		if err = a.DB.QueryRowContext(r.Context(), "SELECT platform FROM groups WHERE id=$1 AND deleted_at IS NULL", id).Scan(&platform); err != nil {
+			return err
+		}
+		if err = a.validateModelManifest(r, id, platform, in.Manifest); err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(in.Manifest)
+		args = append(args, string(raw))
+		sets = append(sets, fmt.Sprintf("codex_models_manifest_config=codex_models_manifest_config || $%d::jsonb", len(args)))
 	}
 	result, err := a.DB.ExecContext(r.Context(), "UPDATE groups SET "+strings.Join(sets, ",")+" WHERE id=$1 AND deleted_at IS NULL", args...)
 	if err != nil {

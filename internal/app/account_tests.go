@@ -202,16 +202,7 @@ func (a *App) accountModels(w http.ResponseWriter, r *http.Request) error {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	path := "/v1/models"
-	if u.protocol() == "gemini" {
-		path = "/v1beta/models"
-	}
-	response, err := a.upstreamRequest(ctx, u, http.MethodGet, path, nil)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	data, err := readUpstreamJSON(response)
+	data, err := a.fetchModels(ctx, u, true)
 	if err != nil {
 		return err
 	}

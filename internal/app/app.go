@@ -325,6 +325,7 @@ func (a *App) routes() {
 	a.proxyRoutes()
 	a.testPlanRoutes()
 	a.gatewayRoutes()
+	a.modelRoutes()
 	a.quotaRoutes()
 	a.usageRoutes()
 }
