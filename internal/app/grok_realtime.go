@@ -177,11 +177,16 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseSlot("user", g.UserID)
 	snapshot := g.Group
 	in := textRequest{Protocol: "realtime", Model: model, Stream: true}
+	binding, err := a.voiceLibraryBinding(ctx, g)
+	if err != nil {
+		fail(err)
+		return
+	}
 	excluded := map[int64]bool{}
 	var upstream *websocket.Conn
 	upstreamID := ""
 	for attempt := 0; attempt < 4; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, model, in, excluded, nil, nil, a.prices.Load())
+		selected, err = a.chooseAccount(ctx, g, model, in, excluded, binding, nil, a.prices.Load())
 		var busy *accountBusy
 		if errors.As(err, &busy) {
 			_, err = a.waitAdmission(ctx, "account", busy.ID, gatewayQueueTimeout, func(waitCtx context.Context) (bool, error) {
@@ -189,7 +194,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 					return false, err
 				}
 				var e error
-				selected, e = a.chooseAccount(waitCtx, g, model, in, excluded, nil, nil, a.prices.Load())
+				selected, e = a.chooseAccount(waitCtx, g, model, in, excluded, binding, nil, a.prices.Load())
 				if selected != nil && waitCtx.Err() != nil {
 					selected.Release()
 					selected = nil
@@ -404,6 +409,13 @@ loop:
 			if err != nil {
 				result = err
 				break loop
+			}
+			if frame.kind == websocket.MessageText {
+				raw, err = a.realtimeVoices(ctx, g, selected.Account, raw, frame.client)
+				if err != nil {
+					result = err
+					break loop
+				}
 			}
 			if frame.client && (!audio || !audioSeen) {
 				if err = a.realtimeAuthorized(r, g, selected, model); err != nil {

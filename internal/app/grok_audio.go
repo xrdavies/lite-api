@@ -55,6 +55,7 @@ type audioRequest struct {
 	ContentType string
 	Characters  int64
 	Model       string
+	Voice       string
 }
 
 func parseAudioRequest(protocol, contentType string, raw []byte) (*audioRequest, error) {
@@ -73,8 +74,17 @@ func parseAudioRequest(protocol, contentType string, raw []byte) (*audioRequest,
 		}
 		for name := range body {
 			lower := strings.ToLower(name)
-			if (lower == "input" || lower == "text" || lower == "prompt" || lower == "model") && name != lower {
+			if (lower == "input" || lower == "text" || lower == "prompt" || lower == "model" || lower == "voice" || lower == "voice_id") && name != lower {
 				return nil, bad("audio field names must use lowercase")
+			}
+		}
+		for _, name := range []string{"voice", "voice_id"} {
+			if value, ok := body[name]; ok {
+				var voice string
+				if json.Unmarshal(value, &voice) != nil || !validVoiceID(voice) || in.Voice != "" && in.Voice != voice {
+					return nil, bad("invalid or conflicting voice ID")
+				}
+				in.Voice = voice
 			}
 		}
 		if body["model"] != nil {

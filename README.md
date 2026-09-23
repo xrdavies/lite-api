@@ -223,3 +223,12 @@ PostgreSQL 保存加密请求、任务、结果索引和冻结凭据。单实例
 Realtime 连接受用户并发、Key/IP/分组权限、模型许可、账号健康、额度、RPM 和单实例 WebSocket 容量限制；连接期间每秒复核权限和账号状态，最长空闲五分钟。观察到音频后按连接分钟数建立 Redis 持久账务检查点，断开或策略错误时冻结最终时长并通过既有 SQL 去重账务结算；进程退出、数据库暂时失败或恢复执行不会重新连接上游或重复扣费。分组可设置 `audio_realtime_price_per_min`，省略时使用固定兼容价 0.05 USD/分钟，0 表示免费，金额仍乘分组/用户倍率。
 
 Realtime 已通过本地 WebSocket 上游模拟、Docker PostgreSQL/Redis 与 race 集成验证，覆盖 JSON/二进制音频、账号切换、权限撤销、上游错误隔离、价格快照和恢复去重；尚未使用真实 Grok 语音 Key 联调。
+
+
+`/v1/custom-voices` 和 `/custom-voices` 提供 POST 创建、GET 列表，以及 `/{voice_id}` 的 GET/PATCH/DELETE 和 `/{voice_id}/audio` 下载。创建接收单个 `file` 的 multipart 表单；更新保留字段省略/null 的不同含义。接口仅接受 Grok 分组的客户端 Key，沿用余额/额度准入、模型许可（`custom-voices`）、RPM、用户及账号并发；管理操作本身不扣费。文件和响应最多 32 MiB，单次上游请求最多五分钟。
+
+声音使用网关生成的 `voice_…` ID，归属创建它的 Key 和分组；列表只返回该 Key 在网关创建的声音，不暴露共享上游账号的整个声音库。列表支持 `limit`（1–1000）和 `pagination_token`，元数据由创建、详情及修改响应更新。参考音频从原账号下载，不在网关长期存储。归属与源账号凭证指纹保存在无过期时间的 Redis 记录中，因此 Redis 持久卷必须纳入备份。更换 Key 分组、删除账号、轮换上游 Key/地址后，不自动将已有声音转交其他来源。
+
+TTS 使用创建返回的 `voice_id`，会固定到原账号；未知、他人或已删除的自定义声音在转发前拒绝。一个 Key 的声音库固定在同一上游账号，Realtime 在握手前选择该账号，并转换 `session.voice` 和兼容的 `session.audio.output.voice`；账号不可用时不切到其他来源。内置声音仍可直接使用，当前名称依据官方语音列表。管理操作支持 `Idempotency-Key` 和路径别名重放；上游创建结果不确定时保留 processing 记录，重试返回 409，需核查上游后处理，不自动重复创建。
+
+协议依据 [xAI Custom Voices](https://docs.x.ai/developers/model-capabilities/audio/custom-voices) 和 [Voice API](https://docs.x.ai/developers/rest-api-reference/inference/voice)。原厂创建接口要求上游账号具备相应权限；本功能通过本地 HTTP/WebSocket 模拟验证，尚未使用真实 xAI Key 联调。

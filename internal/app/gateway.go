@@ -404,14 +404,14 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "images" {
 			matches = (u.Platform == "openai" || u.Platform == "grok") && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
-		if grokSearchProtocol(protocol) || voiceProtocol(protocol) {
+		if grokSearchProtocol(protocol) || voiceProtocol(protocol) || protocol == "custom-voices" {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if !matches {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
-		if audioProtocol(protocol) {
+		if audioProtocol(protocol) || protocol == "custom-voices" {
 			mapped, err = protocol, nil
 		}
 		if protocol == "realtime" {
@@ -497,6 +497,7 @@ func gatewayError(w http.ResponseWriter, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": "gateway_error", "code": status}})
 }
 func (a *App) gatewayRoutes() {
+	a.customVoiceRoutes()
 	for _, path := range []string{"/v1/realtime", "/realtime"} {
 		a.mux.HandleFunc("GET "+path, a.grokRealtime)
 	}
@@ -772,6 +773,21 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if err != nil {
 		fail(err)
 		return
+	}
+	if audioIn != nil && protocol == "tts" {
+		var native string
+		native, binding, err = a.resolveVoice(ctx, g, audioIn.Voice)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if audioIn.Voice != "" {
+			var audioBody map[string]json.RawMessage
+			_ = json.Unmarshal(audioIn.Body, &audioBody)
+			delete(audioBody, "voice")
+			audioBody["voice_id"], _ = json.Marshal(native)
+			audioIn.Body, _ = json.Marshal(audioBody)
+		}
 	}
 	var reasoningInput map[string]json.RawMessage
 	if protocol == "anthropic" {
