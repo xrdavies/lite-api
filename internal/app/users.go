@@ -240,6 +240,14 @@ func recordBalance(ctx context.Context, tx *sql.Tx, id int64, delta, notes strin
 	return err
 }
 func setGroupRates(ctx context.Context, tx *sql.Tx, id int64, rates map[int64]*json.Number) error {
+	if rates == nil {
+		return nil
+	}
+	if len(rates) == 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE user_group_rate_multipliers SET rate_multiplier=NULL,updated_at=now() WHERE user_id=$1", id); err != nil {
+			return err
+		}
+	}
 	for gid, rate := range rates {
 		if rate == nil {
 			if _, err := tx.ExecContext(ctx, "UPDATE user_group_rate_multipliers SET rate_multiplier=NULL,updated_at=now() WHERE user_id=$1 AND group_id=$2", id, gid); err != nil {
@@ -251,7 +259,8 @@ func setGroupRates(ctx context.Context, tx *sql.Tx, id int64, rates map[int64]*j
 			return err
 		}
 	}
-	return nil
+	_, err := tx.ExecContext(ctx, "DELETE FROM user_group_rate_multipliers WHERE user_id=$1 AND rate_multiplier IS NULL AND rpm_override IS NULL", id)
+	return err
 }
 func (a *App) updateUser(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
@@ -435,6 +444,7 @@ func (a *App) getUser(w http.ResponseWriter, r *http.Request) error {
 	return reply(w, u)
 }
 func (a *App) userRoutes() {
+	a.route("GET /api/v1/admin/users/{id}/rpm-status", "admin", a.userRPMStatus)
 	a.route("POST /api/v1/admin/users/{id}/balance", "admin", a.adjustBalance)
 	a.route("GET /api/v1/admin/users/{id}/balance-history", "admin", a.balanceHistory)
 	a.route("GET /api/v1/user/profile", "user", a.profile)
