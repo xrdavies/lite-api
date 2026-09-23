@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -155,6 +156,18 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 			}
 			if currentMode == 9 {
 				response["status"] = "incomplete"
+			}
+			if currentMode == 10 {
+				if !strings.Contains(string(req["tools"]), `"execution":"client"`) {
+					t.Error("WS tool search declaration lost")
+				}
+				response["output"] = []any{map[string]any{"type": "tool_search_call", "id": "tsc_ws", "execution": "client", "call_id": "search_ws", "arguments": map[string]string{"goal": "files"}, "status": "completed"}}
+			}
+			if currentMode == 11 {
+				if !strings.Contains(string(req["input"]), `"type":"tool_search_output"`) || !strings.Contains(string(req["input"]), `"name":"files"`) {
+					t.Error("WS tool discovery output lost")
+				}
+				response["output"] = []any{map[string]any{"type": "function_call", "id": "fc_ws", "namespace": "files", "name": "read", "call_id": "read_ws", "arguments": "{}", "status": "completed"}}
 			}
 			if !send(map[string]any{"type": "response." + response["status"].(string), "response": response}) {
 				return
@@ -420,6 +433,40 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	if usageCount() != count+1 {
 		t.Fatal("receipt charged twice")
 	}
+	// Client discovery remains native on a reused socket and bills only text usage.
+	mode.Store(10)
+	c = dial("/responses", key, nil, 101)
+	count = usageCount()
+	search := body()
+	search["tools"] = []any{json.RawMessage(clientSearchDeclaration)}
+	write(c, search)
+	event := terminal(c)
+	searchID := assertResult(event, "response.completed")
+	output := event["response"].(map[string]any)["output"].([]any)[0].(map[string]any)
+	if output["type"] != "tool_search_call" || output["execution"] != "client" {
+		t.Fatal("WS client search result", output)
+	}
+	mode.Store(11)
+	search = body()
+	search["previous_response_id"] = searchID
+	search["input"] = []any{map[string]any{"type": "tool_search_output", "execution": "client", "call_id": "search_ws", "status": "completed", "tools": json.RawMessage(discoveredClientTools)}}
+	write(c, search)
+	event = terminal(c)
+	assertResult(event, "response.completed")
+	output = event["response"].(map[string]any)["output"].([]any)[0].(map[string]any)
+	if output["namespace"] != "files" || usageCount() != count+2 {
+		t.Fatal("WS discovery result/billing", output, usageCount())
+	}
+	before = calls.Load()
+	search = body()
+	search["tools"] = []any{map[string]string{"type": "tool_search", "execution": "server"}}
+	write(c, search)
+	assertResult(terminal(c), "error")
+	if calls.Load() != before {
+		t.Fatal("WS hosted tool search admitted")
+	}
+	c.CloseNow()
+	mode.Store(0)
 	// Queued disconnects release user/account wait state without dispatch.
 	must("PUT", ap, admin, map[string]any{"concurrency": 1})
 	if !a.takeSlot("account", aid, 1) {

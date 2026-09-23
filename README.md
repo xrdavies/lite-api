@@ -83,9 +83,13 @@ Chat → Responses 转换支持 JSON/SSE、system/developer/user/assistant 消�
 
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
-OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、客户端工具发现、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。
+OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。
 
 namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截断并附加摘要；响应恢复原 namespace/name。强制 tool_choice、additional_tools、显式历史与 previous_response_id 均使用同一映射。相同定义去重，不同定义或映射名称冲突拒绝；namespace 内的托管工具、嵌套 namespace 及同时填写 tools/children 的歧义声明拒绝。原生 Responses 路径保持合法命名空间声明和输出。
+
+客户端工具发现支持 `type=tool_search`、`execution=client`，与 [OpenAI 工具搜索文档](https://developers.openai.com/api/docs/guides/tools-tool-search) 中的客户端执行模式一致。原生 Responses HTTP/SSE/WS 保留声明及调用；Chat 转换保留 description/parameters/strict，并将调用还原为 `tool_search_call`、`execution=client` 和对象形式的 arguments。流式搜索参数累计到 output_item.done 一并发送，该完成事件等待结算成功。网关不执行客户端工具，也不另收独立搜索费用，仍结算上游文本 usage。
+
+`tool_search_output.tools` 中成功返回的 function/custom/namespace 加入 Chat 下一次工具声明，并随加密续接历史保留；不要求重新声明 tool_search。失败或未完成结果保留为工具输出，不启用发现的工具；纯 output 文本/对象保留为历史，不当作工具定义解析。同一工具定义去重，不同 schema、名称或命名空间冲突拒绝；声明顺序和 JSON 对象键顺序不改变结果。发现的托管工具拒绝。省略 execution 或指定 server 的托管搜索尚未实现；Chat 自定义工具的格式约束仍按 input 字符串函数转换。
 
 转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 

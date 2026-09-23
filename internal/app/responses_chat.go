@@ -14,6 +14,7 @@ type convertedChatTool struct {
 	Type  string `json:"type,omitempty"`
 	// Namespace is retained in encrypted history and removed from Chat requests.
 	Namespace string `json:"namespace,omitempty"`
+	Search    bool   `json:"tool_search,omitempty"`
 	Function  struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
@@ -21,12 +22,13 @@ type convertedChatTool struct {
 }
 
 type convertedChatMessage struct {
-	Role      string              `json:"role"`
-	Content   any                 `json:"content"`
-	Reasoning string              `json:"reasoning_content,omitempty"`
-	Refusal   string              `json:"refusal,omitempty"`
-	Calls     []convertedChatTool `json:"tool_calls,omitempty"`
-	CallID    string              `json:"tool_call_id,omitempty"`
+	Role        string                       `json:"role"`
+	Content     any                          `json:"content"`
+	Reasoning   string                       `json:"reasoning_content,omitempty"`
+	Refusal     string                       `json:"refusal,omitempty"`
+	Calls       []convertedChatTool          `json:"tool_calls,omitempty"`
+	CallID      string                       `json:"tool_call_id,omitempty"`
+	Discoveries []map[string]json.RawMessage `json:"discovered_tools,omitempty"`
 }
 
 type responsesChatRequest struct {
@@ -35,6 +37,7 @@ type responsesChatRequest struct {
 	History    []convertedChatMessage
 	Custom     map[string]bool
 	Namespaces map[string]responseToolName
+	ToolSearch bool
 }
 
 type responseToolName struct{ Namespace, Name string }
@@ -137,10 +140,22 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	if err != nil {
 		return nil, err
 	}
+	// Saved discoveries remain callable in subsequent scoped continuations.
+	for _, message := range history {
+		if len(message.Discoveries) == 0 {
+			continue
+		}
+		raw, _ := json.Marshal(message.Discoveries)
+		callID, _ := json.Marshal(message.CallID)
+		tools, err = mergeResponseDiscoveries(tools, []map[string]json.RawMessage{{"type": json.RawMessage(`"tool_search_output"`), "call_id": callID, "tools": raw}})
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Reserve direct names before flattening so declaration order cannot hide a collision.
 	direct := map[string]bool{}
 	for _, tool := range tools {
-		if credentialString(tool, "type") != "namespace" {
+		if kind := credentialString(tool, "type"); kind != "namespace" && kind != "tool_search" {
 			direct[credentialString(tool, "name")] = true
 		}
 	}
@@ -172,28 +187,54 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			if err != nil {
 				return nil, err
 			}
-			definition, _ := json.Marshal(child)
+			definition := responseToolDefinition(child)
 			if previous, exists := namespacedDefinitions[flat]; exists {
-				if previous != string(definition) {
+				if previous != definition {
 					return nil, bad("conflicting namespaced tool definitions")
 				}
 				continue
 			}
-			namespacedDefinitions[flat] = string(definition)
+			namespacedDefinitions[flat] = definition
 			child["name"], _ = json.Marshal(flat)
 			expanded = append(expanded, child)
 		}
 	}
 	convertedTools := []any{}
 	seen := map[string]bool{}
+	searchDefinition := ""
 	for _, tool := range expanded {
 		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
+		if kind == "tool_search" {
+			if err := validateResponseClientTool(tool); err != nil {
+				return nil, err
+			}
+			name = "tool_search"
+			if direct[name] {
+				return nil, bad("tool search conflicts with a declared tool name")
+			}
+			definition := responseToolDefinition(tool)
+			if out.ToolSearch {
+				if definition != searchDefinition {
+					return nil, bad("conflicting tool search definitions")
+				}
+				continue
+			}
+			out.ToolSearch, searchDefinition = true, definition
+		}
 		if name == "" || len(name) > 256 || seen[name] {
 			return nil, bad("invalid or duplicate tool name")
 		}
 		seen[name] = true
 		function := map[string]any{"name": name}
 		switch kind {
+		case "tool_search":
+			function["description"] = "Find client tools for the current task."
+			function["parameters"] = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`)
+			for _, field := range []string{"description", "parameters", "strict"} {
+				if raw := tool[field]; raw != nil {
+					function[field] = raw
+				}
+			}
 		case "function":
 			for _, field := range []string{"description", "parameters", "strict"} {
 				if raw := tool[field]; raw != nil {
@@ -226,6 +267,12 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 				return nil, bad("invalid tool choice")
 			}
 			kind, name := credentialString(choice, "type"), credentialString(choice, "name")
+			if kind == "tool_search" {
+				if !out.ToolSearch {
+					return nil, bad("tool choice requires declared client tool search")
+				}
+				kind, name = "function", "tool_search"
+			}
 			if namespace := credentialString(choice, "namespace"); namespace != "" {
 				flat := flattenedToolName(namespace, name)
 				if kind != "function" || out.Namespaces[flat] != (responseToolName{namespace, name}) {
@@ -268,6 +315,35 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			if reasoning == "" && item["encrypted_content"] != nil {
 				return nil, bad("encrypted reasoning requires its plaintext summary for Chat conversion")
 			}
+		case "tool_search_call":
+			if err := clientSearchItem(item); err != nil {
+				return nil, err
+			}
+			arguments, err := searchCallArguments(item["arguments"])
+			if err != nil {
+				return nil, bad("tool search arguments must be a JSON object")
+			}
+			call := convertedChatTool{ID: credentialString(item, "call_id"), Type: "function", Search: true}
+			call.Function.Name, call.Function.Arguments = "tool_search", string(arguments)
+			msg := appendAssistant()
+			msg.Calls = append(msg.Calls, call)
+		case "tool_search_output":
+			discovered, err := searchOutputTools(item)
+			if err != nil {
+				return nil, err
+			}
+			raw := item["output"]
+			if raw == nil || string(raw) == "null" {
+				raw = item["tools"]
+			}
+			if raw == nil {
+				return nil, bad("tool search output requires output or tools")
+			}
+			var text string
+			if json.Unmarshal(raw, &text) != nil {
+				text = string(raw)
+			}
+			out.Messages = append(out.Messages, convertedChatMessage{Role: "tool", CallID: credentialString(item, "call_id"), Content: text, Discoveries: discovered})
 		case "function_call", "custom_tool_call":
 			name, callID := credentialString(item, "name"), credentialString(item, "call_id")
 			if name == "" || callID == "" {
@@ -351,9 +427,14 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 		}
 	}
 	for i := range out.Messages {
+		out.Messages[i].Discoveries = nil
 		out.Messages[i].Calls = append([]convertedChatTool(nil), out.Messages[i].Calls...)
 		for j := range out.Messages[i].Calls {
 			call := &out.Messages[i].Calls[j]
+			if call.Search && direct["tool_search"] || !call.Search && call.Namespace == "" && call.Function.Name == "tool_search" && out.ToolSearch {
+				return nil, bad("tool search conflicts with history tool identity")
+			}
+			call.Search = false
 			if call.Namespace != "" {
 				call.Function.Name, call.Namespace = flattenedToolName(call.Namespace, call.Function.Name), ""
 			} else if _, exists := out.Namespaces[call.Function.Name]; exists {
@@ -463,6 +544,7 @@ type chatResponsesStream struct {
 	TextIndex, ReasoningIndex, RefusalIndex int
 	Custom                                  map[string]bool
 	Namespaces                              map[string]responseToolName
+	ToolSearch                              bool
 	Usage                                   map[string]json.RawMessage
 }
 
@@ -536,6 +618,10 @@ func (s *chatResponsesStream) item(p *chatResponsePart, full bool) (map[string]a
 			v["type"], v["input"] = "custom_tool_call", ""
 			delete(v, "arguments")
 		}
+		if s.ToolSearch && p.Name == "tool_search" {
+			v["type"], v["execution"], v["arguments"] = "tool_search_call", "client", json.RawMessage(`{}`)
+			delete(v, "name")
+		}
 		if full {
 			args := p.Arguments
 			if args == "" {
@@ -544,7 +630,13 @@ func (s *chatResponsesStream) item(p *chatResponsePart, full bool) (map[string]a
 			if !json.Valid([]byte(args)) {
 				return nil, &apiError{502, "upstream tool arguments are incomplete"}
 			}
-			if s.Custom[p.Name] {
+			if s.ToolSearch && p.Name == "tool_search" {
+				arguments, err := searchCallArguments([]byte(args))
+				if err != nil {
+					return nil, &apiError{502, "upstream tool search arguments are not an object"}
+				}
+				v["arguments"] = json.RawMessage(arguments)
+			} else if s.Custom[p.Name] {
 				var input struct {
 					Input *string `json:"input"`
 				}
@@ -738,12 +830,15 @@ func (s *chatResponsesStream) observe(raw []byte, stream bool) (string, error) {
 		}
 		args := call.Function.Arguments
 		if !p.Announced {
+			if s.ToolSearch && p.Name == "tool_search" {
+				p.ID = "tsc_" + randomToken(12)
+			}
 			item, _ := s.item(p, false)
 			wire += s.emit("response.output_item.added", map[string]any{"output_index": output, "item": item})
 			p.Announced = true
 			args = p.Arguments
 		}
-		if args != "" && !s.Custom[p.Name] {
+		if args != "" && !s.Custom[p.Name] && !(s.ToolSearch && p.Name == "tool_search") {
 			wire += s.emit("response.function_call_arguments.delta", map[string]any{"output_index": output, "item_id": p.ID, "delta": args})
 		}
 	}
@@ -790,6 +885,9 @@ func (s *chatResponsesStream) finish() (string, []byte, error) {
 		fields := map[string]any{"output_index": index, "item_id": p.ID}
 		switch p.Kind {
 		case "function_call":
+			if s.ToolSearch && p.Name == "tool_search" {
+				break
+			}
 			event, field, value := "function_call_arguments", "arguments", item["arguments"]
 			if s.Custom[p.Name] {
 				event, field, value = "custom_tool_call_input", "input", item["input"]
@@ -837,6 +935,7 @@ func (s *chatResponsesStream) assistant() convertedChatMessage {
 			msg.Refusal += p.Text
 		case "function_call":
 			call := convertedChatTool{ID: p.CallID, Type: "function"}
+			call.Search = s.ToolSearch && p.Name == "tool_search"
 			call.Function.Name, call.Function.Arguments = p.Name, p.Arguments
 			if name, ok := s.Namespaces[p.Name]; ok {
 				call.Function.Name, call.Namespace = name.Name, name.Namespace

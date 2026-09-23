@@ -100,12 +100,8 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
-		if kind := credentialString(tool, "type"); kind == "namespace" {
-			if _, err := responseNamespaceChildren(tool); err != nil {
-				return in, err
-			}
-		} else if kind != "function" && kind != "custom" {
-			return in, bad("hosted tool billing is not yet available")
+		if err := validateResponseClientTool(tool); err != nil {
+			return in, err
 		}
 	}
 	return in, nil
@@ -153,7 +149,7 @@ func responseClientTools(body map[string]json.RawMessage) ([]map[string]json.Raw
 			tools = append(tools, extra...)
 		}
 	}
-	return tools, nil
+	return mergeResponseDiscoveries(tools, items)
 }
 
 func validResponseID(id string) bool {
