@@ -409,10 +409,6 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	if g.Group.Platform == "composite" {
-		fail(bad("composite routing is not yet available"))
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -430,11 +426,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
-	if protocol == "gemini" && g.Group.Platform != "gemini" {
+	if protocol == "gemini" && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
 		fail(bad("Gemini native endpoints require a Gemini group"))
 		return
 	}
-	if protocol == "embeddings" && g.Group.Platform != "openai" {
+	if protocol == "embeddings" && g.Group.Platform != "openai" && g.Group.Platform != "composite" {
 		fail(&apiError{404, "embeddings require an OpenAI group"})
 		return
 	}
@@ -471,6 +467,35 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	// Look up affinity after the idempotent replay check: replay needs no upstream.
+	routingModel := model
+	if g.Group.Platform == "composite" {
+		config, err := a.loadComposite(ctx, g.Key.GroupID)
+		if err != nil {
+			fail(err)
+			return
+		}
+		endpoint := protocol
+		if protocol == "anthropic" {
+			endpoint = "messages"
+			if in.CountOnly {
+				endpoint = "count_tokens"
+			}
+		}
+		decision := config.resolve(g.Key.GroupID, model, endpoint)
+		if !decision.Matched {
+			fail(&apiError{404, decision.Reason})
+			return
+		}
+		g.Group.Platform, routingModel = decision.TargetPlatform, decision.UpstreamModel
+		if err = a.checkPlatformQuota(ctx, g.UserID, g.Group.Platform); err != nil {
+			fail(err)
+			return
+		}
+	}
+	if protocol == "gemini" && g.Group.Platform != "gemini" || protocol == "embeddings" && g.Group.Platform != "openai" {
+		fail(bad("resolved platform does not support this endpoint"))
+		return
+	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
 	if err != nil {
 		fail(err)
@@ -502,7 +527,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	catalog := a.prices.Load()
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded, binding, catalog)
+		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, catalog)
 		if err != nil {
 			fail(err)
 			return

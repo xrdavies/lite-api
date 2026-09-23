@@ -250,6 +250,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testModelPlaza(t, a, admin)
 	testReferencePricing(t, a, admin)
 	testGroupOverrides(t, a, admin)
+	testCompositeGateway(t, a, admin)
 	testLiveGateway(t, a, admin)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {

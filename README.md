@@ -29,6 +29,10 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
 
+复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini，图片执行随后续媒体功能交付。
+
+复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换、fallback 与媒体继续开发。
+
 ## 上游与健康测试
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实文本请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。
@@ -71,7 +75,7 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 `GET /v1/models`、`/models` 及其 `/{model}` 返回当前 Key 分组可见的模型，应用渠道/账号映射和客户端白名单。`/v1beta/models` 及详情返回 Gemini 原生格式，支持 `pageSize`/`pageToken`；上游模型目录按账号及配置版本缓存一分钟，支持上游分页。目录不产生消费，零余额仍可查询，禁用或到期的身份不可查询；ETag 命中也先验证权限。中转没有模型目录接口时可配置账号模型映射，通配映射需有具体目录或白名单模型才能枚举。
 
-`GET /backend-api/codex/models` 或列表请求带 `client_version` 时返回客户端模型 manifest。管理员可在 OpenAI 分组配置 `codex_models_manifest_config`，指定 1–10 个组内账号及 `fallback_to_scheduler`；按配置顺序合并指定目录，缺失能力不虚构上下文大小。`POST /api/v1/admin/accounts/{id}/models/sync-upstream` 同步完整能力到账号元数据，不改模型映射或消费计数；部分元数据返回警告，轮换凭证或地址会清除旧能力快照。复合分组模型发现随复合路由继续开发。
+`GET /backend-api/codex/models` 或列表请求带 `client_version` 时返回客户端模型 manifest。管理员可在 OpenAI 分组配置 `codex_models_manifest_config`，指定 1–10 个组内账号及 `fallback_to_scheduler`；按配置顺序合并指定目录，缺失能力不虚构上下文大小。`POST /api/v1/admin/accounts/{id}/models/sync-upstream` 同步完整能力到账号元数据，不改模型映射或消费计数；部分元数据返回警告，轮换凭证或地址会清除旧能力快照。复合分组目录根据路由和各账号协议合并可见公共模型，不暴露映射目标，跨平台别名冲突不猜测归属；Gemini 原生列表只展示其可用分支。精确路由可直接枚举，前缀路由需要具体上游模型或白名单条目；查询期间路由变更返回 409，避免返回混合配置结果。
 
 `POST /v1/embeddings` 和 `/embeddings` 支持 OpenAI 分组的向量请求，接受单条/批量文本及 token 序列，保留 `dimensions` 和 `encoding_format=float|base64`。仅选择 Chat/Responses 协议的 API Key 账号；上游模型映射、权限、限额和扣费与文本共用。嵌入请求不支持流式，输入 token 按价卡计费，纯文本嵌入无需配置输出价；缺少有效 usage 不能记成零消费成功。输入形式依据 [OpenAI Embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)。
 

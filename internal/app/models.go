@@ -269,8 +269,16 @@ func (a *App) syncAccountModels(w http.ResponseWriter, r *http.Request) error {
 	return reply(w, map[string]any{"models": ids, "metadata": metadata, "warnings": warnings})
 }
 
-func (a *App) groupModels(ctx context.Context, g *gatewayIdentity) ([]discoveredModel, error) {
-	rows, err := a.DB.QueryContext(ctx, `SELECT a.id FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND a.platform=$2 AND a.type='apikey' AND a.status='active' AND a.deleted_at IS NULL AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) ORDER BY ag.priority,a.priority,a.id`, g.Key.GroupID, g.Group.Platform)
+func (a *App) groupModels(ctx context.Context, g *gatewayIdentity, native bool) ([]discoveredModel, error) {
+	var composite *compositeConfig
+	if g.Group.Platform == "composite" {
+		var err error
+		composite, err = a.loadComposite(ctx, g.Key.GroupID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rows, err := a.DB.QueryContext(ctx, `SELECT a.id FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND (a.platform=$2 OR $2='composite') AND a.type='apikey' AND a.status='active' AND a.deleted_at IS NULL AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) ORDER BY ag.priority,a.priority,a.id`, g.Key.GroupID, g.Group.Platform)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +326,6 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity) ([]discovered
 	if len(raw) > 0 && json.Unmarshal(raw, &channelMapping) != nil {
 		return nil, &apiError{503, "invalid channel model mapping"}
 	}
-	mapping := channelMapping[g.Group.Platform]
 	byID := map[string]discoveredModel{}
 	available := false
 	for _, id := range ids {
@@ -335,6 +342,10 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity) ([]discovered
 		if err != nil {
 			return nil, err
 		}
+		if native && u.Platform != "gemini" {
+			continue
+		}
+		mapping := channelMapping[u.Platform]
 		live, fetchErr := a.fetchModels(ctx, u, false)
 		var current bool
 		if err := a.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE a.id=$1 AND a.updated_at=$2 AND ag.group_id=$3 AND a.status='active' AND a.deleted_at IS NULL AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()))`, u.ID, u.UpdatedAt, g.Key.GroupID).Scan(&current); err != nil {
@@ -371,8 +382,15 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity) ([]discovered
 				candidates[name] = true
 			}
 		}
+		if composite != nil {
+			for _, route := range composite.Routes {
+				if route.Enabled && route.MatchType == "exact" && concreteModel(route.PublicModel) {
+					candidates[route.PublicModel] = true
+				}
+			}
+		}
 		// Exact allowlist entries can make a wildcard account mapping enumerable.
-		if g.Group.Allowlist.Enabled && len(accountMapping) > 0 {
+		if g.Group.Allowlist.Enabled && (len(accountMapping) > 0 || composite != nil) {
 			for _, name := range g.Group.Allowlist.Models {
 				if concreteModel(name) {
 					candidates[name] = true
@@ -382,47 +400,68 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity) ([]discovered
 		var snapshot modelSnapshot
 		_ = json.Unmarshal(u.Extra["upstream_model_metadata"], &snapshot)
 		for name := range candidates {
-			mapped := name
-			for pattern, target := range mapping {
-				if patternMatches(pattern, name) {
-					if target != "" && target != "*" {
-						mapped = target
+			for _, routed := range compositeModelTargets(composite, g.Key.GroupID, name, u.Platform, u.protocol(), native) {
+				mapped := routed
+				for pattern, target := range mapping {
+					if patternMatches(pattern, routed) {
+						if target != "" && target != "*" {
+							mapped = target
+						}
+						break
 					}
-					break
+				}
+				target, err := u.mappedModel(mapped)
+				if err != nil {
+					continue
+				}
+				m, found := liveByID[strings.TrimPrefix(target, "models/")]
+				// Explicit account mappings remain usable when a relay has no list API.
+				if !found && len(accountMapping) == 0 {
+					continue
+				}
+				if !g.Group.allows(name) {
+					continue
+				}
+				if old, ok := snapshot.Models[target]; ok && !m.complete() {
+					m.modelMetadata = old
+				}
+				m.ID = name
+				if name != target || m.DisplayName == "" {
+					m.DisplayName = name
+				}
+				if name != target {
+					m.Description = ""
+					m.Version = ""
+				}
+				if composite != nil {
+					m.Owner = u.Platform
+				}
+				if previous, exists := byID[name]; exists {
+					// Pinned catalogs use explicit first-account precedence. Otherwise a
+					// model can route to any account, so advertise only common capabilities.
+					if !g.Group.Manifest.Enabled {
+						byID[name] = commonModelCapabilities(previous, m)
+						if composite != nil && previous.Owner != m.Owner {
+							merged := byID[name]
+							merged.Owner = "composite"
+							byID[name] = merged
+						}
+					}
+				} else {
+					byID[name] = m
 				}
 			}
-			target, err := u.mappedModel(mapped)
-			if err != nil {
-				continue
-			}
-			m, found := liveByID[strings.TrimPrefix(target, "models/")]
-			// Explicit account mappings remain usable when a relay has no list API.
-			if !found && len(accountMapping) == 0 {
-				continue
-			}
-			if !g.Group.allows(name) {
-				continue
-			}
-			if old, ok := snapshot.Models[target]; ok && !m.complete() {
-				m.modelMetadata = old
-			}
-			m.ID = name
-			if name != target || m.DisplayName == "" {
-				m.DisplayName = name
-			}
-			if name != target {
-				m.Description = ""
-				m.Version = ""
-			}
-			if previous, exists := byID[name]; exists {
-				// Pinned catalogs use explicit first-account precedence. Otherwise a
-				// model can route to any account, so advertise only common capabilities.
-				if !g.Group.Manifest.Enabled {
-					byID[name] = commonModelCapabilities(previous, m)
-				}
-			} else {
-				byID[name] = m
-			}
+		}
+	}
+	if composite != nil {
+		current, err := a.loadComposite(ctx, g.Key.GroupID)
+		if err != nil {
+			return nil, err
+		}
+		before, _ := json.Marshal(composite)
+		after, _ := json.Marshal(current)
+		if string(before) != string(after) {
+			return nil, conflict("composite routes changed during discovery")
 		}
 	}
 	if !available {
@@ -502,12 +541,8 @@ func (a *App) gatewayModels(w http.ResponseWriter, r *http.Request) {
 		fail(err)
 		return
 	}
-	if native && g.Group.Platform != "gemini" {
+	if native && g.Group.Platform != "gemini" && g.Group.Platform != "composite" {
 		fail(bad("Gemini discovery requires a Gemini group"))
-		return
-	}
-	if g.Group.Platform == "composite" {
-		fail(bad("composite discovery is not yet available"))
 		return
 	}
 	model := r.PathValue("model")
@@ -515,7 +550,7 @@ func (a *App) gatewayModels(w http.ResponseWriter, r *http.Request) {
 		fail(missing())
 		return
 	}
-	models, err := a.groupModels(ctx, g)
+	models, err := a.groupModels(ctx, g, native)
 	if err != nil {
 		fail(err)
 		return

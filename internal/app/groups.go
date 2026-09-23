@@ -363,6 +363,11 @@ func (a *App) replaceGroup(w http.ResponseWriter, r *http.Request) error {
 	return reply(w, map[string]any{"migrated_keys": count})
 }
 func (a *App) groupRoutes() {
+	a.route("GET /api/v1/admin/groups/{id}/composite-routes", "admin", a.compositeRoutes)
+	a.route("POST /api/v1/admin/groups/{id}/composite-routes", "admin", a.compositeRoutes)
+	a.route("POST /api/v1/admin/groups/{id}/composite-routes/preview", "admin", a.compositeRoutes)
+	a.route("PUT /api/v1/admin/groups/{id}/composite-routes/{route_id}", "admin", a.compositeRoutes)
+	a.route("DELETE /api/v1/admin/groups/{id}/composite-routes/{route_id}", "admin", a.compositeRoutes)
 	a.route("GET /api/v1/admin/groups/{id}/rate-multipliers", "admin", a.groupOverrides)
 	a.route("PUT /api/v1/admin/groups/{id}/rate-multipliers", "admin", a.saveGroupOverrides)
 	a.route("DELETE /api/v1/admin/groups/{id}/rate-multipliers", "admin", a.saveGroupOverrides)

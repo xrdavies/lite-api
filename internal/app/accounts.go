@@ -146,7 +146,7 @@ func setAccountGroups(ctx context.Context, tx *sql.Tx, id int64, platform string
 	}
 	for _, gid := range groups {
 		var ok bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM groups WHERE id=$1 AND deleted_at IS NULL AND platform=$2 AND subscription_type='standard' AND NOT require_oauth_only)`, gid, platform).Scan(&ok); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM groups WHERE id=$1 AND deleted_at IS NULL AND (platform=$2 OR platform='composite') AND subscription_type='standard' AND NOT require_oauth_only)`, gid, platform).Scan(&ok); err != nil {
 			return err
 		}
 		if !ok {
