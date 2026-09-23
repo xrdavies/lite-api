@@ -12,6 +12,13 @@ import (
 
 func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json.RawMessage) (textRequest, error) {
 	in.Scope, in.Store = "responses", true
+	if socketTurn(r.Context()) == nil {
+		for _, field := range []string{"stream_id", "generate"} {
+			if body[field] != nil {
+				return in, bad(field + " requires a WebSocket connection")
+			}
+		}
+	}
 	in.Action = r.PathValue("action")
 	switch in.Action {
 	case "":
@@ -209,6 +216,11 @@ func responseTarget(u *upstreamAccount) string {
 func (a *App) previousResponse(ctx context.Context, g *gatewayIdentity, id string) (*responseBinding, error) {
 	if id == "" {
 		return nil, nil
+	}
+	if turn := socketTurn(ctx); turn != nil {
+		if binding, ok := turn.socket.responses[id]; ok {
+			return &binding, nil
+		}
 	}
 	raw, err := a.Redis.Get(ctx, responseBindingKey(g, id)).Bytes()
 	if err == redis.Nil {

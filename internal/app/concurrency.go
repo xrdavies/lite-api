@@ -31,6 +31,9 @@ func (a *App) StopAdmission() {
 	defer a.gatewayMu.Unlock()
 	a.gatewayStopped = true
 	a.wakeGatewayLocked()
+	for _, cancel := range a.websockets {
+		cancel()
+	}
 }
 
 func (a *App) admissionWake() (<-chan struct{}, error) {

@@ -8,6 +8,8 @@ require (
 	golang.org/x/crypto v0.45.0
 )
 
+require github.com/coder/websocket v1.8.15
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1

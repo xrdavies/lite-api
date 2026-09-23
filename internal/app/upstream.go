@@ -124,6 +124,47 @@ func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccou
 	if err != nil {
 		return nil, err
 	}
+	tr, err := a.upstreamTransport(ctx, account, req)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta", "X-Codex-Beta-Features"} {
+		if value := headers.Get(name); value != "" {
+			req.Header.Set(name, value)
+		}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", "lite-api/1")
+	key := credentialString(account.Credentials, "api_key")
+	if key != "" {
+		switch account.protocol() {
+		case "anthropic":
+			req.Header.Set("x-api-key", key)
+			if req.Header.Get("Anthropic-Version") == "" {
+				req.Header.Set("anthropic-version", "2023-06-01")
+			}
+		case "gemini":
+			req.Header.Set("x-goog-api-key", key)
+		default:
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+	}
+	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		tr.CloseIdleConnections()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &apiError{502, "upstream connection failed"}
+	}
+	resp.Body = &transportBody{ReadCloser: resp.Body, transport: tr}
+	return resp, nil
+}
+
+// Shared by HTTP and WebSocket handshakes, including proxy and DNS pinning.
+func (a *App) upstreamTransport(ctx context.Context, account *upstreamAccount, req *http.Request) (*http.Transport, error) {
 	addr, err := a.resolveUpstream(ctx, req.URL.Hostname())
 	if err != nil {
 		return nil, err
@@ -179,39 +220,7 @@ func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccou
 			}
 		}
 	}
-	for _, name := range []string{"Anthropic-Version", "Anthropic-Beta", "X-Codex-Beta-Features"} {
-		if value := headers.Get(name); value != "" {
-			req.Header.Set(name, value)
-		}
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("User-Agent", "lite-api/1")
-	key := credentialString(account.Credentials, "api_key")
-	if key != "" {
-		switch account.protocol() {
-		case "anthropic":
-			req.Header.Set("x-api-key", key)
-			if req.Header.Get("Anthropic-Version") == "" {
-				req.Header.Set("anthropic-version", "2023-06-01")
-			}
-		case "gemini":
-			req.Header.Set("x-goog-api-key", key)
-		default:
-			req.Header.Set("Authorization", "Bearer "+key)
-		}
-	}
-	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		tr.CloseIdleConnections()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, &apiError{502, "upstream connection failed"}
-	}
-	resp.Body = &transportBody{ReadCloser: resp.Body, transport: tr}
-	return resp, nil
+	return tr, nil
 }
 
 type transportBody struct {

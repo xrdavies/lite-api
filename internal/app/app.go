@@ -53,6 +53,8 @@ type App struct {
 	gatewayQueued    int
 	gatewayWake      chan struct{}
 	gatewayStopped   bool
+	websockets       map[*responseSocket]context.CancelFunc
+	websocketDone    sync.WaitGroup
 	priceFile        string
 	priceMu          sync.Mutex
 	prices           atomic.Pointer[priceCatalog]
@@ -137,6 +139,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 }
 func (a *App) Close() {
 	a.StopAdmission()
+	a.websocketDone.Wait()
 	a.workerCancel()
 	<-a.workerDone
 	a.Redis.Close()

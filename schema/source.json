@@ -1,9 +1,9 @@
 {
   "project": "database-contract",
   "commit": "20a94fbb567b62208751292ed7786b24a7e7c0fe",
-  "excluded_tables": [
-    "public.sub2api_plugin_bindings",
-    "public.sub2api_plugin_installations"
+  "excluded_objects": [
+    "plugin binding table",
+    "plugin installation table"
   ],
   "migrations": {
     "001_init.sql": "9ba0369779484625edcea7a7d1d4582397e31546db9149b05004990a3f16c630",

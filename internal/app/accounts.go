@@ -105,6 +105,17 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case "openai_apikey_responses_websockets_v2_enabled", "responses_websockets_v2_enabled", "openai_ws_enabled", "openai_ws_force_http":
+			var enabled bool
+			if string(value) == "null" || json.Unmarshal(value, &enabled) != nil {
+				return bad("invalid WebSocket setting")
+			}
+		case "openai_apikey_responses_websockets_v2_mode":
+			switch credentialString(in.Extra, key) {
+			case "off", "passthrough":
+			default:
+				return bad("supported WebSocket modes are off and passthrough")
+			}
 		case "quota_daily_reset_mode", "quota_weekly_reset_mode":
 			mode := credentialString(in.Extra, key)
 			if mode != "rolling" && mode != "fixed" {

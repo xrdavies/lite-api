@@ -45,7 +45,7 @@ try:
     else:
         assert actual == json.loads(contract.read_text()), "Database contract differs from SQL snapshot"
     assert sql("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'").strip() == "97"
-    assert sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE '%sub2api_plugin_%'").strip() == "0"
+    assert sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname ILIKE '%plugin%'").strip() == "0"
     print("PASS: SQL restores into an empty database; 97 tables; schema contract matches.")
 finally:
     subprocess.run(docker + ["rm", "--force", container], capture_output=True)

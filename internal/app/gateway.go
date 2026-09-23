@@ -161,6 +161,9 @@ func (a *App) gatewayAuth(r *http.Request, spending bool) (*gatewayIdentity, err
 		return nil, denied()
 	}
 	g.SourcePlatform = g.Group.Platform
+	if turn := socketTurn(r.Context()); turn != nil && (g.Key.ID != turn.socket.keyID || g.Key.GroupID != turn.socket.groupID || g.UserID != turn.socket.userID) {
+		return nil, conflict("API key assignment changed; reconnect")
+	}
 	if err = a.resolveClientGroup(r, g); err != nil {
 		return nil, err
 	}
@@ -339,6 +342,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		if err != nil {
 			continue
 		}
+		if turn := socketTurn(ctx); turn != nil && !turn.socket.eligible(u) {
+			continue
+		}
 		if binding != nil && binding.Target != responseTarget(u) {
 			continue
 		}
@@ -441,6 +447,7 @@ func (a *App) gatewayRoutes() {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
 	}
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		a.mux.HandleFunc("GET "+path, a.responsesWebSocket)
 		for _, suffix := range []string{"", "/{action...}"} {
 			a.mux.HandleFunc("POST "+path+suffix, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "responses") })
 		}
@@ -600,6 +607,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
+	if socketTurn(ctx) != nil && g.Group.Platform != "openai" && g.Group.Platform != "grok" {
+		fail(bad("Responses WebSocket requires an OpenAI or Grok target"))
+		return
+	}
 	session, err := gatewaySessionKey(r, g, in, request)
 	if err != nil {
 		fail(err)
@@ -732,7 +743,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			fail(err)
 			return
 		}
-		resp, err = a.upstreamRequestHeaders(ctx, selected.Account, "POST", path, upstreamBody, in.Headers)
+		if turn := socketTurn(ctx); turn != nil {
+			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
+		} else {
+			resp, err = a.upstreamRequestHeaders(ctx, selected.Account, "POST", path, upstreamBody, in.Headers)
+		}
 		if err != nil {
 			selected.Release()
 			fail(err)
@@ -863,6 +878,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if in.CountOnly {
 		// Token counts check eligibility but do not create consumption.
+	} else if turn := socketTurn(ctx); turn != nil && turn.warmup && !observation.HasUsage {
+		// Native generate=false prepares state without model usage.
 	} else if !observation.HasUsage {
 		if forwardErr == nil {
 			forwardErr = &apiError{502, "upstream usage is missing; billing requires review"}
@@ -874,6 +891,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, effort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
+			receipt.WebSocket = socketTurn(ctx) != nil
 			receipt.RequestedEffort = originalEffort
 			receipt.NativeCompaction = in.NativeCompaction
 			receipt.Upstream, _ = in.upstreamPath(selected.UpstreamModel)
@@ -890,6 +908,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if forwardErr != nil {
 		fail(forwardErr)
 		return
+	}
+	if turn := socketTurn(ctx); turn != nil {
+		turn.socket.remember(observation.ResponseID, selected.Account)
 	}
 	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
