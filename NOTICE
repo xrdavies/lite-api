@@ -1,6 +1,6 @@
 lite-api
 
-Database definitions, the fixed reference-price baseline and compatible pricing behavior derived from work by Wei-Shaw and contributors.
+Database definitions, the fixed reference-price baseline, compatible pricing and session affinity behavior derived from work by Wei-Shaw and contributors.
 Reference revision: 20a94fbb567b62208751292ed7786b24a7e7c0fe.
 
 Distributed under the GNU Lesser General Public License, version 3.

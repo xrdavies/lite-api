@@ -44,6 +44,8 @@ func testModelRouting(t *testing.T, a *App, admin string) {
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
 		r.RemoteAddr = "192.0.2.95:1234"
 		r.Header.Set("Authorization", "Bearer "+token)
+		// Each scenario starts a new conversation; sticky pool behavior is tested separately.
+		r.Header.Set("Session-Id", randomToken(12))
 		w := httptest.NewRecorder()
 		a.Handler().ServeHTTP(w, r)
 		return w

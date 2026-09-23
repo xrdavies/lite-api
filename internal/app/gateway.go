@@ -223,7 +223,7 @@ type gatewaySelection struct {
 func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	return effectiveModelPrice(s.Catalog, s.GroupPricing, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
-func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
@@ -288,14 +288,25 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		return nil, err
 	}
 	preferred := g.Group.routingAccounts(s.ChannelModel, g.Group.Platform)
-	if len(preferred) > 0 {
+	if sticky != nil {
+		u, err := a.loadAccount(ctx, sticky.AccountID)
+		if err != nil || responseTarget(u) != sticky.Target {
+			sticky = nil
+		}
+	}
+	if len(preferred) > 0 || sticky != nil {
 		pool := make(map[int64]bool, len(preferred))
 		for _, id := range preferred {
 			pool[id] = true
 		}
-		// Stable partition retains priority/last-used ordering inside both pools.
+		// Explicit model routing outranks soft affinity. Within the preferred
+		// pool, keep the session before applying priority/last-used ordering.
 		sort.SliceStable(candidates, func(i, j int) bool {
-			return pool[candidates[i].id] && !pool[candidates[j].id]
+			left, right := candidates[i].id, candidates[j].id
+			if pool[left] != pool[right] {
+				return pool[left]
+			}
+			return sticky != nil && (len(preferred) == 0 || pool[left]) && left == sticky.AccountID && right != sticky.AccountID
 		})
 	}
 	for _, c := range candidates {
@@ -532,6 +543,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("resolved platform does not support this endpoint"))
 		return
 	}
+	session, err := gatewaySessionKey(r, g, in, request)
+	if err != nil {
+		fail(err)
+		return
+	}
 	if protocol != "gemini" && protocol != "embeddings" {
 		if err = g.Group.reasoningPolicy.apply(request, model, g.Group.Platform); err == nil {
 			effort, err = requestEffort(request, protocol)
@@ -542,6 +558,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
+	if err != nil {
+		fail(err)
+		return
+	}
+	sticky, err := a.stickySession(ctx, session)
 	if err != nil {
 		fail(err)
 		return
@@ -572,7 +593,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	catalog := a.prices.Load()
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, catalog)
+		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, sticky, catalog)
 		if err != nil {
 			fail(err)
 			return
@@ -622,6 +643,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			request["generateContentRequest"], _ = json.Marshal(nested)
 		}
 		upstreamBody, _ := json.Marshal(request)
+		if err = a.bindSession(ctx, session, selected.Account); err != nil {
+			selected.Release()
+			fail(err)
+			return
+		}
 		resp, err = a.upstreamRequestHeaders(ctx, selected.Account, "POST", path, upstreamBody, in.Headers)
 		if err != nil {
 			selected.Release()

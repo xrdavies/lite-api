@@ -22,6 +22,8 @@ func testGateway(t *testing.T, a *App, admin string) {
 		raw, _ := json.Marshal(body)
 		req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 		req.Header.Set("Authorization", "Bearer "+token)
+		// These independent admission scenarios exercise ordinary account ordering.
+		req.Header.Set("Session-Id", randomToken(12))
 		req.RemoteAddr = "192.0.2.10:1234"
 		w := httptest.NewRecorder()
 		a.Handler().ServeHTTP(w, req)
