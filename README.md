@@ -89,6 +89,10 @@ Chat 入口也支持 Anthropic 平台，以及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMa
 
 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。
 
+Responses HTTP/SSE 也支持 Anthropic 平台及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Anthropic 协议账号。直接生成 `/v1/messages`，保留文本/图片/PDF、结构化系统指令、缓存标记、工具结果，工具命名空间/custom/客户端发现复用同一套身份映射；原生内容块按出现顺序转为 Responses 输出。compact、input_tokens、原生 compaction 和 WebSocket 仍要求原生 Responses 账号。
+
+`previous_response_id` 的加密历史保存原生思考、签名、隐藏思考块和工具身份；续接仅使用同一 Key/分组/账号及凭证来源。顶层 instructions 可替换，input 中的系统指令继续保留。`store=false` 不保存历史，外部传入的 reasoning 密文不当作 Anthropic 签名；原生签名不出现在 Responses 内容中。失败或断流中已知 usage 仍结算，输出终态与工具完成事件等待结算成功；实际缓存读写和转换后的 effort 用于计费。该链路已通过本地协议/数据库测试，尚无真实 Anthropic 上游联调。
+
 namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截断并附加摘要；响应恢复原 namespace/name。强制 tool_choice、additional_tools、显式历史与 previous_response_id 均使用同一映射。相同定义去重，不同定义或映射名称冲突拒绝；namespace 内的托管工具、嵌套 namespace 及同时填写 tools/children 的歧义声明拒绝。原生 Responses 路径保持合法命名空间声明和输出。
 
 客户端工具发现支持 `type=tool_search`、`execution=client`，与 [OpenAI 工具搜索文档](https://developers.openai.com/api/docs/guides/tools-tool-search) 中的客户端执行模式一致。原生 Responses HTTP/SSE/WS 保留声明及调用；Chat 转换保留 description/parameters/strict，并将调用还原为 `tool_search_call`、`execution=client` 和对象形式的 arguments。流式搜索参数累计到 output_item.done 一并发送，该完成事件等待结算成功。网关不执行客户端工具，也不另收独立搜索费用，仍结算上游文本 usage。

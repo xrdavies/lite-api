@@ -242,7 +242,7 @@ func (o *textObservation) observeResponses(data []byte) error {
 	return nil
 }
 
-// Native responses bind only metadata; Chat conversions include encrypted history.
+// Native responses bind only metadata; protocol conversions include encrypted history.
 // Missing/expired bindings refuse continuation across tenants or upstream sources.
 type responseBinding struct {
 	AccountID int64

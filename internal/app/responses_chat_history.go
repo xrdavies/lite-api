@@ -11,7 +11,7 @@ import (
 	"io"
 )
 
-// Chat has no server-side response history. Retain only store=true histories,
+// Converted protocols have no server-side response history. Retain store=true histories,
 // encrypted and authenticated to the same tenant, response ID and upstream source.
 func (a *App) chatHistoryCipher() cipher.AEAD {
 	key := sha256.Sum256(append([]byte("lite-api/chat-history/v1\x00"), a.secret...))

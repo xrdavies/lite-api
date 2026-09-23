@@ -25,16 +25,23 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 	}
 	var in map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &in)
-	out := map[string]any{"model": in["model"], "stream": in["stream"], "max_tokens": 8192}
+	return normalizedResponsesToAnthropic(in, body["stop"])
+}
+
+func normalizedResponsesToAnthropic(in map[string]json.RawMessage, stop json.RawMessage) ([]byte, map[string]bool, string, error) {
+	out := map[string]any{"model": in["model"], "stream": false, "max_tokens": 8192}
+	if raw := in["stream"]; raw != nil && string(raw) != "null" {
+		out["stream"] = raw
+	}
 	for _, name := range []string{"temperature", "top_p"} {
 		if in[name] != nil {
 			out[name] = in[name]
 		}
 	}
-	if in["max_output_tokens"] != nil {
+	if in["max_output_tokens"] != nil && string(in["max_output_tokens"]) != "null" {
 		out["max_tokens"] = in["max_output_tokens"]
 	}
-	if stop := body["stop"]; stop != nil && string(stop) != "null" {
+	if stop != nil && string(stop) != "null" {
 		var stops []string
 		var single string
 		if json.Unmarshal(stop, &single) == nil {
@@ -73,7 +80,7 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 					budget = 32768
 				}
 				limit := int64(8192)
-				if in["max_output_tokens"] != nil {
+				if in["max_output_tokens"] != nil && string(in["max_output_tokens"]) != "null" {
 					_ = json.Unmarshal(in["max_output_tokens"], &limit)
 				}
 				// Anthropic requires the thinking budget to fit inside the output limit.
@@ -88,7 +95,9 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 		Format    map[string]json.RawMessage
 		Verbosity json.RawMessage
 	}
-	_ = json.Unmarshal(in["text"], &text)
+	if raw := in["text"]; raw != nil && json.Unmarshal(raw, &text) != nil {
+		return nil, nil, "", bad("invalid text configuration")
+	}
 	if text.Verbosity != nil {
 		return nil, nil, "", bad("verbosity cannot be converted to Anthropic")
 	}
@@ -101,6 +110,8 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 		config["format"] = map[string]any{"type": "json_schema", "schema": text.Format["schema"]}
 	case "json_object":
 		return nil, nil, "", bad("Anthropic structured output requires an explicit JSON schema")
+	default:
+		return nil, nil, "", bad("unsupported text format")
 	}
 	if len(config) > 0 {
 		out["output_config"] = config
@@ -176,8 +187,14 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 	}
 	messages := []message{}
 	system := []any{}
-	if instructions := credentialString(in, "instructions"); instructions != "" {
-		system = append(system, map[string]any{"type": "text", "text": instructions})
+	if raw := in["instructions"]; raw != nil && string(raw) != "null" {
+		var instructions string
+		if json.Unmarshal(raw, &instructions) != nil {
+			return nil, nil, "", bad("instructions must be text")
+		}
+		if instructions != "" {
+			system = append(system, map[string]any{"type": "text", "text": instructions})
+		}
 	}
 	appendMessage := func(role string, blocks []any) {
 		if len(blocks) == 0 {
@@ -194,6 +211,16 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 	for _, item := range input {
 		kind, role := credentialString(item, "type"), credentialString(item, "role")
 		switch kind {
+		case "native_assistant":
+			var blocks []map[string]json.RawMessage
+			if json.Unmarshal(item["content"], &blocks) != nil {
+				return nil, nil, "", bad("invalid saved native content")
+			}
+			parts := make([]any, 0, len(blocks))
+			for _, block := range blocks {
+				parts = append(parts, block)
+			}
+			appendMessage("assistant", parts)
 		case "function_call", "custom_tool_call":
 			name := credentialString(item, "name")
 			if names[name] && custom[name] != (kind == "custom_tool_call") {
@@ -238,7 +265,7 @@ func chatToAnthropic(body map[string]json.RawMessage) ([]byte, map[string]bool, 
 		out["system"] = system
 	}
 	out["messages"] = messages
-	raw, err = json.Marshal(out)
+	raw, err := json.Marshal(out)
 	return raw, custom, effort, err
 }
 
@@ -317,11 +344,12 @@ func anthropicMediaSource(value string, image bool) (map[string]any, error) {
 }
 
 type anthropicChatBlock struct {
-	Type, ID, Name, Text, Thinking string
-	Input                          json.RawMessage
-	Args                           strings.Builder `json:"-"`
-	Closed                         bool            `json:"-"`
-	ToolIndex                      int             `json:"-"`
+	Type, ID, Name, Text, Thinking, Signature, Data string
+	Input                                           json.RawMessage
+	TextDelta, ThinkingDelta, SignatureDelta        strings.Builder `json:"-"`
+	Args                                            strings.Builder `json:"-"`
+	Closed                                          bool            `json:"-"`
+	ToolIndex                                       int             `json:"-"`
 }
 
 type anthropicChatStream struct {
@@ -331,6 +359,7 @@ type anthropicChatStream struct {
 	IDs              map[string]bool
 	Finish           string
 	Started, Stopped bool
+	Capture          bool
 	Size             int
 }
 
@@ -368,7 +397,7 @@ func (s *anthropicChatStream) startBlock(index int, b *anthropicChatBlock) (stri
 	default:
 		return "", &apiError{502, "unsupported Anthropic content block"}
 	}
-	s.Size += len(b.Text) + len(b.Thinking) + len(b.Input)
+	s.Size += len(b.Text) + len(b.Thinking) + len(b.Input) + len(b.Signature) + len(b.Data)
 	if s.Size > 16<<20 {
 		return "", &apiError{502, "converted stream exceeds limit"}
 	}
@@ -451,9 +480,9 @@ func (s *anthropicChatStream) event(raw []byte, usage priceUsage) (string, error
 		}
 		Block anthropicChatBlock `json:"content_block"`
 		Delta struct {
-			Type, Text, Thinking string
-			Partial              string `json:"partial_json"`
-			Stop                 string `json:"stop_reason"`
+			Type, Text, Thinking, Signature string
+			Partial                         string `json:"partial_json"`
+			Stop                            string `json:"stop_reason"`
 		}
 	}
 	if json.Unmarshal(raw, &e) != nil || s.Stopped {
@@ -483,7 +512,7 @@ func (s *anthropicChatStream) event(raw []byte, usage priceUsage) (string, error
 			return "", &apiError{502, "invalid Anthropic content delta"}
 		}
 		b := s.Blocks[e.Index]
-		s.Size += len(e.Delta.Text) + len(e.Delta.Thinking) + len(e.Delta.Partial)
+		s.Size += len(e.Delta.Text) + len(e.Delta.Thinking) + len(e.Delta.Partial) + len(e.Delta.Signature)
 		if s.Size > 16<<20 {
 			return "", &apiError{502, "converted stream exceeds limit"}
 		}
@@ -492,14 +521,23 @@ func (s *anthropicChatStream) event(raw []byte, usage priceUsage) (string, error
 			if b.Type != "text" {
 				break
 			}
+			if s.Capture {
+				b.TextDelta.WriteString(e.Delta.Text)
+			}
 			return s.Chat.chunk(map[string]any{"content": e.Delta.Text}, nil, nil), nil
 		case "thinking_delta":
 			if b.Type != "thinking" {
 				break
 			}
+			if s.Capture {
+				b.ThinkingDelta.WriteString(e.Delta.Thinking)
+			}
 			return s.Chat.chunk(map[string]any{"reasoning_content": e.Delta.Thinking}, nil, nil), nil
 		case "signature_delta":
 			if b.Type == "thinking" {
+				if s.Capture {
+					b.SignatureDelta.WriteString(e.Delta.Signature)
+				}
 				return "", nil
 			}
 		case "input_json_delta":

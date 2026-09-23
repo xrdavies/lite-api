@@ -252,7 +252,7 @@ func compositeModelTargets(c *compositeConfig, gid int64, model, platform, proto
 	if protocol == "anthropic" {
 		endpoints = []string{"messages", "count_tokens"}
 		if chatAnthropicPlatform(platform) {
-			endpoints = append(endpoints, "chat_completions")
+			endpoints = append(endpoints, "chat_completions", "responses")
 		}
 	}
 	if platform == "openai" && (protocol == "responses" || protocol == "chat_completions") {

@@ -29,15 +29,19 @@ type convertedChatMessage struct {
 	Calls       []convertedChatTool          `json:"tool_calls,omitempty"`
 	CallID      string                       `json:"tool_call_id,omitempty"`
 	Discoveries []map[string]json.RawMessage `json:"discovered_tools,omitempty"`
+	// Only authenticated encrypted history contains native blocks; client input cannot set these.
+	Anthropic     []map[string]json.RawMessage `json:"anthropic_content,omitempty"`
+	ResponseInput json.RawMessage              `json:"response_input,omitempty"`
 }
 
 type responsesChatRequest struct {
-	Body       map[string]any
-	Messages   []convertedChatMessage
-	History    []convertedChatMessage
-	Custom     map[string]bool
-	Namespaces map[string]responseToolName
-	ToolSearch bool
+	Body             map[string]any
+	Messages         []convertedChatMessage
+	History          []convertedChatMessage
+	Custom           map[string]bool
+	Namespaces       map[string]responseToolName
+	ToolSearch       bool
+	Direct, Declared map[string]bool
 }
 
 type responseToolName struct{ Namespace, Name string }
@@ -136,155 +140,8 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			return nil, bad("invalid Responses input")
 		}
 	}
-	tools, err := responseClientTools(body)
-	if err != nil {
+	if err := out.prepareTools(body, history, false); err != nil {
 		return nil, err
-	}
-	// Saved discoveries remain callable in subsequent scoped continuations.
-	for _, message := range history {
-		if len(message.Discoveries) == 0 {
-			continue
-		}
-		raw, _ := json.Marshal(message.Discoveries)
-		callID, _ := json.Marshal(message.CallID)
-		tools, err = mergeResponseDiscoveries(tools, []map[string]json.RawMessage{{"type": json.RawMessage(`"tool_search_output"`), "call_id": callID, "tools": raw}})
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Reserve direct names before flattening so declaration order cannot hide a collision.
-	direct := map[string]bool{}
-	for _, tool := range tools {
-		if kind := credentialString(tool, "type"); kind != "namespace" && kind != "tool_search" {
-			direct[credentialString(tool, "name")] = true
-		}
-	}
-	registerNamespace := func(namespace, name string) (string, error) {
-		if namespace == "" || name == "" || len(namespace) > 256 || len(name) > 256 {
-			return "", bad("invalid namespaced tool")
-		}
-		flat := flattenedToolName(namespace, name)
-		owner := responseToolName{namespace, name}
-		if previous, exists := out.Namespaces[flat]; direct[flat] || exists && previous != owner {
-			return "", bad("namespaced tool collides with another tool")
-		}
-		out.Namespaces[flat] = owner
-		return flat, nil
-	}
-	expanded := []map[string]json.RawMessage{}
-	namespacedDefinitions := map[string]string{}
-	for _, tool := range tools {
-		if credentialString(tool, "type") != "namespace" {
-			expanded = append(expanded, tool)
-			continue
-		}
-		children, err := responseNamespaceChildren(tool)
-		if err != nil {
-			return nil, err
-		}
-		for _, child := range children {
-			flat, err := registerNamespace(credentialString(tool, "name"), credentialString(child, "name"))
-			if err != nil {
-				return nil, err
-			}
-			definition := responseToolDefinition(child)
-			if previous, exists := namespacedDefinitions[flat]; exists {
-				if previous != definition {
-					return nil, bad("conflicting namespaced tool definitions")
-				}
-				continue
-			}
-			namespacedDefinitions[flat] = definition
-			child["name"], _ = json.Marshal(flat)
-			expanded = append(expanded, child)
-		}
-	}
-	convertedTools := []any{}
-	seen := map[string]bool{}
-	searchDefinition := ""
-	for _, tool := range expanded {
-		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
-		if kind == "tool_search" {
-			if err := validateResponseClientTool(tool); err != nil {
-				return nil, err
-			}
-			name = "tool_search"
-			if direct[name] {
-				return nil, bad("tool search conflicts with a declared tool name")
-			}
-			definition := responseToolDefinition(tool)
-			if out.ToolSearch {
-				if definition != searchDefinition {
-					return nil, bad("conflicting tool search definitions")
-				}
-				continue
-			}
-			out.ToolSearch, searchDefinition = true, definition
-		}
-		if name == "" || len(name) > 256 || seen[name] {
-			return nil, bad("invalid or duplicate tool name")
-		}
-		seen[name] = true
-		function := map[string]any{"name": name}
-		switch kind {
-		case "tool_search":
-			function["description"] = "Find client tools for the current task."
-			function["parameters"] = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`)
-			for _, field := range []string{"description", "parameters", "strict"} {
-				if raw := tool[field]; raw != nil {
-					function[field] = raw
-				}
-			}
-		case "function":
-			for _, field := range []string{"description", "parameters", "strict"} {
-				if raw := tool[field]; raw != nil {
-					function[field] = raw
-				}
-			}
-		case "custom":
-			out.Custom[name] = true
-			function["description"] = credentialString(tool, "description") + " Return the complete custom tool input in the input string."
-			function["parameters"] = map[string]any{"type": "object", "properties": map[string]any{"input": map[string]string{"type": "string"}}, "required": []string{"input"}, "additionalProperties": false}
-			function["strict"] = true
-		default:
-			return nil, bad("this tool requires a native Responses account")
-		}
-		convertedTools = append(convertedTools, map[string]any{"type": "function", "function": function})
-	}
-	if len(convertedTools) > 0 {
-		out.Body["tools"] = convertedTools
-	}
-	if raw := body["tool_choice"]; raw != nil && string(raw) != "null" {
-		var name string
-		if json.Unmarshal(raw, &name) == nil {
-			if name != "auto" && name != "none" && name != "required" {
-				return nil, bad("invalid tool choice")
-			}
-			out.Body["tool_choice"] = name
-		} else {
-			var choice map[string]json.RawMessage
-			if json.Unmarshal(raw, &choice) != nil {
-				return nil, bad("invalid tool choice")
-			}
-			kind, name := credentialString(choice, "type"), credentialString(choice, "name")
-			if kind == "tool_search" {
-				if !out.ToolSearch {
-					return nil, bad("tool choice requires declared client tool search")
-				}
-				kind, name = "function", "tool_search"
-			}
-			if namespace := credentialString(choice, "namespace"); namespace != "" {
-				flat := flattenedToolName(namespace, name)
-				if kind != "function" || out.Namespaces[flat] != (responseToolName{namespace, name}) {
-					return nil, bad("tool choice must name a declared namespace function")
-				}
-				name = flat
-			}
-			if (kind != "function" && kind != "custom") || !seen[name] {
-				return nil, bad("tool choice must name a declared tool")
-			}
-			out.Body["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": name}}
-		}
 	}
 	reasoning := ""
 	appendAssistant := func() *convertedChatMessage {
@@ -362,7 +219,7 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 				}
 				raw, _ := json.Marshal(map[string]string{"input": input})
 				call.Function.Arguments = string(raw)
-				if !seen[name] {
+				if !out.Declared[name] {
 					out.Custom[name] = true
 				}
 			} else {
@@ -420,7 +277,7 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	for _, message := range out.Messages {
 		for _, call := range message.Calls {
 			if call.Namespace != "" {
-				if _, err := registerNamespace(call.Namespace, call.Function.Name); err != nil {
+				if _, err := out.registerNamespace(call.Namespace, call.Function.Name); err != nil {
 					return nil, err
 				}
 			}
@@ -431,7 +288,7 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 		out.Messages[i].Calls = append([]convertedChatTool(nil), out.Messages[i].Calls...)
 		for j := range out.Messages[i].Calls {
 			call := &out.Messages[i].Calls[j]
-			if call.Search && direct["tool_search"] || !call.Search && call.Namespace == "" && call.Function.Name == "tool_search" && out.ToolSearch {
+			if call.Search && out.Direct["tool_search"] || !call.Search && call.Namespace == "" && call.Function.Name == "tool_search" && out.ToolSearch {
 				return nil, bad("tool search conflicts with history tool identity")
 			}
 			call.Search = false
@@ -464,6 +321,164 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	}
 	out.Body["messages"] = out.Messages
 	return out, nil
+}
+
+func (out *responsesChatRequest) prepareTools(body map[string]json.RawMessage, history []convertedChatMessage, keepCache bool) error {
+	tools, err := responseClientTools(body)
+	if err != nil {
+		return err
+	}
+	// Saved discoveries remain callable in subsequent scoped continuations.
+	for _, message := range history {
+		if len(message.Discoveries) == 0 {
+			continue
+		}
+		raw, _ := json.Marshal(message.Discoveries)
+		callID, _ := json.Marshal(message.CallID)
+		tools, err = mergeResponseDiscoveries(tools, []map[string]json.RawMessage{{"type": json.RawMessage(`"tool_search_output"`), "call_id": callID, "tools": raw}})
+		if err != nil {
+			return err
+		}
+	}
+	// Reserve direct names before flattening so declaration order cannot hide a collision.
+	out.Direct = map[string]bool{}
+	for _, tool := range tools {
+		if kind := credentialString(tool, "type"); kind != "namespace" && kind != "tool_search" {
+			out.Direct[credentialString(tool, "name")] = true
+		}
+	}
+	expanded := []map[string]json.RawMessage{}
+	namespacedDefinitions := map[string]string{}
+	for _, tool := range tools {
+		if credentialString(tool, "type") != "namespace" {
+			expanded = append(expanded, tool)
+			continue
+		}
+		children, err := responseNamespaceChildren(tool)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			flat, err := out.registerNamespace(credentialString(tool, "name"), credentialString(child, "name"))
+			if err != nil {
+				return err
+			}
+			definition := responseToolDefinition(child)
+			if previous, exists := namespacedDefinitions[flat]; exists {
+				if previous != definition {
+					return bad("conflicting namespaced tool definitions")
+				}
+				continue
+			}
+			namespacedDefinitions[flat] = definition
+			child["name"], _ = json.Marshal(flat)
+			expanded = append(expanded, child)
+		}
+	}
+	convertedTools := []any{}
+	out.Declared = map[string]bool{}
+	searchDefinition := ""
+	for _, tool := range expanded {
+		kind, name := credentialString(tool, "type"), credentialString(tool, "name")
+		if kind == "tool_search" {
+			if err := validateResponseClientTool(tool); err != nil {
+				return err
+			}
+			name = "tool_search"
+			if out.Direct[name] {
+				return bad("tool search conflicts with a declared tool name")
+			}
+			definition := responseToolDefinition(tool)
+			if out.ToolSearch {
+				if definition != searchDefinition {
+					return bad("conflicting tool search definitions")
+				}
+				continue
+			}
+			out.ToolSearch, searchDefinition = true, definition
+		}
+		if name == "" || len(name) > 256 || out.Declared[name] {
+			return bad("invalid or duplicate tool name")
+		}
+		out.Declared[name] = true
+		function := map[string]any{"name": name}
+		switch kind {
+		case "tool_search":
+			function["description"] = "Find client tools for the current task."
+			function["parameters"] = json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`)
+			for _, field := range []string{"description", "parameters", "strict"} {
+				if raw := tool[field]; raw != nil {
+					function[field] = raw
+				}
+			}
+		case "function":
+			for _, field := range []string{"description", "parameters", "strict"} {
+				if raw := tool[field]; raw != nil {
+					function[field] = raw
+				}
+			}
+		case "custom":
+			out.Custom[name] = true
+			function["description"] = credentialString(tool, "description") + " Return the complete custom tool input in the input string."
+			function["parameters"] = map[string]any{"type": "object", "properties": map[string]any{"input": map[string]string{"type": "string"}}, "required": []string{"input"}, "additionalProperties": false}
+			function["strict"] = true
+		default:
+			return bad("this tool requires a native Responses account")
+		}
+		if keepCache && tool["cache_control"] != nil {
+			function["cache_control"] = tool["cache_control"]
+		}
+		convertedTools = append(convertedTools, map[string]any{"type": "function", "function": function})
+	}
+	if len(convertedTools) > 0 {
+		out.Body["tools"] = convertedTools
+	}
+	if raw := body["tool_choice"]; raw != nil && string(raw) != "null" {
+		var name string
+		if json.Unmarshal(raw, &name) == nil {
+			if name != "auto" && name != "none" && name != "required" {
+				return bad("invalid tool choice")
+			}
+			out.Body["tool_choice"] = name
+		} else {
+			var choice map[string]json.RawMessage
+			if json.Unmarshal(raw, &choice) != nil {
+				return bad("invalid tool choice")
+			}
+			kind, name := credentialString(choice, "type"), credentialString(choice, "name")
+			if kind == "tool_search" {
+				if !out.ToolSearch {
+					return bad("tool choice requires declared client tool search")
+				}
+				kind, name = "function", "tool_search"
+			}
+			if namespace := credentialString(choice, "namespace"); namespace != "" {
+				flat := flattenedToolName(namespace, name)
+				if kind != "function" || out.Namespaces[flat] != (responseToolName{namespace, name}) {
+					return bad("tool choice must name a declared namespace function")
+				}
+				name = flat
+			}
+			if (kind != "function" && kind != "custom") || !out.Declared[name] {
+				return bad("tool choice must name a declared tool")
+			}
+			out.Body["tool_choice"] = map[string]any{"type": "function", "function": map[string]string{"name": name}}
+		}
+	}
+	return nil
+}
+
+func (out *responsesChatRequest) registerNamespace(namespace, name string) (string, error) {
+	if namespace == "" || name == "" || len(namespace) > 256 || len(name) > 256 {
+		return "", bad("invalid namespaced tool")
+	}
+	flat := flattenedToolName(namespace, name)
+	owner := responseToolName{namespace, name}
+	if previous, exists := out.Namespaces[flat]; out.Direct[flat] || exists && previous != owner {
+		return "", bad("namespaced tool collides with another tool")
+	}
+	out.Namespaces[flat] = owner
+	return flat, nil
 }
 
 func responsesChatContent(raw json.RawMessage, role string) (any, error) {
