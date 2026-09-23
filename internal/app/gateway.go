@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 )
@@ -27,14 +28,16 @@ type gatewayKey struct {
 	Blacklist []string    `json:"ip_blacklist"`
 }
 type gatewayGroup struct {
-	ID          int64               `json:"id"`
-	Platform    string              `json:"platform"`
-	Rate        json.Number         `json:"rate_multiplier"`
-	RPM         int                 `json:"rpm_limit"`
-	LongContext bool                `json:"long_context_pricing_enabled"`
-	Allowlist   modelAllowlist      `json:"model_allowlist"`
-	Manifest    modelManifestConfig `json:"codex_models_manifest_config"`
-	Pricing     []modelPrice        `json:"model_pricing"`
+	ID             int64               `json:"id"`
+	Platform       string              `json:"platform"`
+	Rate           json.Number         `json:"rate_multiplier"`
+	RPM            int                 `json:"rpm_limit"`
+	LongContext    bool                `json:"long_context_pricing_enabled"`
+	Allowlist      modelAllowlist      `json:"model_allowlist"`
+	Manifest       modelManifestConfig `json:"codex_models_manifest_config"`
+	Pricing        []modelPrice        `json:"model_pricing"`
+	ModelRouting   map[string][]int64  `json:"model_routing"`
+	RoutingEnabled bool                `json:"model_routing_enabled"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -184,6 +187,24 @@ func (g *gatewayGroup) allows(model string) bool {
 	return false
 }
 
+// Rules select a preferred pool, not a whitelist. Preserve case-sensitive
+// matching and exact precedence; longest prefix removes map iteration ambiguity.
+func (g *gatewayGroup) routingAccounts(model, platform string) []int64 {
+	if !g.RoutingEnabled || platform != "openai" && platform != "anthropic" {
+		return nil
+	}
+	if ids := g.ModelRouting[model]; len(ids) > 0 {
+		return ids
+	}
+	best := ""
+	for pattern, ids := range g.ModelRouting {
+		if len(ids) > 0 && strings.HasSuffix(pattern, "*") && strings.HasPrefix(model, strings.TrimSuffix(pattern, "*")) && len(pattern) > len(best) {
+			best = pattern
+		}
+	}
+	return g.ModelRouting[best]
+}
+
 type gatewaySelection struct {
 	Account                                    *upstreamAccount
 	Rate                                       json.Number
@@ -264,6 +285,17 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+	preferred := g.Group.routingAccounts(s.ChannelModel, g.Group.Platform)
+	if len(preferred) > 0 {
+		pool := make(map[int64]bool, len(preferred))
+		for _, id := range preferred {
+			pool[id] = true
+		}
+		// Stable partition retains priority/last-used ordering inside both pools.
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return pool[candidates[i].id] && !pool[candidates[j].id]
+		})
 	}
 	for _, c := range candidates {
 		if exclude[c.id] || binding != nil && binding.AccountID != c.id {

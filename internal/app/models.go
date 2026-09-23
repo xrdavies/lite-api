@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -327,6 +328,8 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity, native bool) 
 		return nil, &apiError{503, "invalid channel model mapping"}
 	}
 	byID := map[string]discoveredModel{}
+	routedByID := map[string]discoveredModel{}
+	routedNames := map[string]bool{}
 	available := false
 	for _, id := range ids {
 		if g.Group.Manifest.Enabled && available {
@@ -380,6 +383,13 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity, native bool) 
 		for name := range mapping {
 			if concreteModel(name) {
 				candidates[name] = true
+			}
+		}
+		if g.Group.RoutingEnabled {
+			for name := range g.Group.ModelRouting {
+				if concreteModel(name) {
+					candidates[name] = true
+				}
 			}
 		}
 		if composite != nil {
@@ -436,6 +446,16 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity, native bool) 
 				if composite != nil {
 					m.Owner = u.Platform
 				}
+				if preferred := g.Group.routingAccounts(mapped, u.Platform); len(preferred) > 0 && !g.Group.Manifest.Enabled {
+					routedNames[name] = true
+					if slices.Contains(preferred, u.ID) {
+						if previous, exists := routedByID[name]; exists {
+							routedByID[name] = commonModelCapabilities(previous, m)
+						} else {
+							routedByID[name] = m
+						}
+					}
+				}
 				if previous, exists := byID[name]; exists {
 					// Pinned catalogs use explicit first-account precedence. Otherwise a
 					// model can route to any account, so advertise only common capabilities.
@@ -469,6 +489,20 @@ func (a *App) groupModels(ctx context.Context, g *gatewayIdentity, native bool) 
 	}
 	models := []discoveredModel{}
 	for _, m := range byID {
+		if routedNames[m.ID] {
+			if routed, ok := routedByID[m.ID]; ok {
+				if m.Owner == "composite" {
+					// Other endpoint platforms remain callable and constrain the
+					// shared manifest even when one platform has a preferred pool.
+					routed = commonModelCapabilities(routed, m)
+				}
+				m.modelMetadata = routed.modelMetadata
+			} else {
+				// Keep the callable fallback name, but do not invent capabilities
+				// for a missing preferred account or borrow another account's limits.
+				m.modelMetadata = modelMetadata{ID: m.ID, DisplayName: m.DisplayName}
+			}
+		}
 		models = append(models, m)
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })

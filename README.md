@@ -33,6 +33,10 @@ go build -o bin/lite-api ./cmd/lite-api
 
 复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换、fallback 与媒体继续开发。
 
+分组可配置 `model_routing_enabled` 和 `model_routing`，例如 `{"gpt-*": [12, 18]}`。规则匹配渠道改写后的模型名，区分大小写，精确项优先，其次最长尾部 `*` 前缀；空列表不形成优先池。规则用于 OpenAI、Anthropic 目标平台，复合分组按解析平台执行。优先池内仍按账号优先级和最后使用时间选择，数组顺序不代表优先级；不可用时回退同组其他合格账号，所有权限、协议、额度、并发和渠道模型限制继续生效。规则中的未关联、已删除或其他平台账号不会被调用。省略或 `null` 保留配置，`{}` 清空；开关关闭时保留规则。Responses 续接优先遵守原账号绑定，原账号不可用时拒绝转投。
+
+未固定模型目录账号时，manifest 的能力取模型优先池内账号的交集；优先账号无可用元数据时不借用普通候选的能力。复合分组同名模型在其他端点平台可调用时，仍以共同能力为限。显式 `codex_models_manifest_config` 保持所选目录账号的顺序。目录展示不承诺此刻有并发空位，也不保证回退账号拥有相同上下文上限。
+
 ## 上游与健康测试
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实文本请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。
