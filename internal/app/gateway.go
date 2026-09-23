@@ -256,6 +256,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		s.Audio = protocol
 		s.ChannelModel = protocol
 	}
+	if protocol == "realtime" {
+		s.Audio = protocol
+	}
 	if protocol == "alpha_search" || grokSearchProtocol(protocol) {
 		s.Search = protocol
 	}
@@ -401,7 +404,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "images" {
 			matches = (u.Platform == "openai" || u.Platform == "grok") && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
-		if grokSearchProtocol(protocol) || audioProtocol(protocol) {
+		if grokSearchProtocol(protocol) || voiceProtocol(protocol) {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if !matches {
@@ -410,6 +413,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		mapped, err := u.mappedModel(s.ChannelModel)
 		if audioProtocol(protocol) {
 			mapped, err = protocol, nil
+		}
+		if protocol == "realtime" {
+			mapped, err = in.Model, nil
 		}
 		if err != nil {
 			continue
@@ -491,6 +497,9 @@ func gatewayError(w http.ResponseWriter, err error) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": "gateway_error", "code": status}})
 }
 func (a *App) gatewayRoutes() {
+	for _, path := range []string{"/v1/realtime", "/realtime"} {
+		a.mux.HandleFunc("GET "+path, a.grokRealtime)
+	}
 	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
 	for _, protocol := range []string{"web_search", "x_search", "tts", "stt"} {
 		for _, prefix := range []string{"/v1/", "/"} {

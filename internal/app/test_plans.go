@@ -205,6 +205,9 @@ func (a *App) startWorkers() {
 	a.startBatchImages(ctx)
 	go func() {
 		defer close(a.workerDone)
+		if err := a.recoverRealtime(ctx); err != nil {
+			slog.Error("realtime billing recovery failed")
+		}
 		if err := a.recoverReceipts(ctx); err != nil {
 			slog.Error("pending usage settlement recovery failed")
 		}
@@ -227,6 +230,9 @@ func (a *App) startWorkers() {
 				}
 				if err := a.recoverReceipts(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("pending usage settlement recovery failed")
+				}
+				if err := a.recoverRealtime(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("realtime billing recovery failed")
 				}
 				if err := a.runDueTests(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("scheduled test cycle failed")

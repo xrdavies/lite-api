@@ -14,6 +14,7 @@ import (
 )
 
 type responseSocket struct {
+	realtimeID             string
 	client, upstream       *websocket.Conn
 	keyID, groupID, userID int64
 	binding                *responseBinding
@@ -254,26 +255,8 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 		return nil, conflict("upstream configuration changed; reconnect")
 	}
 	if s.upstream == nil {
-		base, err := account.baseURL()
-		if err != nil {
-			return nil, err
-		}
-		endpoint, err := upstreamURL(base, "/v1/responses")
-		if err != nil {
-			return nil, err
-		}
-		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-		if err != nil {
-			return nil, err
-		}
-		tr, err := a.upstreamTransport(ctx, account, req)
-		if err != nil {
-			return nil, err
-		}
-		defer tr.CloseIdleConnections()
 		headers := http.Header{"Authorization": []string{"Bearer " + credentialString(account.Credentials, "api_key")}, "User-Agent": []string{"lite-api/1"}, "OpenAI-Beta": []string{"responses_websockets=2026-02-06"}}
-		client := &http.Client{Transport: socketTransport{tr, req.URL.Opaque}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		conn, resp, err := websocket.Dial(ctx, req.URL.String(), &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, Host: req.Host, CompressionMode: websocket.CompressionDisabled})
+		conn, resp, err := a.dialUpstreamSocket(ctx, account, "/v1/responses", headers)
 		if err != nil {
 			if resp != nil {
 				resp.Body = io.NopCloser(strings.NewReader(""))
@@ -304,6 +287,29 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 	readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 	stop := context.AfterFunc(ctx, func() { time.AfterFunc(15*time.Second, readCancel) })
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &socketEventBody{ctx: readCtx, conn: s.upstream, cleanup: func() { stop(); readCancel() }}}, nil
+}
+
+// Shared native transport policy for Responses and voice WebSocket handshakes.
+func (a *App) dialUpstreamSocket(ctx context.Context, account *upstreamAccount, path string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+	base, err := account.baseURL()
+	if err != nil {
+		return nil, nil, err
+	}
+	endpoint, err := upstreamURL(base, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	tr, err := a.upstreamTransport(ctx, account, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: socketTransport{tr, req.URL.Opaque}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return websocket.Dial(ctx, req.URL.String(), &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, Host: req.Host, CompressionMode: websocket.CompressionDisabled})
 }
 
 type socketTransport struct {

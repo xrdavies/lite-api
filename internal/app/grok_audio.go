@@ -18,15 +18,16 @@ import (
 )
 
 type audioPrices struct {
-	TTS *json.Number `json:"audio_tts_price_per_million_chars"`
-	STT *json.Number `json:"audio_stt_price_per_hour"`
+	Realtime *json.Number `json:"audio_realtime_price_per_min"`
+	TTS      *json.Number `json:"audio_tts_price_per_million_chars"`
+	STT      *json.Number `json:"audio_stt_price_per_hour"`
 }
 
 func (p audioPrices) apply(ctx context.Context, tx *sql.Tx, id int64) error {
 	for _, f := range []struct {
 		name  string
 		price *json.Number
-	}{{"audio_tts_price_per_million_chars", p.TTS}, {"audio_stt_price_per_hour", p.STT}} {
+	}{{"audio_tts_price_per_million_chars", p.TTS}, {"audio_stt_price_per_hour", p.STT}, {"audio_realtime_price_per_min", p.Realtime}} {
 		if f.price == nil {
 			continue
 		}
@@ -46,6 +47,8 @@ func (p audioPrices) apply(ctx context.Context, tx *sql.Tx, id int64) error {
 }
 
 func audioProtocol(protocol string) bool { return protocol == "tts" || protocol == "stt" }
+
+func voiceProtocol(protocol string) bool { return audioProtocol(protocol) || protocol == "realtime" }
 
 type audioRequest struct {
 	Body        []byte
@@ -248,8 +251,11 @@ func (g gatewayGroup) audioCost(protocol, units string) (priceCost, error) {
 	if protocol == "stt" {
 		price, fallback = g.STT, "0.10"
 	}
+	if protocol == "realtime" {
+		price, fallback = g.Realtime, "0.05"
+	}
 	u, ok := new(big.Rat).SetString(units)
-	if !audioProtocol(protocol) || !ok || u.Sign() < 0 || !validPrice(price, 12, 8) || !validPrice(&g.Rate, 6, 4) {
+	if !voiceProtocol(protocol) || !ok || u.Sign() < 0 || !validPrice(price, 12, 8) || !validPrice(&g.Rate, 6, 4) {
 		return priceCost{}, fmt.Errorf("invalid audio billing units or price")
 	}
 	total := new(big.Rat).Mul(decimalOr(price, fallback), u)

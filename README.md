@@ -215,3 +215,11 @@ PostgreSQL 保存加密请求、任务、结果索引和冻结凭据。单实例
 `Idempotency-Key` 在两个路径别名间共用；TTS 音频以 Base64 JSON 封装保存在原幂等记录，重放恢复原字节和 Content-Type，不重复派发或扣费。已接收到音频的 TTS 断流仍结算已知输入消费；结算失败返回 503，持久待结算记录可恢复，恢复和错误重放都不再次生成。音频调用记录 per_request 账务及端点，不伪造 token 用量。
 
 本功能以本地真实 HTTP 上游模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实 Grok 语音 Key 联调；Realtime、自定义声音和视频执行链继续开发。
+
+## Grok Realtime
+
+`GET /v1/realtime` 和 `/realtime` 通过 WebSocket 接入 Grok API Key 账号，模型使用 query 参数（默认 `grok-voice-latest`）。网关只接受下游 API Key，不接受 token 子协议、`Idempotency-Key`、外部会话恢复或第三方 conversation ID；上游连接始终使用账号自己的 API Key。JSON 事件和二进制音频双向转发，客户端会话/响应中的模型、字段大小写和禁用的 resumption 会在转发前校验，凭证、Cookie 和客户端鉴权头不会透传。
+
+Realtime 连接受用户并发、Key/IP/分组权限、模型许可、账号健康、额度、RPM 和单实例 WebSocket 容量限制；连接期间每秒复核权限和账号状态，最长空闲五分钟。观察到音频后按连接分钟数建立 Redis 持久账务检查点，断开或策略错误时冻结最终时长并通过既有 SQL 去重账务结算；进程退出、数据库暂时失败或恢复执行不会重新连接上游或重复扣费。分组可设置 `audio_realtime_price_per_min`，省略时使用固定兼容价 0.05 USD/分钟，0 表示免费，金额仍乘分组/用户倍率。
+
+Realtime 已通过本地 WebSocket 上游模拟、Docker PostgreSQL/Redis 与 race 集成验证，覆盖 JSON/二进制音频、账号切换、权限撤销、上游错误隔离、价格快照和恢复去重；尚未使用真实 Grok 语音 Key 联调。
