@@ -29,6 +29,7 @@ type gatewayKey struct {
 }
 type gatewayGroup struct {
 	audioPrices
+	videoPrices
 	reasoningPolicy
 	ID              int64               `json:"id"`
 	Platform        string              `json:"platform"`
@@ -242,7 +243,7 @@ type gatewaySelection struct {
 	ApplyStats                                 bool
 	Restrict                                   bool
 	StatsRules                                 []statsPriceRule
-	Release                                    func()
+	Release                                    func() `json:"-"`
 }
 
 func (s *gatewaySelection) price(model string) (modelPrice, error) {
@@ -398,6 +399,12 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "embeddings" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
+		if protocol == "seedance" {
+			matches = u.supportsSeedance()
+		}
+		if protocol == "videos" {
+			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+		}
 		if protocol == "alpha_search" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
@@ -408,6 +415,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if !matches {
+			continue
+		}
+		if !u.allowsOpenAIProtocol(protocol) {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)

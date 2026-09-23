@@ -256,23 +256,10 @@ func effectiveModelPrice(c *priceCatalog, group, channel []modelPrice, platform,
 			return modelPrice{}, denied()
 		}
 	}
-	var matched *modelPrice
-search:
-	for i := range group {
-		for _, pattern := range group[i].Models {
-			if pricingName(pattern) == pricingName(model) {
-				matched = &group[i]
-				break search
-			}
-			if matched == nil && patternMatches(pricingName(pattern), pricingName(model)) {
-				matched = &group[i]
-			}
-		}
-	}
-	if matched == nil {
+	card, found := groupModelPrice(group, model)
+	if !found {
 		return resolvedModelPrice(c, channel, platform, model, false)
 	}
-	card := *matched
 	card.Platform, card.Models = platform, []string{model}
 	if card.BillingMode == "token" || card.BillingMode == "" {
 		// Group token intervals are stored for compatibility but only the
@@ -316,4 +303,22 @@ func (a *App) referenceModels(w http.ResponseWriter, r *http.Request) error {
 	}
 	sort.Strings(models)
 	return reply(w, map[string]any{"models": models, "as_of": c.AsOf, "checksum": c.hash})
+}
+
+func groupModelPrice(group []modelPrice, model string) (modelPrice, bool) {
+	var matched *modelPrice
+	for i := range group {
+		for _, pattern := range group[i].Models {
+			if pricingName(pattern) == pricingName(model) {
+				return group[i], true
+			}
+			if matched == nil && patternMatches(pricingName(pattern), pricingName(model)) {
+				matched = &group[i]
+			}
+		}
+	}
+	if matched == nil {
+		return modelPrice{}, false
+	}
+	return *matched, true
 }

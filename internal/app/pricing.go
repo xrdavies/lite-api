@@ -167,7 +167,7 @@ func validateModelPrices(prices []modelPrice, accountStats bool) error {
 		if p.BillingMode == "" {
 			p.BillingMode = "token"
 		}
-		if p.BillingMode != "token" && p.BillingMode != "per_request" && p.BillingMode != "image" {
+		if p.BillingMode != "token" && p.BillingMode != "per_request" && p.BillingMode != "image" && p.BillingMode != "video" {
 			return bad("invalid billing mode")
 		}
 		if len(p.Models) == 0 || len(p.Models) > 100 {
@@ -326,6 +326,8 @@ func (p *timePrice) multiplierAt(at time.Time) *big.Rat {
 
 // Context includes cached input. Output does not move a request into a higher tier.
 type priceUsage struct {
+	VideoCount, VideoSeconds                                         int64
+	VideoResolution                                                  string
 	AudioUnits                                                       string
 	Input, Output, CacheWrite, CacheWrite5m, CacheWrite1h, CacheRead int64
 	ImageInput, ImageOutput                                          int64
@@ -382,7 +384,7 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 	if !validPrice(&rate, 6, 4) {
 		return empty, bad("invalid billing rate")
 	}
-	for _, n := range []int64{u.Input, u.Output, u.CacheWrite, u.CacheWrite5m, u.CacheWrite1h, u.CacheRead, u.ImageInput, u.ImageOutput, u.Requests} {
+	for _, n := range []int64{u.Input, u.Output, u.CacheWrite, u.CacheWrite5m, u.CacheWrite1h, u.CacheRead, u.ImageInput, u.ImageOutput, u.Requests, u.VideoCount, u.VideoSeconds} {
 		if n < 0 || n > 2147483647 {
 			return empty, bad("invalid usage count")
 		}
@@ -397,7 +399,7 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 	if n, ok := p.Reasoning[effort]; ok {
 		multiplier.Mul(multiplier, rat(n))
 	}
-	if p.BillingMode == "per_request" || p.BillingMode == "image" {
+	if p.BillingMode == "per_request" || p.BillingMode == "image" || p.BillingMode == "video" {
 		selected := p.PerRequest
 		matchedLabel := false
 		if label != "" {
@@ -422,6 +424,12 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 			count = 1
 		}
 		units := big.NewRat(count, 1)
+		if p.BillingMode == "video" {
+			if u.VideoCount <= 0 || u.VideoSeconds <= 0 {
+				return empty, bad("video pricing requires video usage")
+			}
+			units = new(big.Rat).Mul(big.NewRat(u.VideoCount, 1), big.NewRat(u.VideoSeconds, 1))
+		}
 		if u.AudioUnits != "" {
 			var ok bool
 			units, ok = new(big.Rat).SetString(u.AudioUnits)

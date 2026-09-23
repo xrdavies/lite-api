@@ -64,6 +64,10 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Credentials {
 		switch key {
+		case "openai_capabilities":
+			if _, _, err := openAICapabilities(value); err != nil {
+				return err
+			}
 		case "api_key":
 			var s string
 			if json.Unmarshal(value, &s) != nil || s == "" || len(s) > 8192 || strings.ContainsAny(s, "\r\n") {
@@ -146,7 +150,7 @@ func (in *accountInput) validate(create bool) error {
 	return nil
 }
 func accountJSON(ctx context.Context, q queryer, id int64) (json.RawMessage, error) {
-	return jsonRow(q.QueryRowContext(ctx, `SELECT (to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb)) FROM accounts a WHERE id=$1 AND deleted_at IS NULL`, id))
+	return jsonRow(q.QueryRowContext(ctx, `SELECT (to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb)) FROM accounts a WHERE id=$1 AND deleted_at IS NULL`, id))
 }
 func setAccountGroups(ctx context.Context, tx *sql.Tx, id int64, platform string, groups []int64, priority int) error {
 	if len(groups) > 1000 {

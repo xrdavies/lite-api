@@ -17,6 +17,7 @@ func supportedPlatform(platform string) bool {
 
 type groupInput struct {
 	audioPrices
+	videoPrices
 	batchGroupInput
 	Name             *string              `json:"name"`
 	Description      *string              `json:"description"`
@@ -251,6 +252,9 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if err = in.audioPrices.apply(r.Context(), tx, created.ID); err != nil {
 		return err
 	}
+	if err = in.videoPrices.apply(r.Context(), tx, created.ID); err != nil {
+		return err
+	}
 	if err = in.batchGroupInput.apply(r.Context(), tx, created.ID); err != nil {
 		return err
 	}
@@ -418,6 +422,9 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 		return missing()
 	}
 	if err = in.audioPrices.apply(r.Context(), tx, id); err != nil {
+		return err
+	}
+	if err = in.videoPrices.apply(r.Context(), tx, id); err != nil {
 		return err
 	}
 	if err = in.batchGroupInput.apply(r.Context(), tx, id); err != nil {

@@ -49,6 +49,7 @@ type App struct {
 	imageTaskMu      sync.Mutex
 	batchMu          sync.Mutex
 	batchWorkerDone  chan struct{}
+	videoWorkerDone  chan struct{}
 	planMu           sync.Mutex
 	instanceLost     atomic.Bool
 	ingressFailures  atomic.Uint64
@@ -150,6 +151,7 @@ func (a *App) Close() {
 	<-a.workerDone
 	<-a.imageWorkerDone
 	<-a.batchWorkerDone
+	<-a.videoWorkerDone
 	a.Redis.Close()
 	a.instanceLock.Close()
 	a.DB.Close()
@@ -342,6 +344,7 @@ func (a *App) routes() {
 	a.imageStorageRoutes()
 	a.imageTaskRoutes()
 	a.batchImageRoutes()
+	a.videoRoutes()
 	a.route("GET /api/v1/version", "public", func(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, map[string]string{"version": "dev"})
 	})

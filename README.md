@@ -2,7 +2,7 @@
 
 面向企业和团队内部使用的 AI 网关，使用 Go、PostgreSQL 和 Redis，单实例部署。管理员创建账户，用户管理自己的 API Key。内置前端目录保留占位，当前开发后端。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 批量图片任务；其他媒体、托管工具及扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务；托管工具及其余扩展运行功能仍在开发中。
 
 ## 本地运行
 
@@ -216,7 +216,7 @@ PostgreSQL 保存加密请求、任务、结果索引和冻结凭据。单实例
 
 `Idempotency-Key` 在两个路径别名间共用；TTS 音频以 Base64 JSON 封装保存在原幂等记录，重放恢复原字节和 Content-Type，不重复派发或扣费。已接收到音频的 TTS 断流仍结算已知输入消费；结算失败返回 503，持久待结算记录可恢复，恢复和错误重放都不再次生成。音频调用记录 per_request 账务及端点，不伪造 token 用量。
 
-本功能以本地真实 HTTP 上游模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实 Grok 语音 Key 联调；Realtime、自定义声音和视频执行链继续开发。
+本功能以本地真实 HTTP 上游模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实 Grok 语音 Key 联调；Realtime、自定义声音和视频能力见下文。
 
 ## Grok Realtime
 
@@ -234,3 +234,18 @@ Realtime 已通过本地 WebSocket 上游模拟、Docker PostgreSQL/Redis 与 ra
 TTS 使用创建返回的 `voice_id`，会固定到原账号；未知、他人或已删除的自定义声音在转发前拒绝。一个 Key 的声音库固定在同一上游账号，Realtime 在握手前选择该账号，并转换 `session.voice` 和兼容的 `session.audio.output.voice`；账号不可用时不切到其他来源。内置声音仍可直接使用，当前名称依据官方语音列表。管理操作支持 `Idempotency-Key` 和路径别名重放；上游创建结果不确定时保留 processing 记录，重试返回 409，需核查上游后处理，不自动重复创建。
 
 协议依据 [xAI Custom Voices](https://docs.x.ai/developers/model-capabilities/audio/custom-voices) 和 [Voice API](https://docs.x.ai/developers/rest-api-reference/inference/voice)。原厂创建接口要求上游账号具备相应权限；本功能通过本地 HTTP/WebSocket 模拟验证，尚未使用真实 xAI Key 联调。
+
+
+## 视频与 Seedance
+
+Grok API Key 及路由到 Grok 的 composite 分组支持 `POST /v1/videos`、`/v1/videos/generations`、`/v1/videos/edits`、`/v1/videos/extensions`，均有去掉 `/v1` 的别名。创建使用 JSON，返回网关 `request_id`；GET `/v1/videos/{request_id}` 查询，追加 `/content` 下载。查询及下载也支持 `/videos/generations|edits|extensions/{request_id}` 前缀。创建受原 `allow_image_generation` 开关控制，编辑/扩展要求 `video.url`；不会下载客户端输入视频。单次请求最多 32 MiB，输出下载最多 64 MiB，仅接受视频或二进制响应，不跟随跳转或向内容 URL 发送 API Key。协议依据 [xAI 视频生成](https://docs.x.ai/developers/model-capabilities/video/generation)、[编辑](https://docs.x.ai/developers/model-capabilities/video/editing)及[扩展](https://docs.x.ai/developers/model-capabilities/video/extension)。
+
+管理员分组配置支持 `video_price_480p/720p/1080p`（USD/秒）、`video_model_prices`（模型族 → 分辨率 → USD/秒）、`video_rate_independent` 和 `video_rate_multiplier`。价格省略/null 保持，负数清除平面价格覆盖，0 免费；模型价格 `{}` 清空。分组模型 video 价卡优先，其次模型族/平面视频价、渠道媒体价，最后固定兼容基线。`billing_mode=video` 的 `per_request_price` 表示每秒价格，可用 480p/720p/1080p 区间标签；渠道 per_request/image 仍按每个视频一次计费。默认兼容价：grok-imagine-video 为 0.05/0.07/0.07，1.5 为 0.08/0.14/0.25 USD/秒；不是实时原厂报价。默认共享有效用户/分组倍率，开启独立倍率则使用视频倍率。
+
+Grok 在首次观察到 `done` 且存在 `video.url` 时结算，优先使用上游时长，缺少时使用提交时长（默认 8 秒）；沿用原整数秒口径，小数截断，限制在 1–15 秒。编辑和扩展的精细时长语义依赖上游返回，当前不改变原数据库字段含义。用量写入原 `video_count`、`video_resolution`、`video_duration_seconds` 和 `billing_mode=video`。失败/过期任务不扣费，重复查询和下载不重复扣费。
+
+Seedance 使用 `POST /api/v3/contents/generations/tasks`、GET/DELETE `.../{task_id}`，同样支持 `/v3`、`/v1` 和无前缀。账号须为 `platform=openai,type=apikey`，显式设置 `base_url` 和 `credentials.openai_capabilities=["seedance"]`（也接受布尔对象）。设置能力集合后，文本、Embedding、alpha 搜索按各自能力准入；未设置仍保留原普通接口行为。Seedance 可用显式 OpenAI composite 路由；保留原生多模态 content、草稿及参数，草稿只能引用同一客户端 Key 的已完成草稿，并固定原上游账号。回调和计费工具当前拒绝。成功后按上游 completion_tokens 结算；DELETE 对排队任务请求取消，对已结算终态任务删除上游记录，运行中能否取消由上游决定。
+
+两类任务共用加密 Redis 记录和恢复 worker，无需 schema 变更。记录不保存提示词或上游 Key；保存原用户/Key/分组、上游来源指纹和不可变价格快照。最多 32 个待完成任务，单实例每 15 秒顺序轮询；终态记录保留七天，视频 URL 本身的有效期由上游决定。保留 Redis 持久卷和原 `JWT_SECRET`，待结算任务不自动过期。禁用新调度或额度耗尽不阻止原 Key 读取已创建任务；禁用/删除/到期 Key 仍拒绝。变更上游凭证/地址后需要恢复原来源才能继续轮询。
+
+`Idempotency-Key` 在同一 Key、操作和路径别名间重放创建结果；不同内容返回 409。结算失败先保存检查点，恢复不重新生成、不重复扣费。上游创建结果不明确或接受后持久化失败时不自动重发；同幂等键保留 processing，需人工核查。Grok 当前无取消接口。以上使用本地 HTTP 模拟和 Docker PostgreSQL/Redis 验证，尚未使用真实视频供应商凭证联调。

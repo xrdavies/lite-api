@@ -25,6 +25,9 @@ type textRequest struct {
 }
 
 func (in textRequest) compositeEndpoint() string {
+	if in.Protocol == "seedance" || in.Protocol == "videos" {
+		return "any"
+	}
 	if in.Protocol == "alpha_search" {
 		return "responses"
 	}

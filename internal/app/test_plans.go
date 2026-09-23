@@ -203,6 +203,7 @@ func (a *App) startWorkers() {
 	a.workerDone = make(chan struct{})
 	a.startImageTasks(ctx)
 	a.startBatchImages(ctx)
+	a.startVideoTasks(ctx)
 	go func() {
 		defer close(a.workerDone)
 		if err := a.recoverRealtime(ctx); err != nil {
