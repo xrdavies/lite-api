@@ -277,6 +277,22 @@ func validateModelPrices(prices []modelPrice, accountStats bool) error {
 	return nil
 }
 
+func validateGroupPrices(platform string, prices []modelPrice) error {
+	for i := range prices {
+		p := &prices[i]
+		if p.Platform == "" {
+			p.Platform = platform
+		}
+		for j := range p.Models {
+			p.Models[j] = strings.TrimSpace(p.Models[j])
+		}
+		if p.TimePricing != nil && len(p.TimePricing.Periods) > 0 {
+			return bad("group model pricing does not support time pricing")
+		}
+	}
+	return validateModelPrices(prices, false)
+}
+
 func rat(n json.Number) *big.Rat { v, _ := new(big.Rat).SetString(n.String()); return v }
 func decimalOr(n *json.Number, fallback string) *big.Rat {
 	if n == nil {

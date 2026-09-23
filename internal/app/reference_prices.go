@@ -247,6 +247,41 @@ func resolvedModelPrice(c *priceCatalog, configured []modelPrice, platform, mode
 	return custom, nil
 }
 
+// Group cards match the billing model name, independently of their platform
+// label. Exact names beat the first matching wildcard. They replace channel
+// cards; omitted components inherit reference prices, not channel prices.
+func effectiveModelPrice(c *priceCatalog, group, channel []modelPrice, platform, model string, restrict bool) (modelPrice, error) {
+	if restrict {
+		if _, found := matchPrice(channel, platform, model); !found {
+			return modelPrice{}, denied()
+		}
+	}
+	var matched *modelPrice
+search:
+	for i := range group {
+		for _, pattern := range group[i].Models {
+			if pricingName(pattern) == pricingName(model) {
+				matched = &group[i]
+				break search
+			}
+			if matched == nil && patternMatches(pricingName(pattern), pricingName(model)) {
+				matched = &group[i]
+			}
+		}
+	}
+	if matched == nil {
+		return resolvedModelPrice(c, channel, platform, model, false)
+	}
+	card := *matched
+	card.Platform, card.Models = platform, []string{model}
+	if card.BillingMode == "token" || card.BillingMode == "" {
+		// Group token intervals are stored for compatibility but only the
+		// reference long-context ladder applies to these flat overrides.
+		card.Intervals = nil
+	}
+	return resolvedModelPrice(c, []modelPrice{card}, platform, model, false)
+}
+
 func (a *App) referencePricing(w http.ResponseWriter, r *http.Request) error {
 	name := strings.TrimSpace(r.URL.Query().Get("model"))
 	if !concreteModel(name) {

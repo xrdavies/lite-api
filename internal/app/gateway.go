@@ -34,6 +34,7 @@ type gatewayGroup struct {
 	LongContext bool                `json:"long_context_pricing_enabled"`
 	Allowlist   modelAllowlist      `json:"model_allowlist"`
 	Manifest    modelManifestConfig `json:"codex_models_manifest_config"`
+	Pricing     []modelPrice        `json:"model_pricing"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -189,6 +190,7 @@ type gatewaySelection struct {
 	ChannelID                                  *int64
 	ChannelModel, UpstreamModel, BillingSource string
 	Pricing                                    []modelPrice
+	GroupPricing                               []modelPrice
 	Catalog                                    *priceCatalog
 	ApplyStats                                 bool
 	Restrict                                   bool
@@ -197,10 +199,10 @@ type gatewaySelection struct {
 }
 
 func (s *gatewaySelection) price(model string) (modelPrice, error) {
-	return resolvedModelPrice(s.Catalog, s.Pricing, s.Account.Platform, model, s.Restrict)
+	return effectiveModelPrice(s.Catalog, s.GroupPricing, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
 func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
-	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog}
+	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
 	if err != nil && err != sql.ErrNoRows {

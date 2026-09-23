@@ -103,7 +103,7 @@ func (a *App) modelPlaza(w http.ResponseWriter, r *http.Request) error {
 			return unauthorized()
 		}
 	}
-	rows, err := tx.QueryContext(r.Context(), `SELECT c.id,g.platform,g.long_context_pricing_enabled,g.model_allowlist,jsonb_build_object(
+	rows, err := tx.QueryContext(r.Context(), `SELECT c.id,g.platform,g.long_context_pricing_enabled,g.model_allowlist,g.model_pricing,jsonb_build_object(
 'id',g.id,'name',g.name,'description',g.description,'platform',g.platform,'subscription_type',g.subscription_type,'rate_multiplier',g.rate_multiplier,'is_exclusive',g.is_exclusive,'peak_rate_enabled',g.peak_rate_enabled,'peak_start',g.peak_start,'peak_end',g.peak_end,'peak_rate_multiplier',g.peak_rate_multiplier,'image_rate_independent',g.image_rate_independent,'image_rate_multiplier',g.image_rate_multiplier,'long_context_pricing_enabled',g.long_context_pricing_enabled) || CASE WHEN m.rate_multiplier IS NOT NULL THEN jsonb_build_object('user_rate_multiplier',m.rate_multiplier) ELSE '{}'::jsonb END
 FROM groups g JOIN channel_groups cg ON cg.group_id=g.id JOIN channels c ON c.id=cg.channel_id LEFT JOIN users u ON u.id=$1 LEFT JOIN user_group_rate_multipliers m ON m.user_id=u.id AND m.group_id=g.id
 WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standard' AND NOT g.require_oauth_only AND c.status='active' AND ((NOT g.is_exclusive AND NOT COALESCE(u.restrict_public_groups,false)) OR EXISTS(SELECT 1 FROM user_allowed_groups WHERE user_id=u.id AND group_id=g.id)) ORDER BY g.rate_multiplier,g.name,g.id`, userID)
@@ -115,13 +115,14 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 		platform    string
 		longContext bool
 		allowlist   modelAllowlist
+		pricing     []modelPrice
 		visible     map[string]json.RawMessage
 	}
 	groups := []group{}
 	for rows.Next() {
 		g := group{}
-		var allowlist, visible []byte
-		if err = rows.Scan(&g.channel, &g.platform, &g.longContext, &allowlist, &visible); err != nil {
+		var allowlist, pricing, visible []byte
+		if err = rows.Scan(&g.channel, &g.platform, &g.longContext, &allowlist, &pricing, &visible); err != nil {
 			rows.Close()
 			return err
 		}
@@ -130,6 +131,9 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 		}
 		if err = json.Unmarshal(allowlist, &g.allowlist); err == nil {
 			err = json.Unmarshal(visible, &g.visible)
+		}
+		if err == nil && len(pricing) > 0 {
+			err = json.Unmarshal(pricing, &g.pricing)
 		}
 		if err != nil {
 			rows.Close()
@@ -185,7 +189,7 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 						}
 					}
 				}
-				if price, err := resolvedModelPrice(catalog, c.Pricing, model.Platform, name, c.Restrict); err == nil {
+				if price, err := effectiveModelPrice(catalog, g.pricing, c.Pricing, model.Platform, name, c.Restrict); err == nil {
 					resolved := plazaPrice(price, g.longContext)
 					entry["pricing"] = publicPricing(resolved)
 					if price.BillingMode == "token" && len(resolved.Intervals) > 1 {

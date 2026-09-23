@@ -28,6 +28,7 @@ type groupInput struct {
 	Allowlist        *modelAllowlist      `json:"model_allowlist"`
 	LongContext      *bool                `json:"long_context_pricing_enabled"`
 	Manifest         *modelManifestConfig `json:"codex_models_manifest_config"`
+	Pricing          *[]modelPrice        `json:"model_pricing"`
 }
 
 type modelManifestConfig struct {
@@ -142,12 +143,20 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if err := a.validateModelManifest(r, 0, platform, in.Manifest); err != nil {
 		return err
 	}
+	pricing := "[]"
+	if in.Pricing != nil {
+		if err := validateGroupPrices(platform, *in.Pricing); err != nil {
+			return err
+		}
+		b, _ := json.Marshal(in.Pricing)
+		pricing = string(b)
+	}
 	manifest := "{}"
 	if in.Manifest != nil {
 		raw, _ := json.Marshal(in.Manifest)
 		manifest = string(raw)
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest))
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled,codex_models_manifest_config,model_pricing) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext, manifest, pricing))
 	if err != nil {
 		return err
 	}
@@ -170,6 +179,17 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	add := func(field string, v any) {
 		args = append(args, v)
 		sets = append(sets, fmt.Sprintf("%s=$%d", field, len(args)))
+	}
+	if in.Pricing != nil {
+		var platform string
+		if err = a.DB.QueryRowContext(r.Context(), "SELECT platform FROM groups WHERE id=$1 AND deleted_at IS NULL", id).Scan(&platform); err != nil {
+			return err
+		}
+		if err = validateGroupPrices(platform, *in.Pricing); err != nil {
+			return err
+		}
+		b, _ := json.Marshal(in.Pricing)
+		add("model_pricing", string(b))
 	}
 	if in.Allowlist != nil {
 		b, _ := json.Marshal(in.Allowlist)
