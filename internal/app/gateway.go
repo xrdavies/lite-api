@@ -309,6 +309,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 			return sticky != nil && (len(preferred) == 0 || pool[left]) && left == sticky.AccountID && right != sticky.AccountID
 		})
 	}
+	var busy *accountBusy
 	for _, c := range candidates {
 		if exclude[c.id] || binding != nil && binding.AccountID != c.id {
 			continue
@@ -341,6 +342,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 			continue
 		}
 		if !a.takeSlot("account", u.ID, c.concurrency) {
+			if busy == nil && c.concurrency > 0 {
+				busy = &accountBusy{ID: c.id}
+			}
 			continue
 		}
 		s.Account = u
@@ -348,6 +352,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 		s.UpstreamModel = mapped
 		s.Release = func() { a.releaseSlot("account", u.ID) }
 		return s, nil
+	}
+	if busy != nil {
+		return nil, busy
 	}
 	return nil, &apiError{503, "no available upstream account"}
 }
@@ -358,7 +365,7 @@ func (a *App) takeSlot(kind string, id int64, limit int) bool {
 		a.gatewayActive = map[string]int{}
 	}
 	key := fmt.Sprintf("%s:%d", kind, id)
-	if limit <= 0 || a.gatewayActive[key] >= limit {
+	if a.gatewayStopped || a.instanceLost.Load() || limit <= 0 || a.gatewayActive[key] >= limit {
 		return false
 	}
 	a.gatewayActive[key]++
@@ -372,6 +379,7 @@ func (a *App) releaseSlot(kind string, id int64) {
 	if a.gatewayActive[key] <= 0 {
 		delete(a.gatewayActive, key)
 	}
+	a.wakeGatewayLocked()
 }
 func (a *App) gatewayRPM(ctx context.Context, g *gatewayIdentity) error {
 	minute := time.Now().Unix() / 60
@@ -513,6 +521,26 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(denied())
 		return
 	}
+	ping := func() error {
+		if !stream {
+			return nil
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Accel-Buffering", "no")
+		committed = true
+		if _, err := io.WriteString(w, ": waiting for concurrency\n\n"); err != nil {
+			return err
+		}
+		return http.NewResponseController(w).Flush()
+	}
+	// A queued user is reauthorized before routing and pricing are captured.
+	g, err = a.acquireGatewayUser(r, g, model, ping)
+	if err != nil {
+		fail(err)
+		return
+	}
+	defer a.releaseSlot("user", g.UserID)
+	groupSnapshot := g.Group
 	// Look up affinity after the idempotent replay check: replay needs no upstream.
 	routingModel := model
 	if g.Group.Platform == "composite" {
@@ -521,14 +549,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			fail(err)
 			return
 		}
-		endpoint := protocol
-		if protocol == "anthropic" {
-			endpoint = "messages"
-			if in.CountOnly {
-				endpoint = "count_tokens"
-			}
-		}
-		decision := config.resolve(g.Key.GroupID, model, endpoint)
+		decision := config.resolve(g.Key.GroupID, model, in.compositeEndpoint())
 		if !decision.Matched {
 			fail(&apiError{404, decision.Reason})
 			return
@@ -568,16 +589,6 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 
-	// Single-instance concurrency remains held through settlement, including client cancellation.
-	if !a.takeSlot("user", g.UserID, g.Concurrency) {
-		fail(&apiError{429, "user concurrency limit exceeded"})
-		return
-	}
-	defer a.releaseSlot("user", g.UserID)
-	if err = a.gatewayRPM(ctx, g); err != nil {
-		fail(err)
-		return
-	}
 	if stream && protocol == "chat_completions" {
 		options := map[string]json.RawMessage{}
 		if raw := request["stream_options"]; raw != nil && string(raw) != "null" {
@@ -594,6 +605,26 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
 		selected, err = a.chooseAccount(ctx, g, routingModel, protocol, excluded, binding, sticky, catalog)
+		var busy *accountBusy
+		if errors.As(err, &busy) {
+			_, err = a.waitAdmission(ctx, "account", busy.ID, gatewayQueueTimeout, func(waitCtx context.Context) (bool, error) {
+				if err := a.revalidateQueuedRequest(r.WithContext(waitCtx), g, groupSnapshot, in, routingModel); err != nil {
+					return false, err
+				}
+				var selectErr error
+				selected, selectErr = a.chooseAccount(waitCtx, g, routingModel, protocol, excluded, binding, sticky, catalog)
+				if selected != nil && waitCtx.Err() != nil {
+					selected.Release()
+					selected = nil
+					return false, waitCtx.Err()
+				}
+				var busy *accountBusy
+				if errors.As(selectErr, &busy) {
+					return false, nil
+				}
+				return selected != nil, selectErr
+			}, ping)
+		}
 		if err != nil {
 			fail(err)
 			return
@@ -643,6 +674,23 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			request["generateContentRequest"], _ = json.Marshal(nested)
 		}
 		upstreamBody, _ := json.Marshal(request)
+		if _, err = a.admissionWake(); err != nil || ctx.Err() != nil {
+			selected.Release()
+			if err == nil {
+				err = &apiError{499, "request canceled before dispatch"}
+			}
+			fail(err)
+			return
+		}
+		// Queuing and rejected preflights do not consume RPM. Account retries
+		// share the single admission count from the first dispatch.
+		if attempt == 0 {
+			if err = a.gatewayRPM(ctx, g); err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+		}
 		if err = a.bindSession(ctx, session, selected.Account); err != nil {
 			selected.Release()
 			fail(err)

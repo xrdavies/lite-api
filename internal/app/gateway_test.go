@@ -202,7 +202,22 @@ func testGateway(t *testing.T, a *App, admin string) {
 	go func() { completed <- call("POST", "/v1/chat/completions", key, request(false)) }()
 	<-started
 	before := calls.Load()
-	expect(429, key, request(false))
+	queuedCtx, queuedCancel := context.WithCancel(context.Background())
+	queuedBody, _ := json.Marshal(request(false))
+	queuedRequest := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(queuedBody)).WithContext(queuedCtx)
+	queuedRequest.Header.Set("Authorization", "Bearer "+key)
+	queuedRequest.RemoteAddr = "192.0.2.10:1234"
+	queuedDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, queuedRequest)
+		queuedDone <- w
+	}()
+	waitForQueue(t, a, "user", uid, 1)
+	queuedCancel()
+	if w := <-queuedDone; w.Code != 499 {
+		t.Fatal("queued cancellation", w.Code, w.Body.String())
+	}
 	if calls.Load() != before {
 		t.Fatal("concurrency overflow reached upstream")
 	}

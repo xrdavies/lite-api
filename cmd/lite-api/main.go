@@ -78,6 +78,7 @@ func run() error {
 			return err
 		case <-stopped.Done():
 		}
+		a.StopAdmission()
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err = server.Shutdown(shutdown); err != nil {

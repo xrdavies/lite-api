@@ -17,6 +17,16 @@ type textRequest struct {
 	Headers                                      http.Header
 }
 
+func (in textRequest) compositeEndpoint() string {
+	if in.Protocol == "anthropic" {
+		if in.CountOnly {
+			return "count_tokens"
+		}
+		return "messages"
+	}
+	return in.Protocol
+}
+
 func parseTextRequest(r *http.Request, protocol string, body map[string]json.RawMessage) (textRequest, error) {
 	in := textRequest{Protocol: protocol, Headers: http.Header{}}
 	if protocol == "gemini" {

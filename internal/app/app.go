@@ -49,6 +49,10 @@ type App struct {
 	instanceLost     atomic.Bool
 	gatewayMu        sync.Mutex
 	gatewayActive    map[string]int
+	gatewayWaiting   map[string]int
+	gatewayQueued    int
+	gatewayWake      chan struct{}
+	gatewayStopped   bool
 	priceFile        string
 	priceMu          sync.Mutex
 	prices           atomic.Pointer[priceCatalog]
@@ -132,6 +136,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	return a, nil
 }
 func (a *App) Close() {
+	a.StopAdmission()
 	a.workerCancel()
 	<-a.workerDone
 	a.Redis.Close()
@@ -148,6 +153,7 @@ func (a *App) checkInstance(ctx context.Context) error {
 	defer cancel()
 	if err := a.instanceLock.PingContext(ctx); err != nil {
 		a.instanceLost.Store(true)
+		a.StopAdmission()
 		return &apiError{503, "instance lock lost; restart this service"}
 	}
 	return nil
@@ -337,4 +343,6 @@ func (a *App) routes() {
 	a.modelRoutes()
 	a.quotaRoutes()
 	a.usageRoutes()
+	a.route("GET /api/v1/admin/ops/concurrency", "admin", a.accountConcurrency)
+	a.route("GET /api/v1/admin/ops/user-concurrency", "admin", a.userConcurrency)
 }
