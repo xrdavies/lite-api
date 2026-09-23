@@ -19,153 +19,19 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 	}
 	var in map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &in)
-	if tier := credentialString(in, "service_tier"); tier != "" && tier != "auto" {
-		return nil, nil, "", bad("service_tier cannot be converted to Gemini")
-	}
-	config := map[string]any{"responseModalities": []string{"TEXT"}}
-	for from, to := range map[string]string{"temperature": "temperature", "top_p": "topP", "max_output_tokens": "maxOutputTokens"} {
-		if in[from] != nil {
-			config[to] = in[from]
-		}
-	}
-	if raw := body["stop"]; raw != nil && string(raw) != "null" {
-		var single string
-		var stops []string
-		if json.Unmarshal(raw, &single) == nil {
-			stops = []string{single}
-		} else if json.Unmarshal(raw, &stops) != nil {
-			return nil, nil, "", bad("invalid stop sequences")
-		}
-		if len(stops) > 5 {
-			return nil, nil, "", bad("too many stop sequences")
-		}
-		for _, s := range stops {
-			if s == "" {
-				return nil, nil, "", bad("empty stop sequence")
-			}
-		}
-		config["stopSequences"] = stops
-	}
 	effort, err := requestEffort(body, "chat_completions")
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if effort != "" {
-		model := strings.TrimPrefix(strings.ToLower(credentialString(in, "model")), "models/")
-		if effort == "xhigh" || effort == "max" {
-			effort = "high"
-		}
-		thinking := map[string]any{"includeThoughts": true}
-		switch effort {
-		case "none", "minimal", "low", "medium", "high":
-		default:
-			return nil, nil, "", bad("unsupported Gemini reasoning effort")
-		}
-		if strings.HasPrefix(model, "gemini-2.5") {
-			if effort == "none" && strings.Contains(model, "pro") {
-				return nil, nil, "", bad("thinking cannot be disabled for this model")
-			}
-			budget := map[string]int{"none": 0, "minimal": 1024, "low": 1024, "medium": 8192, "high": 24576}[effort]
-			thinking["thinkingBudget"] = budget
-			if effort == "minimal" {
-				effort = "low"
-			}
-		} else {
-			if effort == "none" {
-				return nil, nil, "", bad("thinking cannot be disabled for this model")
-			}
-			if effort == "minimal" && strings.Contains(model, "pro") {
-				effort = "low"
-			}
-			thinking["thinkingLevel"] = strings.ToUpper(effort)
-		}
-		config["thinkingConfig"] = thinking
+	out, custom, effort, err := geminiOptions(in, body["stop"], effort)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	var text struct {
-		Format    map[string]json.RawMessage
-		Verbosity json.RawMessage
-	}
-	if raw := in["text"]; raw != nil && json.Unmarshal(raw, &text) != nil {
-		return nil, nil, "", bad("invalid text configuration")
-	}
-	if text.Verbosity != nil {
-		return nil, nil, "", bad("verbosity cannot be converted to Gemini")
-	}
-	switch credentialString(text.Format, "type") {
-	case "", "text":
-	case "json_object":
-		config["responseMimeType"] = "application/json"
-	case "json_schema":
-		var schema map[string]json.RawMessage
-		if json.Unmarshal(text.Format["schema"], &schema) != nil || schema == nil {
-			return nil, nil, "", bad("JSON schema required")
-		}
-		config["responseMimeType"], config["responseJsonSchema"] = "application/json", schema
-	default:
-		return nil, nil, "", bad("unsupported response format")
-	}
-	out := map[string]any{"generationConfig": config}
-	custom, names := map[string]bool{}, map[string]bool{}
+	names := map[string]bool{}
 	var tools []map[string]json.RawMessage
 	_ = json.Unmarshal(in["tools"], &tools)
-	declarations := []any{}
 	for _, t := range tools {
-		name := credentialString(t, "name")
-		if !geminiFunctionName(name) || names[name] {
-			return nil, nil, "", bad("invalid or duplicate Gemini tool name")
-		}
-		names[name] = true
-		schema := t["parameters"]
-		if credentialString(t, "type") == "custom" {
-			custom[name] = true
-			schema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
-		}
-		if schema == nil || string(schema) == "null" {
-			schema = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
-		var object map[string]json.RawMessage
-		if json.Unmarshal(schema, &object) != nil || credentialString(object, "type") != "object" {
-			return nil, nil, "", bad("tool parameters must be an object schema")
-		}
-		declaration := map[string]any{"name": name, "parametersJsonSchema": schema}
-		if t["description"] != nil {
-			declaration["description"] = t["description"]
-		}
-		declarations = append(declarations, declaration)
-	}
-	if raw := in["parallel_tool_calls"]; raw != nil && string(raw) != "null" {
-		var parallel bool
-		if json.Unmarshal(raw, &parallel) != nil || !parallel && len(declarations) > 0 {
-			return nil, nil, "", bad("Gemini cannot disable parallel function calls")
-		}
-	}
-	if len(declarations) == 0 {
-		if raw := in["tool_choice"]; raw != nil && string(raw) != "null" && string(raw) != `"auto"` && string(raw) != `"none"` {
-			return nil, nil, "", bad("tool_choice requires declared tools")
-		}
-	}
-	if len(declarations) > 0 {
-		out["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
-		choice := map[string]any{"mode": "AUTO"}
-		if raw := in["tool_choice"]; raw != nil && string(raw) != "null" {
-			var value string
-			if json.Unmarshal(raw, &value) == nil {
-				mode := map[string]string{"auto": "AUTO", "none": "NONE", "required": "ANY"}[value]
-				if mode == "" {
-					return nil, nil, "", bad("invalid tool_choice")
-				}
-				choice["mode"] = mode
-			} else {
-				var v map[string]json.RawMessage
-				_ = json.Unmarshal(raw, &v)
-				name := credentialString(v, "name")
-				if !names[name] {
-					return nil, nil, "", bad("tool_choice must name a declared tool")
-				}
-				choice["mode"], choice["allowedFunctionNames"] = "ANY", []string{name}
-			}
-		}
-		out["toolConfig"] = map[string]any{"functionCallingConfig": choice}
+		names[credentialString(t, "name")] = true
 	}
 	// Chat clients can round-trip Google's opaque function-call signatures. Calls
 	// imported without one use the compatibility sentinel, as the native API allows.
@@ -289,6 +155,154 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 	return raw, custom, effort, err
 }
 
+// The two inbound protocols share only generation controls and tool declarations.
+func geminiOptions(in map[string]json.RawMessage, stop json.RawMessage, effort string) (map[string]any, map[string]bool, string, error) {
+	if tier := credentialString(in, "service_tier"); tier != "" && tier != "auto" {
+		return nil, nil, "", bad("service_tier cannot be converted to Gemini")
+	}
+	config := map[string]any{"responseModalities": []string{"TEXT"}}
+	for from, to := range map[string]string{"temperature": "temperature", "top_p": "topP", "max_output_tokens": "maxOutputTokens"} {
+		if in[from] != nil {
+			config[to] = in[from]
+		}
+	}
+	if raw := stop; raw != nil && string(raw) != "null" {
+		var single string
+		var stops []string
+		if json.Unmarshal(raw, &single) == nil {
+			stops = []string{single}
+		} else if json.Unmarshal(raw, &stops) != nil {
+			return nil, nil, "", bad("invalid stop sequences")
+		}
+		if len(stops) > 5 {
+			return nil, nil, "", bad("too many stop sequences")
+		}
+		for _, s := range stops {
+			if s == "" {
+				return nil, nil, "", bad("empty stop sequence")
+			}
+		}
+		config["stopSequences"] = stops
+	}
+	if effort != "" {
+		model := strings.TrimPrefix(strings.ToLower(credentialString(in, "model")), "models/")
+		if effort == "xhigh" || effort == "max" {
+			effort = "high"
+		}
+		thinking := map[string]any{"includeThoughts": true}
+		switch effort {
+		case "none", "minimal", "low", "medium", "high":
+		default:
+			return nil, nil, "", bad("unsupported Gemini reasoning effort")
+		}
+		if strings.HasPrefix(model, "gemini-2.5") {
+			if effort == "none" && strings.Contains(model, "pro") {
+				return nil, nil, "", bad("thinking cannot be disabled for this model")
+			}
+			budget := map[string]int{"none": 0, "minimal": 1024, "low": 1024, "medium": 8192, "high": 24576}[effort]
+			thinking["thinkingBudget"] = budget
+			// A token budget is not an explicit billable thinking level.
+			effort = ""
+		} else {
+			if effort == "none" {
+				return nil, nil, "", bad("thinking cannot be disabled for this model")
+			}
+			if effort == "minimal" && strings.Contains(model, "pro") {
+				effort = "low"
+			}
+			thinking["thinkingLevel"] = strings.ToUpper(effort)
+		}
+		config["thinkingConfig"] = thinking
+	}
+	var text struct {
+		Format    map[string]json.RawMessage
+		Verbosity json.RawMessage
+	}
+	if raw := in["text"]; raw != nil && json.Unmarshal(raw, &text) != nil {
+		return nil, nil, "", bad("invalid text configuration")
+	}
+	if text.Verbosity != nil {
+		return nil, nil, "", bad("verbosity cannot be converted to Gemini")
+	}
+	switch credentialString(text.Format, "type") {
+	case "", "text":
+	case "json_object":
+		config["responseMimeType"] = "application/json"
+	case "json_schema":
+		var schema map[string]json.RawMessage
+		if json.Unmarshal(text.Format["schema"], &schema) != nil || schema == nil {
+			return nil, nil, "", bad("JSON schema required")
+		}
+		config["responseMimeType"], config["responseJsonSchema"] = "application/json", schema
+	default:
+		return nil, nil, "", bad("unsupported response format")
+	}
+	out := map[string]any{"generationConfig": config}
+	custom, names := map[string]bool{}, map[string]bool{}
+	var tools []map[string]json.RawMessage
+	_ = json.Unmarshal(in["tools"], &tools)
+	declarations := []any{}
+	for _, t := range tools {
+		name := credentialString(t, "name")
+		if !geminiFunctionName(name) || names[name] {
+			return nil, nil, "", bad("invalid or duplicate Gemini tool name")
+		}
+		names[name] = true
+		schema := t["parameters"]
+		if credentialString(t, "type") == "custom" {
+			custom[name] = true
+			schema = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}`)
+		}
+		if schema == nil || string(schema) == "null" {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		var object map[string]json.RawMessage
+		if json.Unmarshal(schema, &object) != nil || credentialString(object, "type") != "object" {
+			return nil, nil, "", bad("tool parameters must be an object schema")
+		}
+		declaration := map[string]any{"name": name, "parametersJsonSchema": schema}
+		if t["description"] != nil {
+			declaration["description"] = t["description"]
+		}
+		declarations = append(declarations, declaration)
+	}
+	if raw := in["parallel_tool_calls"]; raw != nil && string(raw) != "null" {
+		var parallel bool
+		if json.Unmarshal(raw, &parallel) != nil || !parallel && len(declarations) > 0 {
+			return nil, nil, "", bad("Gemini cannot disable parallel function calls")
+		}
+	}
+	if len(declarations) == 0 {
+		if raw := in["tool_choice"]; raw != nil && string(raw) != "null" && string(raw) != `"auto"` && string(raw) != `"none"` {
+			return nil, nil, "", bad("tool_choice requires declared tools")
+		}
+	}
+	if len(declarations) > 0 {
+		out["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
+		choice := map[string]any{"mode": "AUTO"}
+		if raw := in["tool_choice"]; raw != nil && string(raw) != "null" {
+			var value string
+			if json.Unmarshal(raw, &value) == nil {
+				mode := map[string]string{"auto": "AUTO", "none": "NONE", "required": "ANY"}[value]
+				if mode == "" {
+					return nil, nil, "", bad("invalid tool_choice")
+				}
+				choice["mode"] = mode
+			} else {
+				var v map[string]json.RawMessage
+				_ = json.Unmarshal(raw, &v)
+				name := credentialString(v, "name")
+				if !names[name] {
+					return nil, nil, "", bad("tool_choice must name a declared tool")
+				}
+				choice["mode"], choice["allowedFunctionNames"] = "ANY", []string{name}
+			}
+		}
+		out["toolConfig"] = map[string]any{"functionCallingConfig": choice}
+	}
+	return out, custom, effort, nil
+}
+
 func geminiFunctionName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {
 		return false
@@ -337,6 +351,7 @@ type geminiChatStream struct {
 	Finish          string
 	Size, Parts     int
 	ReasoningTokens int64
+	Part            func(map[string]json.RawMessage, map[string]any) (string, error)
 }
 
 func newGeminiChatStream(model string, include bool, custom map[string]bool) *geminiChatStream {
@@ -372,7 +387,7 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 		return "", &apiError{502, "converted stream exceeds limit"}
 	}
 	var wire strings.Builder
-	if !s.Chat.Role {
+	if !s.Chat.Role && s.Part == nil {
 		wire.WriteString(s.Chat.chunk(map[string]any{"role": "assistant", "content": ""}, nil, nil))
 		s.Chat.Role = true
 	}
@@ -391,6 +406,7 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 			if s.Parts > 4096 {
 				return "", &apiError{502, "converted stream exceeds limit"}
 			}
+			var tool map[string]any
 			switch {
 			case p["text"] != nil:
 				var text string
@@ -405,7 +421,9 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 				} else {
 					s.Text.WriteString(text)
 				}
-				wire.WriteString(s.Chat.chunk(map[string]any{field: text}, nil, nil))
+				if s.Part == nil {
+					wire.WriteString(s.Chat.chunk(map[string]any{field: text}, nil, nil))
+				}
 			case p["functionCall"] != nil:
 				var call struct {
 					ID, Name string
@@ -435,13 +453,22 @@ func (s *geminiChatStream) observe(raw []byte) (string, error) {
 						return "", &apiError{502, "invalid custom tool input"}
 					}
 				}
-				tool := map[string]any{"id": call.ID, "type": kind, kind: map[string]any{"name": call.Name, field: value}}
+				tool = map[string]any{"id": call.ID, "type": kind, kind: map[string]any{"name": call.Name, field: value}}
 				if signature := credentialString(p, "thoughtSignature"); signature != "" {
 					tool["extra_content"] = map[string]any{"google": map[string]any{"thought_signature": signature}}
 				}
 				s.Tools = append(s.Tools, tool)
+			case s.Part != nil && len(p) == 1 && credentialString(p, "thoughtSignature") != "":
+				// Native streams can carry a standalone signature part.
 			default:
 				return "", &apiError{502, "unsupported Gemini output part"}
+			}
+			if s.Part != nil {
+				partWire, err := s.Part(p, tool)
+				if err != nil {
+					return "", err
+				}
+				wire.WriteString(partWire)
 			}
 		}
 		if c.Finish != "" {

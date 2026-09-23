@@ -244,7 +244,7 @@ func compositeModelTargets(c *compositeConfig, gid int64, model, platform, proto
 	}
 	endpoints := []string{protocol}
 	if protocol == "gemini" {
-		endpoints = append(endpoints, "chat_completions")
+		endpoints = append(endpoints, "chat_completions", "messages", "count_tokens")
 	}
 	if protocol == "responses" && chatResponsesPlatform(platform) {
 		endpoints = append(endpoints, "chat_completions")

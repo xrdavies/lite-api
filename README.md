@@ -87,7 +87,7 @@ Chat 入口也支持 Anthropic 平台，以及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMa
 
 Chat 三个入口也支持 Gemini 账号，通过原生 `generateContent` / `streamGenerateContent` 返回 Chat JSON/SSE，复合路由和模型发现同步支持。转换保留系统指令、文本、图片/PDF、函数及 custom 工具、工具结果、停止序列、JSON 输出；schema 使用原生 JSON Schema 字段，避免删减约束。客户端函数签名通过 `tool_calls[].extra_content.google.thought_signature` 回传，缺少签名的历史调用使用兼容标记；网关不拉取客户端媒体 URL，URL 可访问性由上游决定。原生字段见 [Gemini generateContent](https://ai.google.dev/api/generate-content)。
 
-Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；xhigh/max 映射 high，minimal 在 Pro 上映射 low，未指定时沿用模型默认。禁止关闭强制思考，不能映射的多候选、托管工具或禁用并行函数调用等控制在派发前拒绝；预算映射参考 [Gemini OpenAI 兼容文档](https://ai.google.dev/gemini-api/docs/openai)。Chat 输入用量含缓存读，输出用量含思考；扣费使用原生互斥计量和实际 effort。文本/思考增量实时返回，工具调用、finish_reason、usage 和 DONE 等待结算成功。缺用量或断流返回错误，已知消费仍持久结算并支持恢复。本地协议服务及 Docker 数据库验证已通过，尚未使用真实 Gemini Key 联调。
+Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；xhigh/max 映射 high，minimal 在 Pro 上映射 low，未指定时沿用模型默认。计费档位仅取实际 thinkingLevel，预算值不推断收费档位；客户端显式 effort 单独记入请求字段。禁止关闭强制思考，不能映射的多候选、托管工具或禁用并行函数调用等控制在派发前拒绝；预算映射参考 [Gemini OpenAI 兼容文档](https://ai.google.dev/gemini-api/docs/openai)。Chat 输入用量含缓存读，输出用量含思考；扣费使用原生互斥计量。文本/思考增量实时返回，工具调用、finish_reason、usage 和 DONE 等待结算成功。缺用量或断流返回错误，已知消费仍持久结算并支持恢复。本地协议服务及 Docker 数据库验证已通过，尚未使用真实 Gemini Key 联调。
 
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
@@ -119,7 +119,7 @@ alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token u
 
 Grok 独立搜索每次成功按 `search_price_per_1k / 1000` 乘用户专属/分组倍率结算，不叠加响应中的 token 用量。管理员在分组创建/更新中配置该字段：默认 5 USD/千次，0 免费，负数清除，省略/null 保留；默认值同样是固定兼容规则。消费模型分别为 `grok-web-search`、`grok-x-search`，实际请求/上游/响应模型另行记录。权限、模型许可、渠道限制、额度、排队、RPM、幂等及失败结算恢复共用网关；web/X 幂等相互独立，同类根路径别名共享重放。上游 401/402/403/429/5xx 最多尝试四个不同账号，网络结果不明不重发。当前由本地协议服务和真实数据库测试验证，尚无 Grok 原厂搜索实测。
 
-`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 代理 token 计数。原生转发及 token 计数要求 Anthropic 协议；按量兼容平台可使用 `credentials.api_protocol=anthropic`。版本和 beta 协议头受长度限制后转发，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
+`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 支持原生 Anthropic 计数及 Gemini 转换计数；按量兼容平台可使用 `credentials.api_protocol=anthropic`。原生转发时版本和 beta 协议头受长度限制后传递，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
 
 Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；`count_tokens` 仍要求原生计数账号。
 
@@ -128,6 +128,10 @@ Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账
 Messages 也可直接调用上述六个平台的 Responses 协议账号，支持 JSON/SSE、系统/图文/PDF、工具及包含图片的工具结果、结构化输出。请求使用 `store=false` 与 `include=["reasoning.encrypted_content"]`，不经过 Chat 格式；工具 ID 与数字精度保持。文本及思考摘要增量返回，工具块和后续内容等结算成功后发送；length/filter 分别成为 max_tokens/refusal，原始 Responses 用量参与扣费。该转换不支持非空 stop_sequences、托管工具或原生 count_tokens。
 
 Responses 思考密文通过 AES-GCM 封装为 Messages 的 signature，绑定当前客户端 Key/分组和上游账号/凭证来源，30 天有效。客户端携带该签名续接时只能选择原来源；跨 Key/组、篡改、到期、部署密钥或上游凭证轮换会拒绝，原账号不可用时不改投。外部厂商签名不作为 Responses 密文转发。服务端不为此保存新会话表或明文历史；相同响应的幂等重放保留原签名。完整 reasoning item 的 ID、summary 和 encrypted_content 用于重放，行为依据 [OpenAI reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)。已用本地 HTTP 上游和数据库验证，尚未进行真实上游联调。
+
+Messages 也可直接接入 Gemini 原生账号，保留系统/图文/PDF、函数与工具结果、停止序列、top_k、JSON schema、显式思考预算或 effort，内容块顺序保持。缓存控制不伪装为 Gemini 缓存设置，托管工具与无等价含义的控制拒绝。输入用量扣除缓存读，输出包含思考 token；工具块及其后内容、message_stop 等待结算成功，失败中的已知消费仍结算。分组与 composite 的 messages/count_tokens 路由、模型发现采用同一准入。
+
+Gemini 带签名的原生 part 使用现有 AES-GCM 封装，通过 thinking/text/tool_use 块的 `signature` 返回；客户端须原样保留该扩展字段。续接校验内容、工具身份、客户端 Key/组、原账号和来源，不能将签名移到修改后的内容上；原始函数 ID 与结果 ID 配对。导入的无签名工具历史使用兼容标记，其他厂商思考密文不转发。token 计数将完整内容、系统与工具定义放入 `generateContentRequest` 调用上游 [countTokens](https://ai.google.dev/api/tokens)，返回 `input_tokens`，不扣费；上游失败或无效计数不会用本地估算伪装成功。已通过本地协议及数据库验证，真实 Gemini Key 联调仍未覆盖。
 
 Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（SSE）和 `:countTokens`，模型映射同时应用于 URL 与嵌套 token 计数请求。输出 token 包含思考 token，缓存 token 从普通输入中拆分；原生流保持 Gemini 事件形态，不添加 Chat 的 `[DONE]`。当前原生端点支持文本生成及其多模态输入，媒体生成输出和协议转换继续开发。
 

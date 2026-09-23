@@ -356,7 +356,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			continue
 		}
 		matches := u.protocol() == protocol
-		if protocol == "chat_completions" && u.protocol() == "gemini" {
+		if (protocol == "chat_completions" || protocol == "anthropic") && u.protocol() == "gemini" {
 			matches = true
 		}
 		if protocol == "anthropic" && !in.CountOnly && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
@@ -730,6 +730,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var responsesMessages *responsesMessagesStream
 	var anthropicBridge *anthropicChatStream
 	var geminiBridge *geminiChatStream
+	var geminiMessages *geminiMessagesStream
 	var anthropicResponses *anthropicResponsesStream
 	var responsesBridge *chatResponsesStream
 	var chatRequest *responsesChatRequest
@@ -808,10 +809,33 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		wireIn.Effort = effort
 		anthropicBridge = nil
 		geminiBridge = nil
+		geminiMessages = nil
 		anthropicResponses = nil
 		responsesBridge, chatRequest = nil, nil
 		messagesBridge = nil
 		responsesMessages = nil
+		if protocol == "anthropic" && selected.Account.protocol() == "gemini" {
+			upstreamBody, wireIn.Effort, err = messagesToGemini(request, reasoningInput, in.CountOnly)
+			if err == nil {
+				wireIn.Protocol, wireIn.Headers, wireIn.Action = "gemini", nil, "generateContent"
+				if in.CountOnly {
+					wireIn.Action = "countTokens"
+				} else if stream {
+					wireIn.Action = "streamGenerateContent"
+				}
+				path, err = wireIn.upstreamPath(selected.UpstreamModel)
+			}
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			if !in.CountOnly {
+				geminiMessages = newGeminiMessagesStream(model, func(item json.RawMessage) (string, error) {
+					return a.sealMessagesReasoning(g, selected.Account, item)
+				})
+			}
+		}
 		if protocol == "chat_completions" && selected.Account.protocol() == "gemini" {
 			var custom map[string]bool
 			upstreamBody, custom, wireIn.Effort, err = chatToGemini(request)
@@ -1000,6 +1024,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 		} else {
 			forwardErr = observe(responseBody)
+			if forwardErr == nil && in.CountOnly && protocol == "anthropic" && wireIn.Protocol == "gemini" {
+				var count struct {
+					Total int64 `json:"totalTokens"`
+				}
+				_ = json.Unmarshal(responseBody, &count)
+				responseBody, _ = json.Marshal(map[string]int64{"input_tokens": count.Total})
+			}
 			if forwardErr == nil && wireIn.Protocol == "responses" && !in.CountOnly && !observation.complete() {
 				forwardErr = &apiError{502, "upstream response is not complete"}
 			}
@@ -1022,6 +1053,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				_, forwardErr = geminiBridge.observe(responseBody)
 				if forwardErr == nil {
 					_, responseBody, forwardErr = geminiBridge.finish(observation.Usage)
+				}
+			}
+			if forwardErr == nil && geminiMessages != nil {
+				_, forwardErr = geminiMessages.observe(responseBody)
+				if forwardErr == nil {
+					_, responseBody, forwardErr = geminiMessages.finish(observation.Usage)
 				}
 			}
 			if forwardErr == nil && anthropicResponses != nil {
@@ -1087,6 +1124,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
+			if geminiMessages != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = geminiMessages.observe([]byte(data))
+				if err != nil {
+					return err
+				}
+			}
 			if geminiBridge != nil {
 				if data == "" {
 					return nil
@@ -1226,6 +1273,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			end, _, forwardErr = geminiBridge.finish(observation.Usage)
 			terminal += end
 		}
+		if forwardErr == nil && geminiMessages != nil {
+			var end string
+			end, _, forwardErr = geminiMessages.finish(observation.Usage)
+			terminal += end
+		}
 	}
 	if in.CountOnly {
 		// Token counts check eligibility but do not create consumption.
@@ -1241,7 +1293,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			payloadHash = digest(model + "\n" + string(body))
 		}
 		billingEffort := effort
-		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil || geminiBridge != nil {
+		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil || geminiBridge != nil || geminiMessages != nil {
 			billingEffort = wireIn.Effort
 		}
 		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)

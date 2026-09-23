@@ -59,8 +59,8 @@ func (a *App) messagesReasoningInput(g *gatewayIdentity, body map[string]json.Ra
 			if !strings.HasPrefix(sig, messagesSignaturePrefix) {
 				continue
 			}
-			if m.Role != "assistant" || credentialString(b, "type") != "thinking" {
-				return nil, nil, bad("reasoning signature requires an assistant thinking block")
+			if m.Role != "assistant" {
+				return nil, nil, bad("reasoning signature requires an assistant content block")
 			}
 			if _, ok := saved[sig]; ok {
 				continue
@@ -77,6 +77,13 @@ func (a *App) messagesReasoningInput(g *gatewayIdentity, body map[string]json.Ra
 			var state messagesReasoning
 			if json.Unmarshal(plain, &state) != nil || state.AccountID < 1 || state.Target == "" || state.Expires <= time.Now().Unix() {
 				return nil, nil, bad("reasoning signature is invalid or expired")
+			}
+			kind := credentialString(b, "type")
+			if kind != "thinking" {
+				var payload map[string]json.RawMessage
+				if json.Unmarshal(state.Item, &payload) != nil || credentialString(payload, "type") != "gemini_part" || kind != "text" && kind != "tool_use" {
+					return nil, nil, bad("reasoning signature does not match content type")
+				}
 			}
 			if binding != nil && (binding.AccountID != state.AccountID || binding.Target != state.Target) {
 				return nil, nil, bad("reasoning history spans different upstream sources")

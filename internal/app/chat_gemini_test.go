@@ -64,9 +64,9 @@ func TestChatGemini(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ model, effort, effective, wire string }{
-		{"gemini-2.5-flash", "minimal", "low", `"thinkingBudget":1024`},
-		{"gemini-2.5-flash", "none", "none", `"thinkingBudget":0`},
-		{"gemini-2.5-pro", "medium", "medium", `"thinkingBudget":8192`},
+		{"gemini-2.5-flash", "minimal", "", `"thinkingBudget":1024`},
+		{"gemini-2.5-flash", "none", "", `"thinkingBudget":0`},
+		{"gemini-2.5-pro", "medium", "", `"thinkingBudget":8192`},
 		{"gemini-3-flash", "minimal", "minimal", `"thinkingLevel":"MINIMAL"`},
 		{"gemini-3.1-pro", "xhigh", "high", `"thinkingLevel":"HIGH"`},
 	} {
