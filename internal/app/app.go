@@ -333,6 +333,7 @@ func (a *App) routes() {
 		return reply(w, map[string]string{"status": "ok"})
 	})
 	a.settingsRoutes()
+	a.imageStorageRoutes()
 	a.route("GET /api/v1/version", "public", func(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, map[string]string{"version": "dev"})
 	})
