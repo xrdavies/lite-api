@@ -316,6 +316,7 @@ type priceUsage struct {
 type priceCost struct {
 	Input, Output, CacheWrite, CacheRead, ImageInput, ImageOutput string
 	Total, Actual, Debit                                          string
+	totalValue                                                    *big.Rat
 }
 
 func (p *modelPrice) interval(context int64) *priceInterval {
@@ -476,5 +477,5 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 	}
 	actual := new(big.Rat).Mul(total, rat(rate))
 	// Log columns retain 10 decimals; balance and quota deltas round once to 8.
-	return priceCost{parts[0].FloatString(10), parts[1].FloatString(10), parts[2].FloatString(10), parts[3].FloatString(10), parts[4].FloatString(10), parts[5].FloatString(10), total.FloatString(10), actual.FloatString(10), actual.FloatString(8)}, nil
+	return priceCost{parts[0].FloatString(10), parts[1].FloatString(10), parts[2].FloatString(10), parts[3].FloatString(10), parts[4].FloatString(10), parts[5].FloatString(10), total.FloatString(10), actual.FloatString(10), actual.FloatString(8), total}, nil
 }

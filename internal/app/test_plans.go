@@ -203,6 +203,9 @@ func (a *App) startWorkers() {
 	a.workerDone = make(chan struct{})
 	go func() {
 		defer close(a.workerDone)
+		if err := a.recoverReceipts(ctx); err != nil {
+			slog.Error("pending usage settlement recovery failed")
+		}
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -213,6 +216,9 @@ func (a *App) startWorkers() {
 				if err := a.checkInstance(ctx); err != nil {
 					slog.Error("instance lock connection lost; background work stopped")
 					return
+				}
+				if err := a.recoverReceipts(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("pending usage settlement recovery failed")
 				}
 				if err := a.runDueTests(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("scheduled test cycle failed")

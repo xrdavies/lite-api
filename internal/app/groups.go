@@ -16,15 +16,17 @@ func supportedPlatform(platform string) bool {
 }
 
 type groupInput struct {
-	Name             *string      `json:"name"`
-	Description      *string      `json:"description"`
-	Platform         *string      `json:"platform"`
-	Status           *string      `json:"status"`
-	SubscriptionType *string      `json:"subscription_type"`
-	Rate             *json.Number `json:"rate_multiplier"`
-	Exclusive        *bool        `json:"is_exclusive"`
-	RPMLimit         *int         `json:"rpm_limit"`
-	SortOrder        *int         `json:"sort_order"`
+	Name             *string         `json:"name"`
+	Description      *string         `json:"description"`
+	Platform         *string         `json:"platform"`
+	Status           *string         `json:"status"`
+	SubscriptionType *string         `json:"subscription_type"`
+	Rate             *json.Number    `json:"rate_multiplier"`
+	Exclusive        *bool           `json:"is_exclusive"`
+	RPMLimit         *int            `json:"rpm_limit"`
+	SortOrder        *int            `json:"sort_order"`
+	Allowlist        *modelAllowlist `json:"model_allowlist"`
+	LongContext      *bool           `json:"long_context_pricing_enabled"`
 }
 
 func (in *groupInput) validate(create bool) error {
@@ -48,6 +50,11 @@ func (in *groupInput) validate(create bool) error {
 	}
 	if in.RPMLimit != nil && (*in.RPMLimit < 0 || *in.RPMLimit > 1000000) {
 		return bad("invalid rpm_limit")
+	}
+	if in.Allowlist != nil {
+		if err := in.Allowlist.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -81,7 +88,16 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if in.SortOrder != nil {
 		order = *in.SortOrder
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order))
+	allowlist := "{}"
+	longContext := true
+	if in.Allowlist != nil {
+		b, _ := json.Marshal(in.Allowlist)
+		allowlist = string(b)
+	}
+	if in.LongContext != nil {
+		longContext = *in.LongContext
+	}
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `WITH created AS (INSERT INTO groups(name,description,platform,status,rate_multiplier,is_exclusive,rpm_limit,sort_order,model_allowlist,long_context_pricing_enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *) SELECT to_jsonb(created)-'deleted_at' FROM created`, *in.Name, description, platform, status, rate, exclusive, rpm, order, allowlist, longContext))
 	if err != nil {
 		return err
 	}
@@ -104,6 +120,14 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	add := func(field string, v any) {
 		args = append(args, v)
 		sets = append(sets, fmt.Sprintf("%s=$%d", field, len(args)))
+	}
+	if in.Allowlist != nil {
+		b, _ := json.Marshal(in.Allowlist)
+		args = append(args, string(b))
+		sets = append(sets, fmt.Sprintf("model_allowlist=model_allowlist || $%d::jsonb", len(args)))
+	}
+	if in.LongContext != nil {
+		add("long_context_pricing_enabled", *in.LongContext)
 	}
 	if in.Name != nil {
 		add("name", *in.Name)

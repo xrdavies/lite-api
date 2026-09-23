@@ -250,6 +250,13 @@ func (a *App) updateKey(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.ResetQuota {
 		sets = append(sets, "quota_used=0")
+		if in.Status == nil {
+			sets = append(sets, "status=CASE WHEN status='quota_exhausted' THEN 'active' ELSE status END")
+		}
+	}
+	if in.Quota != nil && !in.ResetQuota && in.Status == nil {
+		args = append(args, in.Quota.String())
+		sets = append(sets, fmt.Sprintf("status=CASE WHEN status='quota_exhausted' AND ($%d::numeric=0 OR $%d::numeric>quota_used) THEN 'active' ELSE status END", len(args), len(args)))
 	}
 	if in.ResetRateLimit {
 		sets = append(sets, resetKeyWindows)

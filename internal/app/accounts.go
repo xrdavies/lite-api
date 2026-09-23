@@ -105,6 +105,24 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case "quota_daily_reset_mode", "quota_weekly_reset_mode":
+			mode := credentialString(in.Extra, key)
+			if mode != "rolling" && mode != "fixed" {
+				return bad("invalid quota reset mode")
+			}
+		case "quota_reset_timezone":
+			zone := credentialString(in.Extra, key)
+			if zone == "" || zone == "Local" {
+				return bad("invalid quota timezone")
+			}
+			if _, err := time.LoadLocation(zone); err != nil {
+				return bad("invalid quota timezone")
+			}
+		case "quota_daily_reset_hour", "quota_weekly_reset_hour", "quota_weekly_reset_day":
+			var n int
+			if json.Unmarshal(value, &n) != nil || n < 0 || n > 23 || key == "quota_weekly_reset_day" && n > 6 {
+				return bad("invalid quota reset schedule")
+			}
 		case "quota_limit", "quota_daily_limit", "quota_weekly_limit":
 			var n json.Number
 			if json.Unmarshal(value, &n) != nil || !validDecimal(n, 12, 8) {

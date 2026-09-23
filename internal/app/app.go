@@ -47,6 +47,8 @@ type App struct {
 	workerDone       chan struct{}
 	planMu           sync.Mutex
 	instanceLost     atomic.Bool
+	gatewayMu        sync.Mutex
+	gatewayActive    map[string]int
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -322,4 +324,7 @@ func (a *App) routes() {
 	a.accountRoutes()
 	a.proxyRoutes()
 	a.testPlanRoutes()
+	a.gatewayRoutes()
+	a.quotaRoutes()
+	a.usageRoutes()
 }

@@ -32,6 +32,9 @@ try:
     env = os.environ.copy()
     env["TEST_DATABASE_URL"] = "postgres://postgres@" + run(["port", postgres, "5432/tcp"]) + "/postgres?sslmode=disable"
     env["TEST_REDIS_URL"] = "redis://" + run(["port", redis, "6379/tcp"])
-    subprocess.run(["go", "test", "-race", "-count=1", "./..."], cwd=root, env=env, check=True)
+    command = ["go", "test", "-race", "-count=1"]
+    if env.get("TEST_UPSTREAM_API_KEY"):
+        command.append("-v")
+    subprocess.run(command + ["./..."], cwd=root, env=env, check=True)
 finally:
     subprocess.run(docker + ["rm", "--force", postgres, redis], capture_output=True)
