@@ -26,14 +26,14 @@ import (
 	"github.com/xrdavies/lite-api/schema"
 )
 
-type Config struct{ DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs string }
+type Config struct{ DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs, PricingFile string }
 
 func ConfigFromEnv() Config {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8080"
 	}
-	return Config{os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), addr, os.Getenv("JWT_SECRET"), os.Getenv("UPSTREAM_PRIVATE_CIDRS")}
+	return Config{os.Getenv("DATABASE_URL"), os.Getenv("REDIS_URL"), addr, os.Getenv("JWT_SECRET"), os.Getenv("UPSTREAM_PRIVATE_CIDRS"), os.Getenv("PRICING_FILE")}
 }
 
 type App struct {
@@ -49,6 +49,9 @@ type App struct {
 	instanceLost     atomic.Bool
 	gatewayMu        sync.Mutex
 	gatewayActive    map[string]int
+	priceFile        string
+	priceMu          sync.Mutex
+	prices           atomic.Pointer[priceCatalog]
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -72,6 +75,10 @@ func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
 func New(ctx context.Context, cfg Config) (*App, error) {
 	if len(cfg.JWTSecret) < 32 {
 		return nil, errors.New("JWT_SECRET must contain at least 32 bytes")
+	}
+	pricing := &App{priceFile: cfg.PricingFile}
+	if err := pricing.reloadPrices(); err != nil {
+		return nil, err
 	}
 	db, err := OpenDatabase(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -107,6 +114,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return fail(errors.New("Redis connection failed"))
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
+	a.priceFile = cfg.PricingFile
+	a.prices.Store(pricing.prices.Load())
 	for _, raw := range strings.Split(cfg.UpstreamPrivateCIDRs, ",") {
 		if strings.TrimSpace(raw) == "" {
 			continue

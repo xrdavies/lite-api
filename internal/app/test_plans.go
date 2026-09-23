@@ -208,10 +208,16 @@ func (a *App) startWorkers() {
 		}
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		pricingTick := time.NewTicker(time.Minute)
+		defer pricingTick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-pricingTick.C:
+				if err := a.reloadPrices(); err != nil {
+					slog.Error("price catalog reload failed; retaining previous prices")
+				}
 			case <-ticker.C:
 				if err := a.checkInstance(ctx); err != nil {
 					slog.Error("instance lock connection lost; background work stopped")

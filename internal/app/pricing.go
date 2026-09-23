@@ -11,6 +11,7 @@ import (
 
 // Prices are USD per token (not per million). Keep decimal text until calculation.
 type modelPrice struct {
+	fastRatio    *big.Rat
 	Platform     string                 `json:"platform"`
 	Models       []string               `json:"models"`
 	BillingMode  string                 `json:"billing_mode"`
@@ -423,7 +424,11 @@ func calculatePrice(p modelPrice, u priceUsage, rate json.Number, serviceTier, e
 		counts := [6]int64{u.Input - imageInput, max(u.Output-u.ImageOutput, 0), 0, u.CacheRead, imageInput, u.ImageOutput}
 		switch strings.ToLower(strings.TrimSpace(serviceTier)) {
 		case "priority", "fast":
-			multiplier.Mul(multiplier, decimalOr(p.Fast, "2"))
+			if p.Fast == nil && p.fastRatio != nil {
+				multiplier.Mul(multiplier, p.fastRatio)
+			} else {
+				multiplier.Mul(multiplier, decimalOr(p.Fast, "2"))
+			}
 		case "ultrafast":
 			multiplier.Mul(multiplier, big.NewRat(2, 1))
 		case "flex":

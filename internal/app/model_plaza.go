@@ -61,6 +61,7 @@ func plazaPrice(p modelPrice, longContext bool) modelPrice {
 }
 
 func (a *App) modelPlaza(w http.ResponseWriter, r *http.Request) error {
+	catalog := a.prices.Load()
 	n, err := a.Redis.Eval(r.Context(), `local n=redis.call('INCR',KEYS[1]);if n==1 then redis.call('EXPIRE',KEYS[1],60) end;return n`, []string{"lite-api:plaza:" + clientIP(r)}).Int()
 	if err != nil {
 		return err
@@ -153,9 +154,10 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 			configs[g.channel] = raw
 		}
 		var c struct {
-			Pricing []modelPrice                 `json:"model_pricing"`
-			Mapping map[string]map[string]string `json:"model_mapping"`
-			Source  string                       `json:"billing_model_source"`
+			Pricing  []modelPrice                 `json:"model_pricing"`
+			Mapping  map[string]map[string]string `json:"model_mapping"`
+			Source   string                       `json:"billing_model_source"`
+			Restrict bool                         `json:"restrict_models"`
 		}
 		if err = json.Unmarshal(raw, &c); err != nil {
 			return err
@@ -166,6 +168,9 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 				continue
 			}
 			entry := map[string]any{"name": model.Name, "platform": model.Platform, "pricing": nil, "official_pricing": nil}
+			if reference, ok := catalog.lookup("", model.Name); ok {
+				entry["official_pricing"] = publicPricing(plazaPrice(reference, true))
+			}
 			// Upstream/response-model prices depend on the execution result; an
 			// alias cannot claim its mapped channel price under those policies.
 			if c.Source == "requested" || c.Source == "channel_mapped" || c.Source == "" {
@@ -180,22 +185,14 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 						}
 					}
 				}
-				for _, price := range c.Pricing {
-					if price.Platform != model.Platform {
-						continue
+				if price, err := resolvedModelPrice(catalog, c.Pricing, model.Platform, name, c.Restrict); err == nil {
+					resolved := plazaPrice(price, g.longContext)
+					entry["pricing"] = publicPricing(resolved)
+					if price.BillingMode == "token" && len(resolved.Intervals) > 1 {
+						entry["long_context_basis"] = "whole_request"
 					}
-					for _, pattern := range price.Models {
-						if patternMatches(pricingName(pattern), pricingName(name)) {
-							resolved := plazaPrice(price, g.longContext)
-							entry["pricing"] = publicPricing(resolved)
-							if price.BillingMode == "token" && len(resolved.Intervals) > 1 {
-								entry["long_context_basis"] = "whole_request"
-							}
-							if price.TimePricing != nil {
-								entry["time_pricing"] = price.TimePricing
-							}
-							break
-						}
+					if price.TimePricing != nil {
+						entry["time_pricing"] = price.TimePricing
 					}
 				}
 			}
@@ -213,5 +210,5 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 			out = append(out, g.visible)
 		}
 	}
-	return reply(w, map[string]any{"description": description, "groups": out})
+	return reply(w, map[string]any{"description": description, "groups": out, "pricing_as_of": catalog.AsOf, "pricing_checksum": catalog.hash})
 }

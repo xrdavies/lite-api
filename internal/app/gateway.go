@@ -189,6 +189,7 @@ type gatewaySelection struct {
 	ChannelID                                  *int64
 	ChannelModel, UpstreamModel, BillingSource string
 	Pricing                                    []modelPrice
+	Catalog                                    *priceCatalog
 	ApplyStats                                 bool
 	Restrict                                   bool
 	StatsRules                                 []statsPriceRule
@@ -196,20 +197,10 @@ type gatewaySelection struct {
 }
 
 func (s *gatewaySelection) price(model string) (modelPrice, error) {
-	for _, p := range s.Pricing {
-		if p.Platform != s.Account.Platform {
-			continue
-		}
-		for _, pattern := range p.Models {
-			if patternMatches(pricingName(pattern), pricingName(model)) {
-				return p, nil
-			}
-		}
-	}
-	return modelPrice{}, &apiError{503, "model price is not configured"}
+	return resolvedModelPrice(s.Catalog, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
-func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding *responseBinding) (*gatewaySelection, error) {
-	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped"}
+func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, protocol string, exclude map[int64]bool, binding *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog}
 	var channelID int64
 	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
 	if err != nil && err != sql.ErrNoRows {
@@ -508,9 +499,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		request["stream_options"], _ = json.Marshal(options)
 	}
 	excluded := map[int64]bool{}
+	catalog := a.prices.Load()
 	var resp *http.Response
 	for attempt := 0; attempt < 3; attempt++ {
-		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded, binding)
+		selected, err = a.chooseAccount(ctx, g, model, protocol, excluded, binding, catalog)
 		if err != nil {
 			fail(err)
 			return
@@ -526,6 +518,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		if selected.BillingSource == "upstream" {
 			billingModel = selected.UpstreamModel
+		}
+		if selected.Restrict {
+			if _, ok := matchPrice(selected.Pricing, selected.Account.Platform, billingModel); !ok {
+				selected.Release()
+				fail(denied())
+				return
+			}
 		}
 		if !in.CountOnly {
 			preflight, priceErr := selected.price(billingModel)

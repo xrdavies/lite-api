@@ -39,13 +39,17 @@ go build -o bin/lite-api ./cmd/lite-api
 
 管理员通过 `/api/v1/admin/channels` 管理渠道、分组关联、模型映射、价格和账号成本规则。一个分组只能属于一个渠道；关联与价格替换在同一事务中完成。价格沿用各字段的十进制精度，token 价格单位为 USD/token，支持科学计数法。`billing_model_source` 可配置 requested、channel_mapped、upstream 或 response_model。Chat Completions 已使用请求开始时的价格快照结算，消费期间修改价格不会回改该次费用。
 
-价格支持 token、per_request、image，缓存读写及 1h 写入价、上下文阶梯、时段/服务等级/推理倍率。上下文阶梯按 `(min_tokens, max_tokens]` 匹配；时段使用显式时区与 `[start_time, end_time)`，结束 `00:00` 表示当天结束。账号成本规则单独保存，不改变用户价格。配置缺失与显式零价有不同含义，尚无全局参考价目录回落。
+价格支持 token、per_request、image，缓存读写及 1h 写入价、上下文阶梯、时段/服务等级/推理倍率。上下文阶梯按 `(min_tokens, max_tokens]` 匹配；时段使用显式时区与 `[start_time, end_time)`，结束 `00:00` 表示当天结束。账号成本规则单独保存，不改变用户价格。渠道缺失的文本单价回落到参考价，显式零价仍为免费；单独配置缓存写入价同时覆盖 5m/1h，单独的 1h 价优先。渠道阶梯替代参考阶梯，未配阶梯则继承参考长上下文倍率；渠道自定义价不叠加供应商默认时段策略。`restrict_models=true` 仍要求模型命中渠道价卡，不能通过参考价绕过限制。
+
+内置 [参考价表](internal/app/reference_prices.json) 是截至 2026-09-23 的固定兼容计价基线，包含 248 条价卡及八个平台，不代表上游当前实际售价或全部协议已完成。`GET /api/v1/admin/channels/model-pricing?model=...` 查询参考价（可附 `platform`），`GET /api/v1/admin/channels/pricing/sync-models?platform=...` 枚举当前目录，均返回 `as_of` 和 SHA256；后者不发起联网更新。参考价支持明确的模型 ID、日期后缀和 GPT 推理等级后缀，不按未知名称猜价。中转跨品牌模型可使用唯一匹配的参考价；未知或冲突的身份需配置渠道价。
+
+部署可用 `PRICING_FILE` 指定同格式的完整本地价表；为空时使用内置表。文件上限 8 MiB、10000 条价卡，包含 `as_of`、`source`、`prices`；单价单位 USD/token，模型名必须具体，token 阶梯用倍率表示。目录独有的 `fast_ratio` 支持精确分数（如 `"5/3"`），显式 `fast_multiplier` 优先；展示同时提供精确分数字段。每分钟校验变更后原子发布，建议通过临时文件加 rename 更新。启动时无效文件会拒绝启动；运行中无效或丢失文件保留上一份有效价表并记录错误。单次请求及账号重试共用固定目录快照，更新不改变已开始请求的结算。
 
 `PUT /api/v1/admin/settings` 支持 `site_name`、`available_channels_enabled` 及模型广场开关。可用渠道默认关闭，开启后用户可通过 `/api/v1/channels/available` 查询可访问分组下的具体模型和价格，包含映射别名和本人倍率；私有分组、其他平台模型、内部账号成本规则及映射目标不向无权限用户返回。
 
 `GET /api/v1/model-plaza` 是分组模型价格目录，由 `model_plaza_enabled`（默认关闭）、`model_plaza_require_auth` 和 `model_plaza_description` 控制。匿名只见公开分组；使用登录令牌可查询已授权专属分组和本人的 `user_rate_multiplier`，受公开分组限制的用户仍需授权。无效令牌明确拒绝，API Key 不能代替登录。目录每个 IP 每分钟最多 60 次，响应禁止缓存；不调用上游或产生消费，也不保证列出的模型当前可调度。
 
-广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。当前支持已配置渠道价，缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。全局参考价及媒体分组专用价格仍待后续实现，当前 `official_pricing` 为 `null`。
+广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。分组媒体专用价格仍待后续实现。
 
 ## 网关、用量与账务
 

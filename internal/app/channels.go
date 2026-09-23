@@ -372,6 +372,7 @@ func (a *App) deleteChannel(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *App) availableChannels(w http.ResponseWriter, r *http.Request) error {
+	catalog := a.prices.Load()
 	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return err
@@ -470,6 +471,18 @@ func (a *App) availableChannels(w http.ResponseWriter, r *http.Request) error {
 				if model.Pricing != nil {
 					pricing = publicPricing(*model.Pricing)
 				}
+				name := model.Name
+				for pattern, target := range config.Mapping[platform] {
+					if patternMatches(pattern, name) {
+						if target != "" && target != "*" {
+							name = target
+						}
+						break
+					}
+				}
+				if resolved, err := resolvedModelPrice(catalog, config.Pricing, platform, name, false); err == nil {
+					pricing = publicPricing(resolved)
+				}
 				models = append(models, map[string]any{"name": model.Name, "platform": platform, "pricing": pricing})
 			}
 			sections = append(sections, map[string]any{"platform": platform, "groups": ch.groups[platform], "supported_models": models})
@@ -483,6 +496,10 @@ func publicPricing(p modelPrice) map[string]json.RawMessage {
 	b, _ := json.Marshal(p)
 	var visible map[string]json.RawMessage
 	_ = json.Unmarshal(b, &visible)
+	if p.Fast == nil && p.fastRatio != nil {
+		visible["fast_multiplier"] = json.RawMessage(p.fastRatio.FloatString(18))
+		visible["fast_multiplier_ratio"], _ = json.Marshal(p.fastRatio.RatString())
+	}
 	delete(visible, "platform")
 	delete(visible, "models")
 	var intervals []map[string]json.RawMessage
@@ -494,6 +511,8 @@ func publicPricing(p modelPrice) map[string]json.RawMessage {
 	return visible
 }
 func (a *App) channelRoutes() {
+	a.route("GET /api/v1/admin/channels/model-pricing", "admin", a.referencePricing)
+	a.route("GET /api/v1/admin/channels/pricing/sync-models", "admin", a.referenceModels)
 	a.route("POST /api/v1/admin/channels", "admin", a.saveChannel)
 	a.route("GET /api/v1/admin/channels", "admin", a.listChannels)
 	a.route("GET /api/v1/admin/channels/{id}", "admin", a.getChannel)
