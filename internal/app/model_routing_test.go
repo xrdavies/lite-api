@@ -173,7 +173,7 @@ func testModelRouting(t *testing.T, a *App, admin string) {
 	a.releaseSlot("account", preferred)
 	check(busy, first)
 	prefPath := fmt.Sprintf("/api/v1/admin/accounts/%d", preferred)
-	for _, patch := range []map[string]any{{"status": "inactive"}, {"extra": map[string]any{"quota_limit": "1"}}, {"credentials": map[string]any{"api_protocol": "responses"}}} {
+	for _, patch := range []map[string]any{{"status": "inactive"}, {"extra": map[string]any{"quota_limit": "1"}}, {"credentials": map[string]any{"api_protocol": "anthropic"}}} {
 		must("PUT", prefPath, admin, patch)
 		if patch["extra"] != nil {
 			if _, err := a.DB.Exec(`UPDATE accounts SET extra=extra||'{"quota_used":1}'::jsonb WHERE id=$1`, preferred); err != nil {

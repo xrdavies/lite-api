@@ -355,6 +355,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model, prot
 			continue
 		}
 		matches := u.protocol() == protocol
+		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
+			matches = true
+		}
 		if protocol == "embeddings" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
@@ -539,6 +542,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	model, effort, tier, stream := in.Model, in.Effort, in.Tier, in.Stream
+	includeChatUsage := false
+	if raw := request["stream_options"]; protocol == "chat_completions" && raw != nil {
+		var options struct {
+			IncludeUsage bool `json:"include_usage"`
+		}
+		if json.Unmarshal(raw, &options) != nil {
+			fail(bad("invalid stream_options"))
+			return
+		}
+		includeChatUsage = options.IncludeUsage
+	}
 	originalEffort := requestedEffort(request, model)
 	if in.Search != nil {
 		originalEffort = nil
@@ -681,6 +695,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	excluded := map[int64]bool{}
 	catalog := a.prices.Load()
 	var resp *http.Response
+	wireIn := in
+	var chatBridge *responseChatStream
 	maxAttempts := 3
 	if in.Search != nil {
 		maxAttempts = 4
@@ -763,6 +779,18 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			request["generateContentRequest"], _ = json.Marshal(nested)
 		}
 		upstreamBody, _ := json.Marshal(request)
+		wireIn, chatBridge = in, nil
+		if protocol == "chat_completions" && selected.Account.protocol() == "responses" {
+			upstreamBody, err = chatToResponses(request)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			wireIn.Protocol = "responses"
+			path = "/v1/responses"
+			chatBridge = newResponseChatStream(model, includeChatUsage)
+		}
 		if in.Search != nil {
 			upstreamBody = in.Search.upstreamBody(protocol, selected.UpstreamModel)
 		}
@@ -822,7 +850,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	defer selected.Release()
 	defer resp.Body.Close()
-	observation := textObservation{Protocol: protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action}
+	observation := textObservation{Protocol: wireIn.Protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action}
 	upstreamID := resp.Header.Get("X-Request-ID")
 	if upstreamID == "" {
 		upstreamID = resp.Header.Get("Request-Id")
@@ -844,8 +872,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 		} else {
 			forwardErr = observe(responseBody)
-			if forwardErr == nil && protocol == "responses" && !in.CountOnly && !observation.complete() {
+			if forwardErr == nil && wireIn.Protocol == "responses" && !in.CountOnly && !observation.complete() {
 				forwardErr = &apiError{502, "upstream response is not complete"}
+			}
+			if forwardErr == nil && chatBridge != nil {
+				responseBody, forwardErr = responsesToChat(responseBody, model)
 			}
 		}
 	} else {
@@ -870,7 +901,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			data := strings.Join(dataLines, "\n")
-			if protocol == "chat_completions" && data == "[DONE]" {
+			if wireIn.Protocol == "chat_completions" && data == "[DONE]" {
 				terminal = "data: [DONE]\n\n"
 				done = true
 				return nil
@@ -884,12 +915,25 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
-			if protocol != "chat_completions" && (observation.complete() || terminal != "") {
+			if chatBridge != nil {
+				if data == "" {
+					return nil
+				}
+				var err error
+				wire, err = chatBridge.event([]byte(data))
+				if err != nil {
+					return err
+				}
+				if wire == "" {
+					return nil
+				}
+			}
+			if wireIn.Protocol != "chat_completions" && (observation.complete() || terminal != "") {
 				terminal += wire
 				if len(terminal) > 2<<20 {
 					return &apiError{502, "upstream terminal frames exceed limit"}
 				}
-				done = protocol == "anthropic" || protocol == "responses"
+				done = wireIn.Protocol == "anthropic" || wireIn.Protocol == "responses"
 				return nil
 			}
 			committed = true
@@ -948,7 +992,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			receipt.WebSocket = socketTurn(ctx) != nil
 			receipt.RequestedEffort = originalEffort
 			receipt.NativeCompaction = in.NativeCompaction
-			receipt.Upstream, _ = in.upstreamPath(selected.UpstreamModel)
+			receipt.Upstream, _ = wireIn.upstreamPath(selected.UpstreamModel)
 			receipt.Upstream, _, _ = strings.Cut(receipt.Upstream, "?")
 			billingCtx, billingCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err = a.saveReceipt(billingCtx, receipt)
