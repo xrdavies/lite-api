@@ -81,7 +81,7 @@ func socketError(ctx context.Context, conn *websocket.Conn, err error, stream st
 	if errors.As(err, &e) {
 		status = e.status
 	}
-	payload := map[string]any{"type": "error", "status": status, "error": map[string]any{"type": "gateway_error", "code": "gateway_error", "message": safeGatewayError(err)}}
+	payload := map[string]any{"type": "error", "status": status, "error": map[string]any{"type": gatewayErrorType(err), "code": gatewayErrorType(err), "message": safeGatewayError(err)}}
 	if stream != "" {
 		payload["stream_id"] = stream
 	}
@@ -259,7 +259,6 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 		conn, resp, err := a.dialUpstreamSocket(ctx, account, "/v1/responses", headers)
 		if err != nil {
 			if resp != nil {
-				resp.Body = io.NopCloser(strings.NewReader(""))
 				return resp, nil
 			}
 			return nil, &apiError{502, "upstream WebSocket handshake failed"}

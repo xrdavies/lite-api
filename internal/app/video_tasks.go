@@ -323,7 +323,7 @@ func (a *App) refreshVideoTask(ctx context.Context, t *videoTask) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return &apiError{502, "upstream video task query rejected; reconciliation remains pending"}
+		return a.upstreamError(ctx, u, resp.StatusCode, readUpstreamError(resp), &apiError{502, "upstream video task query rejected; reconciliation remains pending"})
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
 	if err != nil || len(raw) > 2<<20 {
@@ -625,7 +625,7 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 		if status < 400 || status > 599 {
 			status = 502
 		}
-		fail(&apiError{status, "upstream video submission rejected"})
+		fail(a.upstreamError(ctx, s.Account, resp.StatusCode, readUpstreamError(resp), &apiError{status, "upstream video submission rejected"}))
 		return
 	}
 	raw, err = io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
@@ -728,7 +728,7 @@ func (a *App) videoLookup(w http.ResponseWriter, r *http.Request, g *gatewayIden
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if !(resp.StatusCode == 404 && t.Stage == "terminal") {
-			return &apiError{502, "upstream video cancellation or deletion rejected"}
+			return a.upstreamError(r.Context(), u, resp.StatusCode, readUpstreamError(resp), &apiError{502, "upstream video cancellation or deletion rejected"})
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)

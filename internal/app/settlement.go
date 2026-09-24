@@ -392,7 +392,7 @@ func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, statu
 }
 func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelection, r *http.Request, cause error, started time.Time) {
 	// Invalid unauthenticated requests do not create an unbounded database audit stream.
-	if g == nil {
+	if g == nil || skipErrorMonitoring(cause) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -406,7 +406,14 @@ func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelect
 	if s != nil && s.Account != nil {
 		aid = s.Account.ID
 	}
-	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms) VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, r.URL.Path, status, safeGatewayError(cause), status == 429 || status == 402, time.Since(started).Milliseconds())
+	message := safeGatewayError(cause)
+	var passthrough *passthroughError
+	if errors.As(cause, &passthrough) {
+		// Client-authorized message passthrough does not authorize storing the
+		// provider body in operational diagnostics.
+		message = fmt.Sprintf("upstream returned HTTP %d (error rule applied)", passthrough.UpstreamStatus)
+	}
+	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms) VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, r.URL.Path, status, message, status == 429 || status == 402, time.Since(started).Milliseconds())
 	if err != nil {
 		slog.Error("gateway error record failed", "request_id", id)
 	}

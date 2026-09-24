@@ -413,7 +413,6 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if !(r.Method == http.MethodDelete && resp.StatusCode == 404) {
-			a.recordUpstreamFailure(id, g, selected, r, in, path, resp.StatusCode, started)
 			// 403 can mean this account lacks voice creation permission, not a bad Key.
 			if resp.StatusCode != 403 {
 				a.markGatewayFailure(ctx, selected, resp.StatusCode, resp.Header.Get("Retry-After"), nil)
@@ -423,7 +422,11 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 			if status < 400 || status > 599 {
 				status = 502
 			}
-			fail(&apiError{status, "upstream voice request rejected"})
+			failure := a.upstreamError(ctx, selected.Account, resp.StatusCode, readUpstreamError(resp), &apiError{status, "upstream voice request rejected"})
+			if !skipErrorMonitoring(failure) {
+				a.recordUpstreamFailure(id, g, selected, r, in, path, resp.StatusCode, started)
+			}
+			fail(failure)
 			return
 		}
 	}

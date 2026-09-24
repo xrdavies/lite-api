@@ -111,6 +111,12 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 超时检测独立于上述处置开关：`GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT` 默认 180 秒（允许 30–300），`GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT` 默认 900 秒（允许 60–1800），0 关闭对应间隔检测。适用于 Chat、Messages、Responses、Gemini SSE 及适用转换，Responses WebSocket 每轮采用文本间隔；Gemini 原生/转换图片流采用图片间隔。等待响应头仍受 30 秒传输限制；拿到成功响应头后，读取上游字节的等待超过间隔才算流超时。写入慢客户端的时间、客户端取消、正常 EOF、协议错误和请求总时限不计为账号流超时。SSE 与 Responses WS 单轮上限 30 分钟，其他同步请求仍为 5 分钟。超时返回 504，已开始的流发送错误事件，不发成功终止事件；已观察到的用量仍结算，不自动重发已接受的请求。Grok 双向语音会话继续使用自己的空闲策略。
 
+管理员通过 `/api/v1/admin/error-passthrough-rules` 的 GET/POST 和 `/{id}` 的 GET/PUT/DELETE 管理错误规则，沿用 `error_passthrough_rules` 表。`error_codes` 匹配原始 HTTP 状态，`keywords` 忽略大小写匹配正文前 8 KiB；`match_mode=any` 为任一类条件命中，`all` 要求所有已配置类别命中，每类内部任一项即可。`platforms:[]` 匹配全部支持平台。启用规则按 priority 升序、ID 升序取首个命中；最多 500 条。默认 enabled、passthrough_code、passthrough_body 为 true，match_mode 为 any，skip_monitoring 为 false。PUT 部分更新，省略/null 保持原值，空数组清空条件；至少保留一类条件。规则不缓存，下一次错误处理读取最新配置，数据库读取失败沿用原默认错误。
+
+`passthrough_code=false` 使用 `response_code`，仅接受 400–599，不能把失败改成成功；`passthrough_body=false` 使用 `custom_message`。消息透传只提取结构化 JSON 的 error.message、detail 或 message，移除已知上游 Key 和常见凭证片段、控制字符，并限制长度；不会透传整个原始响应、HTML 或任意响应头。错误正文最多读取 256 KiB，读取最多三秒；超限、残缺 JSON 或无消息使用固定摘要。Responses WebSocket 握手正文受现有 WebSocket 库的 1 KiB 上限约束。
+
+规则用于文本/计数/Embedding/搜索/同步图片与语音网关的 HTTP 拒绝、Responses/Realtime 握手拒绝、自定义声音以及视频/Seedance 创建、查询和取消请求的拒绝。换号重试、冷却、认证失败和任务恢复仍按原始上游状态决定；重试结束才向客户端返回最终命中的错误，成功不受影响。`skip_monitoring` 仅跳过该次错误的运维记录，不跳过健康处置、管理审计或用量结算；其余错误日志只存固定摘要。幂等重放和异步图片结果可保留向该 Key 返回的脱敏错误。成功 HTTP 中的错误事件、健康测试诊断、批量图片提供方操作和视频内容下载仍采用各自的错误处理。
+
 ## 渠道与定价
 
 `GET /api/v1/admin/groups/{id}/model-allowlist-candidates` 为管理员配置模型白名单提供 `models` 候选数组。`id=0` 用于建组前查询；可选 `platform` 覆盖平台，省略时取分组平台，无分组时默认 anthropic。候选来自当前固定参考价目录中的具体模型，以及本组可调度 API Key 账号的请求侧映射名（含通配符）；composite 合并保留平台，结果排序去重。不受当前白名单裁剪、不返回映射目标或凭证，也不会调用上游。候选不是实际可用性声明；真实目录与能力应通过模型发现/健康测试确认。

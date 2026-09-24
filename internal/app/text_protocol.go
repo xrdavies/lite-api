@@ -455,6 +455,9 @@ func textErrorBody(protocol string, err error) map[string]any {
 		if kind == "" {
 			kind = "api_error"
 		}
+		if gatewayErrorType(err) == "upstream_error" {
+			kind = "upstream_error"
+		}
 		return map[string]any{"type": "error", "error": map[string]any{"type": kind, "message": message}}
 	}
 	if protocol == "gemini" {
@@ -464,7 +467,7 @@ func textErrorBody(protocol string, err error) map[string]any {
 		}
 		return map[string]any{"error": map[string]any{"code": status, "status": kind, "message": message}}
 	}
-	return map[string]any{"error": map[string]any{"code": status, "type": "gateway_error", "message": message}}
+	return map[string]any{"error": map[string]any{"code": status, "type": gatewayErrorType(err), "message": message}}
 }
 func textGatewayError(w http.ResponseWriter, protocol string, err error) {
 	status := 500

@@ -384,6 +384,7 @@ func (a *App) routes() {
 	})
 	a.settingsRoutes()
 	a.runtimeSettingsRoutes()
+	a.errorRuleRoutes()
 	a.adminKeyRoutes()
 	a.imageStorageRoutes()
 	a.imageTaskRoutes()

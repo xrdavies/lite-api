@@ -184,6 +184,8 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	}
 	excluded := map[int64]bool{}
 	var upstream *websocket.Conn
+	var lastRejection *passthroughError
+	var lastRejectedAccount *gatewaySelection
 	upstreamID := ""
 	for attempt := 0; attempt < 4; attempt++ {
 		selected, err = a.chooseAccount(ctx, g, model, in, excluded, binding, nil, a.prices.Load())
@@ -207,6 +209,10 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 			}, nil)
 		}
 		if err != nil {
+			if errors.Is(err, errNoUpstream) && lastRejection != nil {
+				selected = lastRejectedAccount
+				err = lastRejection
+			}
 			fail(err)
 			return
 		}
@@ -251,12 +257,28 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 			status = resp.StatusCode
 			retry = resp.Header.Get("Retry-After")
 		}
-		a.recordUpstreamFailure(id, g, selected, r, in, "/v1/realtime", status, started)
+		var failure error = &apiError{503, "realtime upstream attempts exhausted"}
+		if resp != nil {
+			failure = a.upstreamError(ctx, selected.Account, status, readUpstreamError(resp), failure)
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+		}
+		lastRejection = nil
+		_ = errors.As(failure, &lastRejection)
+		lastRejectedAccount = selected
+		if !skipErrorMonitoring(failure) {
+			a.recordUpstreamFailure(id, g, selected, r, in, "/v1/realtime", status, started)
+		}
 		a.markGatewayFailure(ctx, selected, status, retry, nil)
 		selected.Release()
 		excluded[selected.Account.ID] = true
 	}
 	if upstream == nil {
+		if lastRejection != nil {
+			fail(lastRejection)
+			return
+		}
 		fail(&apiError{503, "realtime upstream attempts exhausted"})
 		return
 	}

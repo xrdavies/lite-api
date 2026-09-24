@@ -460,7 +460,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 	if busy != nil {
 		return nil, busy
 	}
-	return nil, &apiError{503, "no available upstream account"}
+	return nil, errNoUpstream
 }
 func (a *App) takeSlot(kind string, id int64, limit int) bool {
 	a.gatewayMu.Lock()
@@ -505,7 +505,7 @@ func gatewayError(w http.ResponseWriter, err error) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": "gateway_error", "code": status}})
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": gatewayErrorType(err), "code": status}})
 }
 func (a *App) gatewayRoutes() {
 	a.customVoiceRoutes()
@@ -567,7 +567,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		} else {
 			errorBody := textErrorBody(protocol, err)
 			if protocol == "responses" {
-				errorBody = map[string]any{"type": "error", "code": "gateway_error", "message": safeGatewayError(err), "param": nil}
+				errorBody = map[string]any{"type": "error", "code": gatewayErrorType(err), "message": safeGatewayError(err), "param": nil}
 			}
 			data, _ := json.Marshal(errorBody)
 			if protocol == "anthropic" || protocol == "responses" {
@@ -841,6 +841,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	catalog := a.prices.Load()
 	var resp *http.Response
 	var upstreamStarted time.Time
+	var lastRejection *passthroughError
+	var lastRejectedAccount *gatewaySelection
 	wireIn := in
 	var chatBridge *responseChatStream
 	var messagesBridge *chatMessagesStream
@@ -879,6 +881,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}, ping)
 		}
 		if err != nil {
+			if errors.Is(err, errNoUpstream) && lastRejection != nil {
+				selected = lastRejectedAccount
+				err = lastRejection
+			}
 			fail(err)
 			return
 		}
@@ -1174,14 +1180,15 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			break
 		}
 		status := resp.StatusCode
-		a.recordUpstreamFailure(id, g, selected, r, in, path, status, started)
-		var failureBody []byte
-		if cnPaygPlatform(selected.Account.Platform) && status == http.StatusTooManyRequests {
-			// Only inspect bounded error text for provider-specific balance signals;
-			// it is never persisted or exposed to the client.
-			failureBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxBalanceBody))
-		}
+		failureBody := readUpstreamError(resp)
 		resp.Body.Close()
+		failure := a.upstreamError(ctx, selected.Account, status, failureBody, &apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
+		lastRejection = nil
+		_ = errors.As(failure, &lastRejection)
+		lastRejectedAccount = selected
+		if !skipErrorMonitoring(failure) {
+			a.recordUpstreamFailure(id, g, selected, r, in, path, status, started)
+		}
 		searchEndpointError := protocol == "alpha_search" && (status == 401 || status == 404 || status == 405)
 		if !searchEndpointError {
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
@@ -1189,13 +1196,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		selected.Release()
 		grokRetry := (in.Search != nil || audioIn != nil) && (status == 401 || status == 402 || status == 403 || status >= 500)
 		if !searchEndpointError && !grokRetry && !balanceFailure(selected.Account.Platform, status, failureBody) && status != 429 && status != 502 && status != 503 && status != 504 && status != 529 {
-			fail(&apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
+			fail(failure)
 			return
 		}
 		excluded[selected.Account.ID] = true
 		resp = nil
 	}
 	if resp == nil {
+		if lastRejection != nil {
+			fail(lastRejection)
+			return
+		}
 		fail(&apiError{503, "upstream attempts exhausted"})
 		return
 	}
