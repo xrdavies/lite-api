@@ -319,6 +319,9 @@ func (a *App) previousResponse(ctx context.Context, g *gatewayIdentity, id strin
 	if id == "" {
 		return nil, nil
 	}
+	if err := a.responseNotDeleted(ctx, g, id); err != nil {
+		return nil, err
+	}
 	if turn := socketTurn(ctx); turn != nil {
 		if binding, ok := turn.socket.responses[id]; ok {
 			return &binding, nil
@@ -345,14 +348,21 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 		keys = append(keys, responseItemKey(g, item))
 	}
 	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target})
+	for _, key := range keys {
+		keys = append(keys, key+":delete")
+	}
 	// Validate every collision before writing: a failed item binding must not
 	// publish a response whose items resolve to a different upstream source.
 	ok, err := a.Redis.Eval(ctx, `
-for i,key in ipairs(KEYS) do
+local count=#KEYS/2
+for i=1,count do
+ local key=KEYS[i]
+ if redis.call('EXISTS',KEYS[count+i])~=0 then return 0 end
  local value=ARGV[2];if i==1 then value=ARGV[1] end
  local old=redis.call('GET',key);if old and old~=value then return 0 end
 end
-for i,key in ipairs(KEYS) do
+for i=1,count do
+ local key=KEYS[i]
  local value=ARGV[2];if i==1 then value=ARGV[1] end
  redis.call('SET',key,value,'EX',2592000)
 end
@@ -370,6 +380,19 @@ func responseItemKey(g *gatewayIdentity, id string) string {
 func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []string, binding *responseBinding) (*responseBinding, error) {
 	if len(ids) == 0 {
 		return binding, nil
+	}
+	deletedKeys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		deletedKeys = append(deletedKeys, responseItemKey(g, id)+":delete")
+	}
+	deleted, err := a.Redis.MGet(ctx, deletedKeys...).Result()
+	if err != nil {
+		return nil, &apiError{503, "response item deletion state unavailable"}
+	}
+	for _, value := range deleted {
+		if value != nil {
+			return nil, missing()
+		}
 	}
 	if binding != nil && binding.History != "" {
 		return nil, bad("item_reference requires a native Responses account")

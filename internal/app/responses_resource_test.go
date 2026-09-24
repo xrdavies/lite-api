@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func testResponseResources(t *testing.T, a *App, admin string) {
@@ -38,7 +40,7 @@ func testResponseResources(t *testing.T, a *App, admin string) {
 	k := must("POST", "/api/v1/keys", token, map[string]any{"name": "response resources", "group_id": gid, "quota": 1})
 	key, kid := k["key"].(string), int64(k["id"].(float64))
 	other := must("POST", "/api/v1/keys", token, map[string]any{"name": "other response resources", "group_id": gid})["key"].(string)
-	var creates, reads, mode atomic.Int32
+	var creates, reads, deletes, mode atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer resource-upstream" || r.Header.Get("Cookie") != "" || r.Header.Get("Anthropic-Beta") != "" || r.Header.Get("X-Api-Key") != "" {
 			t.Error("response resource credential isolation")
@@ -57,6 +59,23 @@ func testResponseResources(t *testing.T, a *App, admin string) {
 			} else {
 				fmt.Fprint(w, response)
 			}
+			return
+		}
+		if r.Method == "DELETE" {
+			deletes.Add(1)
+			id := strings.TrimPrefix(r.URL.Path, "/v1/responses/")
+			switch mode.Load() {
+			case 1:
+				id = "resp_foreign"
+			case 2:
+				w.WriteHeader(404)
+				return
+			case 3:
+				w.WriteHeader(401)
+				fmt.Fprint(w, `{"error":{"message":"resource-upstream"}}`)
+				return
+			}
+			fmt.Fprintf(w, `{"id":%q,"object":"response","deleted":true}`, id)
 			return
 		}
 		reads.Add(1)
@@ -190,19 +209,119 @@ func testResponseResources(t *testing.T, a *App, admin string) {
 		}
 	}
 	mode.Store(0)
+	// Resource deletion uses the same user/account limits and a per-response lock.
+	must("PUT", ap, admin, map[string]any{"concurrency": 1})
+	for _, slot := range []struct {
+		name   string
+		id     int64
+		status int
+	}{{"user", uid, 429}, {"account", aid, 429}, {responseDeletionKey(identity, "resp_resource_1"), 0, 409}} {
+		if !a.takeSlot(slot.name, slot.id, 1) {
+			t.Fatal("acquire deletion test slot")
+		}
+		w := call("DELETE", "/responses/resp_resource_1", key, nil)
+		a.releaseSlot(slot.name, slot.id)
+		if w.Code != slot.status || deletes.Load() != 0 {
+			t.Fatal("deletion concurrency bypass", slot.name, w.Code, deletes.Load())
+		}
+	}
+	for _, tc := range []struct {
+		id, key string
+		status  int
+	}{{"resp_resource_1", other, 404}, {"resp_resource_1", token, 401}, {"resp_resource_1", "", 401}, {"resp_resource_3", key, 404}, {"resp_unknown", key, 404}, {"resp_converted_resource", key, 400}, {"resp_resource_1?stream=false", key, 400}} {
+		if w := call("DELETE", "/responses/"+tc.id, tc.key, nil); w.Code != tc.status || deletes.Load() != 0 {
+			t.Fatal("invalid deletion reached upstream", w.Code, tc.status, deletes.Load())
+		}
+	}
+	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated-resource-secret"}})
+	if w := call("DELETE", "/responses/resp_resource_1", key, nil); w.Code != 409 || deletes.Load() != 0 {
+		t.Fatal("deletion changed upstream source", w.Code)
+	}
+	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "resource-upstream"}})
+	// Unknown deletion outcomes block all uses, including connection-local WS
+	// affinity, without erasing the source needed for reconciliation after restart.
+	mode.Store(1)
+	if w := call("DELETE", "/responses/resp_resource_1", key, nil); w.Code != 502 {
+		t.Fatal("invalid deletion acknowledgement accepted", w.Code)
+	}
+	if ttl, err := a.Redis.TTL(t.Context(), responseDeletionKey(identity, "resp_resource_1")).Result(); err != nil || ttl >= 0 {
+		t.Fatal("unconfirmed deletion expired", ttl, err)
+	}
+	for _, suffix := range []string{"", "/input_items"} {
+		if w := call("GET", "/responses/resp_resource_1"+suffix, key, nil); w.Code != 404 {
+			t.Fatal("uncertain deletion remained readable", w.Code)
+		}
+	}
+	socket := &responseSocket{responses: map[string]responseBinding{}}
+	socket.remember("resp_resource_1", u, "msg_resource_1")
+	ctx := context.WithValue(t.Context(), socketTurnKey{}, &responseSocketTurn{socket: socket})
+	if _, err := a.previousResponse(ctx, identity, "resp_resource_1"); err == nil {
+		t.Fatal("WS cached response bypassed deletion")
+	}
+	if _, err := a.responseItemSource(ctx, identity, []string{"msg_resource_1"}, nil); err == nil {
+		t.Fatal("WS cached item bypassed deletion")
+	}
+	if err := a.bindResponse(t.Context(), identity, u, "resp_resource_1", "msg_resource_1"); err == nil {
+		t.Fatal("late settlement resurrected deleted response")
+	}
+	if err := a.bindResponse(t.Context(), identity, u, "resp_resurrected", "msg_resource_1"); err == nil {
+		t.Fatal("late settlement resurrected deleted item")
+	}
+	mode.Store(3)
+	if w := call("DELETE", "/responses/resp_resource_1", key, nil); w.Code != 502 || strings.Contains(w.Body.String(), "resource-upstream") {
+		t.Fatal("delete upstream error", w.Code)
+	}
+	// A fresh app shares only durable state; provider 404 confirms absence.
+	mode.Store(2)
+	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
+	req := httptest.NewRequest("DELETE", "/responses/resp_resource_1", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.SetPathValue("response_id", "resp_resource_1")
+	w = httptest.NewRecorder()
+	fresh.backgroundResponseLookup(w, req)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"deleted":true`) {
+		t.Fatal("delete recovery", w.Code, w.Body.String())
+	}
+	beforeDeletes := deletes.Load()
+	for _, prefix := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		if w := call("DELETE", prefix+"/resp_resource_1", key, nil); w.Code != 200 || deletes.Load() != beforeDeletes {
+			t.Fatal("delete alias replay", prefix, w.Code, deletes.Load())
+		}
+	}
+	if n, err := a.Redis.Exists(t.Context(), responseBindingKey(identity, "resp_resource_1")).Result(); err != nil || n != 0 {
+		t.Fatal("deleted response binding retained", n, err)
+	}
+	for _, k := range []string{responseDeletionKey(identity, "resp_resource_1"), responseItemKey(identity, "msg_resource_1") + ":delete"} {
+		if ttl, err := a.Redis.TTL(t.Context(), k).Result(); err != nil || ttl <= 29*24*time.Hour || ttl > 30*24*time.Hour {
+			t.Fatal("confirmed deletion retention", ttl, err)
+		}
+	}
+	mode.Store(0)
+	if w := call("DELETE", "/v1/responses/resp_resource_2", key, nil); w.Code != 200 || deletes.Load() != beforeDeletes+1 {
+		t.Fatal("confirmed delete", w.Code, w.Body.String())
+	}
 	exec("UPDATE api_keys SET status='inactive' WHERE id=$1", kid)
 	if w := call("GET", "/responses/resp_resource_1", key, nil); w.Code != 401 {
 		t.Fatal("disabled key retrieval", w.Code)
+	}
+	if w := call("DELETE", "/responses/resp_resource_1", key, nil); w.Code != 401 {
+		t.Fatal("disabled key deletion replay", w.Code)
 	}
 	exec("UPDATE api_keys SET status='active',group_id=NULL WHERE id=$1", kid)
 	if w := call("GET", "/responses/resp_resource_1", key, nil); w.Code != 403 {
 		t.Fatal("detached key retrieval", w.Code)
 	}
+	if w := call("DELETE", "/responses/resp_resource_1", key, nil); w.Code != 403 {
+		t.Fatal("detached key deletion replay", w.Code)
+	}
 	exec("UPDATE api_keys SET group_id=$2 WHERE id=$1", kid, gid)
-	if err := a.Redis.Del(t.Context(), responseBindingKey(identity, "resp_resource_1")).Err(); err != nil {
+	if err := a.bindResponse(t.Context(), identity, u, "resp_expired_resource"); err != nil {
 		t.Fatal(err)
 	}
-	if w := call("GET", "/responses/resp_resource_1", key, nil); w.Code != 404 {
+	if err := a.Redis.Del(t.Context(), responseBindingKey(identity, "resp_expired_resource")).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("GET", "/responses/resp_expired_resource", key, nil); w.Code != 404 {
 		t.Fatal("expired binding lookup", w.Code)
 	}
 	var count int

@@ -83,7 +83,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	var mu sync.Mutex
 	states := map[string]string{}
 	modes := map[string]string{}
-	creates, cancels, reads := 0, 0, 0
+	creates, cancels, reads, deletes := 0, 0, 0, 0
 	next := ""
 	idleDone := make(chan struct{}, 1)
 	var resumeQuery string
@@ -122,6 +122,12 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			native = strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/responses/"), "/cancel"), "/input_items")
 			if _, ok := states[native]; !ok {
 				w.WriteHeader(404)
+				return
+			}
+			if r.Method == "DELETE" {
+				deletes++
+				delete(states, native)
+				fmt.Fprintf(w, `{"id":%q,"object":"response","deleted":true}`, native)
 				return
 			}
 			if r.Method == "POST" {
@@ -240,6 +246,9 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if w := call("GET", "/responses/"+first+"/input_items", key, nil, ""); w.Code != 409 || strings.Contains(w.Body.String(), "private background input") {
 		t.Fatal("pending background input lookup", w.Code)
 	}
+	if w := call("DELETE", "/responses/"+first, key, nil, ""); w.Code != 409 {
+		t.Fatal("pending background deleted", w.Code)
+	}
 	for _, query := range []string{"?stream=invalid", "?starting_after=0", "?stream=true&starting_after=-1", "?stream=true&stream=false", "?include=unknown", "?stream=%ZZ", "?stream=true;starting_after=0"} {
 		if w := call("GET", "/responses/"+first+query, key, nil, ""); w.Code != 400 {
 			t.Fatal("invalid background query accepted", query, w.Code)
@@ -301,6 +310,14 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if w := call("GET", "/responses/"+first+"/input_items", key, nil, ""); w.Code != 503 || strings.Contains(w.Body.String(), "private background input") {
 		t.Fatal("input lookup bypassed background settlement", w.Code)
 	}
+	if w := call("DELETE", "/responses/"+first, key, nil, ""); w.Code != 503 {
+		t.Fatal("deletion bypassed background settlement", w.Code)
+	}
+	mu.Lock()
+	if deletes != 0 {
+		t.Error("unsettled deletion reached provider")
+	}
+	mu.Unlock()
 	exec("ALTER TABLE usage_logs DROP CONSTRAINT test_background_failure")
 	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
 	for i := 0; i < 2; i++ {
@@ -337,6 +354,34 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if w := call("POST", "/responses/"+first+"/cancel", key, nil, ""); w.Code != 200 {
 		t.Fatal("completed cancel", w.Code)
 	}
+	for _, prefix := range []string{"/v1/responses/", "/responses/", "/backend-api/codex/responses/"} {
+		if w := call("DELETE", prefix+first, key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"deleted":true`) {
+			t.Fatal("background delete alias", w.Code, w.Body.String())
+		}
+		if w := call("GET", prefix+first, key, nil, ""); w.Code != 404 {
+			t.Fatal("deleted background output visible", w.Code)
+		}
+	}
+	if w := call("POST", "/responses/"+first+"/cancel", key, nil, ""); w.Code != 404 {
+		t.Fatal("deleted background cancellation returned output", w.Code)
+	}
+	if _, err := a.previousResponse(t.Context(), g, first); err == nil {
+		t.Fatal("deleted background continuation")
+	}
+	if err := a.saveBackgroundResponse(t.Context(), task); err == nil {
+		t.Fatal("late background write resurrected a deleted task")
+	}
+	if n, err := a.Redis.Exists(t.Context(), backgroundKey(task.ID), backgroundIndex(g, first)).Result(); err != nil || n != 0 {
+		t.Fatal("deleted background content remains", n, err)
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatal("deletion changed background accounting", count, err)
+	}
+	mu.Lock()
+	if deletes != 1 {
+		t.Error("background delete replay dispatched", deletes)
+	}
+	mu.Unlock()
 	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.001")})
 	queued := create("cancel-bg")
 	for i := 0; i < 2; i++ {

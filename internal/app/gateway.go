@@ -551,6 +551,7 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
 		a.mux.HandleFunc("GET "+path, a.responsesWebSocket)
 		a.mux.HandleFunc("GET "+path+"/{response_id}", a.backgroundResponseLookup)
+		a.mux.HandleFunc("DELETE "+path+"/{response_id}", a.backgroundResponseLookup)
 		a.mux.HandleFunc("GET "+path+"/{response_id}/input_items", a.backgroundResponseLookup)
 		a.mux.HandleFunc("POST "+path+"/{response_id}/cancel", a.backgroundResponseLookup)
 		for _, suffix := range []string{"", "/{action...}"} {

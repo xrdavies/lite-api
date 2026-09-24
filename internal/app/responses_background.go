@@ -49,9 +49,10 @@ func (a *App) saveBackgroundResponse(ctx context.Context, t *backgroundResponse)
 		}
 	}
 	index := backgroundIndex(&t.Identity, t.UpstreamID)
-	// A provider ID collision must not replace the task that the client already owns.
+	// A provider ID collision or delayed write must not replace an owned or deleted task.
 	ok, err := a.Redis.Eval(ctx, `
 if ARGV[4]~='' then
+ if redis.call('EXISTS',KEYS[4])~=0 then return 0 end
  local old=redis.call('GET',KEYS[3]);if old and old~=ARGV[1] then return 0 end
 end
 redis.call('SET',KEYS[1],ARGV[2])
@@ -60,7 +61,7 @@ if tonumber(ARGV[3])>0 then
  redis.call('EXPIRE',KEYS[1],ARGV[3]);redis.call('SREM',KEYS[2],ARGV[1])
  if ARGV[4]~='' then redis.call('EXPIRE',KEYS[3],ARGV[3]) end
 else redis.call('SADD',KEYS[2],ARGV[1]) end
-return 1`, []string{backgroundKey(t.ID), backgroundPending, index}, t.ID, encrypted, ttl, t.UpstreamID).Int()
+return 1`, []string{backgroundKey(t.ID), backgroundPending, index, responseDeletionKey(&t.Identity, t.UpstreamID)}, t.ID, encrypted, ttl, t.UpstreamID).Int()
 	if err != nil || ok != 1 {
 		return &apiError{503, "background response could not be saved"}
 	}
@@ -345,6 +346,16 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 	}
 	query, err := responseResourceQuery(r)
 	if err != nil {
+		fail(err)
+		return
+	}
+	if r.Method == "DELETE" {
+		if err = a.deleteResponseResource(w, r, g, id); err != nil {
+			fail(err)
+		}
+		return
+	}
+	if err = a.responseNotDeleted(ctx, g, id); err != nil {
 		fail(err)
 		return
 	}

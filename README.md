@@ -193,6 +193,10 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 资源查询按创建时的 Key/分组归属固定原账号、地址、协议和凭证；不调用模型或重复扣费，零余额及原账号停调仍可读取，失效 Key、撤销分组权限、未知/过期归属拒绝。`store=false` 的普通响应和协议转换产生的本地响应不可查询原生资源。背景任务继续通过原持久恢复流程结算，输入条目及指定 include 的读取等待结算完成；普通资源读取不启用 SSE 恢复，后台流保持已有规则。分页响应上限 100 项/16 MiB；不会将列表返回的条目自动授予 `item_reference` 使用权。供应商已删除或过期的资源返回 404，来源变更返回 409。该读取链已加入本地 HTTP 与 Docker 数据库验证，真实供应商联调仍待完成。
 
+三个前缀提供 `DELETE /responses/{id}`，仅删除当前 Key/分组拥有的原生响应，使用原账号和凭证来源；保留权限、RPM、用户及账号并发检查，零余额或停调不阻止清理。后台任务必须先取消或完成并结算，未完成返回 409；结算失败时不向上游删除。接口采用 [OpenAI 删除响应](https://developers.openai.com/api/reference/resources/responses/methods/delete) 的 `{id,object:"response",deleted:true}` 返回格式，不退款或删除既有用量。
+
+删除前持久保存意图，立即阻断该响应的读取、取消、续接和已知输出条目引用，包括 WebSocket 本地关联。上游结果不明确时保留无期限记录，重复 DELETE 向原来源核实；有效成功回执或上游 404 确认后，清除后台结果与响应关联，拒绝标记保留 30 天，重复 DELETE 直接返回成功。延迟写入不能恢复已删除关联或后台任务。此操作不清除创建请求的独立幂等响应缓存，仍按原 24 小时规则重放；已知 ID 的新续接被拒绝。在途请求不强制终止。普通 `store=false` 或协议转换响应不提供原生删除，后台临时结果可在本地归属有效期内删除。当前通过本地协议及 Docker 数据库验证，真实供应商删除联调仍待完成。
+
 `previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、OpenAI 内置搜索/图片等托管工具仍待对应隔离和计费实现，当前明确拒绝；Grok 托管搜索按后文单独支持。
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。
