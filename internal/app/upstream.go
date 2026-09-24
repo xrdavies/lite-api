@@ -431,7 +431,7 @@ func readUpstreamJSON(resp *http.Response) (map[string]json.RawMessage, error) {
 	if json.Unmarshal(b, &result) != nil || result == nil {
 		return nil, errors.New("upstream returned invalid JSON")
 	}
-	if result["error"] != nil {
+	if value := result["error"]; value != nil && string(value) != "null" {
 		return nil, errors.New("upstream returned an error")
 	}
 	return result, nil

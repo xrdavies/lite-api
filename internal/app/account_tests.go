@@ -17,6 +17,7 @@ type accountTestInput struct {
 	Prompt string `json:"prompt"`
 	Mode   string `json:"mode"`
 	Image  string `json:"image_data_url"`
+	Audio  string `json:"audio_data_url"`
 }
 
 type accountTestResult struct {
@@ -55,6 +56,9 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in account
 				return err
 			}
 			defer release()
+		}
+		if mode == "search" || voiceProtocol(mode) {
+			return a.testGrokAccount(ctx, u, mapped, mode, in, &result)
 		}
 		if mode != "text" {
 			return a.testAccountMedia(ctx, u, mapped, mode, in, &result)

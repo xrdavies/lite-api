@@ -49,9 +49,13 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 ## 上游与健康测试
 
-管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。
+管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video，以及 Grok 专用 search、tts、stt、realtime；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。
 
 图片测试返回 `image` 事件，视频创建后轮询至成功并返回 `video` 事件，只有真实结果通过校验才发送 `test_complete`。`image_data_url` 接受最多 8 MiB 的 PNG/JPEG/WebP/GIF base64 图片，用于图片编辑或视频首帧；输入 JSON 上限 12 MiB，媒体响应上限 16 MiB。原厂 OpenAI 编辑使用 [JSON 图片引用格式](https://developers.openai.com/api/reference/resources/images/methods/edit)，Grok 使用其 image 对象，Gemini 使用 inlineData。文本上限 45 秒、媒体上限 90 秒；视频超时按失败记录，并保留已接收任务 ID 供管理员核查，不重发创建。测试结果中的图片和签名 URL 只向管理员响应，不存入定时结果表。
+
+Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/responses` 请求 web_search，必须有工具调用或有效来源证据才成功；prompt 是查询词。`tts` 使用 prompt 作为文本，返回最多 4 MiB 的 `audio` SSE；不会截断音频或重试可能已计费的请求。`stt` 接受最多 8 MiB 的 `audio_data_url`，缺省发送 0.25 秒静音 WAV，只验证接口可用性；空转写可以成功，无效返回不算成功。TTS/STT 不使用文本模型映射，STT 使用上游默认模型，选项先于文件发送。请求协议参考 [xAI TTS](https://docs.x.ai/developers/model-capabilities/audio/text-to-speech)、[STT](https://docs.x.ai/developers/model-capabilities/audio/speech-to-text) 和 [搜索](https://docs.x.ai/developers/tools/web-search)。
+
+`realtime` 使用所选模型及账号映射，缺省 grok-voice-latest。握手上限 12 秒，随后最多 3 秒观察首个事件；错误事件、畸形帧、提前断开均失败，无事件则明确报告仅握手成功。不会发送音频或生成指令，不表示语音质量或持续会话验证通过；服务端事件正文不会进入诊断结果。参见 [xAI Voice Agent](https://docs.x.ai/developers/model-capabilities/audio/voice-agent)。这四个模式仅供管理员手动测试；原定时计划没有 mode 字段，仍按文本/图片/视频自动选择。
 
 手动和定时测试共用账号并发上限，同一账号最多执行一个健康测试。测试可以探测停调账号，成功恢复仍检查配置版本，不覆盖人工禁用、停调开关和本地额度；失败不冒充健康。测试只证明所测模型的本次调用结果。
 

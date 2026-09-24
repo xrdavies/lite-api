@@ -16,12 +16,39 @@ import (
 func prepareAccountTest(u *upstreamAccount, in accountTestInput) (string, string, error) {
 	mode := strings.ToLower(strings.TrimSpace(in.Mode))
 	switch mode {
-	case "", "default", "text", "image", "video":
+	case "", "default", "text", "image", "video", "search", "tts", "stt", "realtime":
 	default:
 		return "", "", bad("unsupported account test mode")
 	}
 	if len(in.Prompt) > 4000 {
 		return "", "", bad("test prompt is too long")
+	}
+	if in.Audio != "" && mode != "stt" {
+		return "", "", bad("audio_data_url requires STT mode")
+	}
+	if mode == "search" || voiceProtocol(mode) {
+		if u.Platform != "grok" {
+			return "", "", bad("this test mode requires a Grok account")
+		}
+		if in.Image != "" {
+			return "", "", bad("source image requires an image or video test")
+		}
+		switch mode {
+		case "tts", "stt":
+			// Standalone audio endpoints do not use the text model mapping.
+			if in.Audio != "" {
+				if _, _, err := accountTestAudio(in.Audio); err != nil {
+					return "", "", err
+				}
+			}
+			return mode, mode, nil
+		case "search":
+			in.Model = "grok-4.6" // Same configured default as standalone search.
+		case "realtime":
+			if strings.TrimSpace(in.Model) == "" {
+				in.Model = "grok-voice-latest"
+			}
+		}
 	}
 	model := strings.TrimSpace(in.Model)
 	if model == "" {

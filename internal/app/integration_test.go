@@ -284,6 +284,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAccountBalances(t, a, admin, otherToken)
 	testGeminiImages(t, a, admin)
 	testAccountMediaHealth(t, a, admin, otherToken)
+	testGrokProbeHealth(t, a, admin, otherToken)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)
