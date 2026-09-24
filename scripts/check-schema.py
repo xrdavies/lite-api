@@ -31,7 +31,8 @@ def sql(content):
 try:
     run(["run", "-d", "--name", container, "--network", "none", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"])
     for attempt in range(60):
-        ready = subprocess.run(docker + ["exec", container, "pg_isready", "-U", "postgres"], capture_output=True)
+        # The entrypoint's temporary initialization server only accepts sockets.
+        ready = subprocess.run(docker + ["exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True)
         if ready.returncode == 0:
             break
         time.sleep(0.5)
