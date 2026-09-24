@@ -374,6 +374,8 @@ func bearer(r *http.Request) string {
 }
 
 func (a *App) routes() {
+	// Client telemetry is acknowledged and discarded without reading or storing it.
+	a.mux.HandleFunc("POST /api/event_logging/batch", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	a.route("GET /health", "public", func(w http.ResponseWriter, r *http.Request) error {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -385,6 +387,7 @@ func (a *App) routes() {
 	a.settingsRoutes()
 	a.runtimeSettingsRoutes()
 	a.errorRuleRoutes()
+	a.tlsProfileRoutes()
 	a.adminKeyRoutes()
 	a.imageStorageRoutes()
 	a.imageTaskRoutes()
