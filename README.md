@@ -8,6 +8,8 @@
 
 需要 Go 1.25.4 或更新的兼容版本、Docker 和 Compose。
 
+单实例部署、容器故障验收、升级回退与数据恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
 ```sh
 cp .env.example .env
 # 编辑 .env，填写 JWT_SECRET（至少 32 字节随机值）和首个管理员凭证。
