@@ -21,6 +21,9 @@ func searchCallArguments(raw json.RawMessage) ([]byte, error) {
 }
 
 func validateResponseClientTool(tool map[string]json.RawMessage) error {
+	if err := validateAllowedCallers(tool["allowed_callers"]); err != nil {
+		return err
+	}
 	switch credentialString(tool, "type") {
 	case "namespace":
 		_, err := responseNamespaceChildren(tool)
@@ -152,7 +155,7 @@ func mergeResponseDiscoveries(tools, items []map[string]json.RawMessage) ([]map[
 		return key, namespace + "\x00" + responseToolDefinition(tool), nil
 	}
 	for _, tool := range tools {
-		if kind := credentialString(tool, "type"); kind == "tool_search" || hostedSearchTool(kind) || kind == "image_generation" || responseLocalTool(kind) || kind == "mcp" || kind == "code_interpreter" || kind == "file_search" {
+		if kind := credentialString(tool, "type"); kind == "tool_search" || hostedSearchTool(kind) || programmaticTool(kind) || kind == "image_generation" || responseLocalTool(kind) || kind == "mcp" || kind == "code_interpreter" || kind == "file_search" {
 			continue
 		}
 		ns := ""

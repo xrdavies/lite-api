@@ -63,14 +63,10 @@ func validateResponseLocalTool(tool map[string]json.RawMessage) error {
 			}
 		case "allowed_callers":
 			if kind == "local_shell" {
-				return bad("local_shell does not accept allowed_callers")
+				return bad("this client tool does not accept allowed_callers")
 			}
-			if string(raw) == "null" {
-				continue
-			}
-			var callers []string
-			if json.Unmarshal(raw, &callers) != nil || len(callers) != 1 || callers[0] != "direct" {
-				return bad("client tools require direct invocation")
+			if err := validateAllowedCallers(raw); err != nil {
+				return err
 			}
 		default:
 			return bad("unsupported native client tool option")
@@ -101,9 +97,12 @@ func validateResponseLocalItem(item map[string]json.RawMessage) error {
 		}
 	}
 	if raw := item["caller"]; raw != nil && string(raw) != "null" {
-		var caller map[string]json.RawMessage
-		if json.Unmarshal(raw, &caller) != nil || len(caller) != 1 || credentialString(caller, "type") != "direct" {
-			return bad("native client history requires a direct caller")
+		program, err := hasProgrammaticCaller(raw)
+		if err != nil {
+			return err
+		}
+		if program && kind != "shell_call" && kind != "shell_call_output" && kind != "apply_patch_call" && kind != "apply_patch_call_output" {
+			return bad("programmatic caller is not valid for this client tool")
 		}
 	}
 	if raw := item["environment"]; raw != nil && string(raw) != "null" {

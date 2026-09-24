@@ -16,9 +16,8 @@ func responseCodeTool(tool map[string]json.RawMessage) (string, error) {
 		switch field {
 		case "type", "container":
 		case "allowed_callers":
-			var callers []string
-			if string(raw) != "null" && (json.Unmarshal(raw, &callers) != nil || len(callers) != 1 || callers[0] != "direct") {
-				return "", bad("code interpreter requires direct invocation")
+			if err := validateAllowedCallers(raw); err != nil {
+				return "", err
 			}
 		default:
 			return "", bad("unsupported code interpreter option")
@@ -198,9 +197,8 @@ func responseShellTool(tool map[string]json.RawMessage) (string, bool, error) {
 		switch field {
 		case "type", "environment":
 		case "allowed_callers":
-			var callers []string
-			if string(raw) != "null" && (json.Unmarshal(raw, &callers) != nil || len(callers) != 1 || callers[0] != "direct") {
-				return "", false, bad("shell requires direct invocation")
+			if err := validateAllowedCallers(raw); err != nil {
+				return "", false, err
 			}
 		default:
 			return "", false, bad("unsupported shell option")
@@ -298,7 +296,7 @@ func responseCodeItem(item map[string]json.RawMessage) (string, string, error) {
 }
 
 func validateResponseContainers(in textRequest, binding *responseBinding) error {
-	if in.NativeCode || in.NativeFileSearch {
+	if in.NativeCode || in.NativeFileSearch || in.NativeProgrammatic {
 		if in.Action != "" || in.NativeCompaction {
 			return bad("hosted tools require a normal Responses request")
 		}

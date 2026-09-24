@@ -68,9 +68,8 @@ func validateResponseMCPTool(tool map[string]json.RawMessage) error {
 				return bad("invalid MCP defer_loading")
 			}
 		case "allowed_callers":
-			var callers []string
-			if string(raw) != "null" && (json.Unmarshal(raw, &callers) != nil || len(callers) != 1 || callers[0] != "direct") {
-				return bad("MCP requires direct invocation")
+			if err := validateAllowedCallers(raw); err != nil {
+				return err
 			}
 		default:
 			return bad("unsupported MCP option; use a remote server URL and API Key headers")

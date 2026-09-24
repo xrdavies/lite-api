@@ -81,6 +81,25 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				program, err := validateResponseProgramItem(item)
+				if err != nil {
+					return in, err
+				}
+				if program {
+					in.NativeProgrammatic = true
+					var refs []string
+					if kind == "program" || kind == "program_output" {
+						refs = append(refs, credentialString(item, "id"), programItemReference(item))
+					}
+					var caller map[string]json.RawMessage
+					if json.Unmarshal(item["caller"], &caller) == nil && credentialString(caller, "type") == "program" {
+						refs = append(refs, programCallReference(credentialString(caller, "caller_id")))
+					}
+					if len(in.ItemReferences)+len(refs) > 1024 {
+						return in, bad("too many program references")
+					}
+					in.ItemReferences = append(in.ItemReferences, refs...)
+				}
 				if kind == "file_search_call" {
 					if err := responseFileSearchItem(item); err != nil {
 						return in, err
@@ -190,7 +209,15 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	if err != nil {
 		return in, err
 	}
+	programmatic, err := validateProgrammaticDeclarations(tools)
+	if err != nil {
+		return in, err
+	}
+	in.NativeProgrammatic = in.NativeProgrammatic || programmatic
 	for _, tool := range tools {
+		if programmaticTool(credentialString(tool, "type")) {
+			continue
+		}
 		if credentialString(tool, "type") == "shell" {
 			container, hosted, err := responseShellTool(tool)
 			if err != nil {
@@ -272,7 +299,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	in.FileIDs, err = requestFileIDs(body, tools, "responses")
@@ -311,6 +338,9 @@ func responseNamespaceChildren(tool map[string]json.RawMessage) ([]map[string]js
 	for _, child := range children {
 		if credentialString(child, "type") != "function" || credentialString(child, "name") == "" || len(credentialString(child, "name")) > 256 {
 			return nil, bad("namespace supports only named client function tools")
+		}
+		if err := validateAllowedCallers(child["allowed_callers"]); err != nil {
+			return nil, err
 		}
 	}
 	return children, nil
@@ -437,6 +467,17 @@ func (o *textObservation) observeResponses(data []byte) error {
 			return err
 		}
 		for _, item := range items {
+			program, err := validateResponseProgramItem(item)
+			if err != nil || program && !o.Programmatic {
+				return &apiError{502, "invalid or unexpected upstream programmatic output"}
+			}
+			kind := credentialString(item, "type")
+			if kind == "program" || kind == "program_output" {
+				o.ResponseItems = append(o.ResponseItems, programItemReference(item))
+			}
+			if kind == "program" {
+				o.ResponseItems = append(o.ResponseItems, programCallReference(credentialString(item, "call_id")))
+			}
 			if id := credentialString(item, "id"); id != "" {
 				if !validResponseID(id) {
 					return &apiError{502, "upstream response item ID is invalid"}
@@ -451,17 +492,18 @@ func (o *textObservation) observeResponses(data []byte) error {
 // Native responses bind only metadata; protocol conversions include encrypted history.
 // Missing/expired bindings refuse continuation across tenants or upstream sources.
 type responseBinding struct {
-	AccountID    int64
-	Target       string
-	ImageTool    bool     `json:",omitempty"`
-	MCPTool      bool     `json:",omitempty"`
-	CodeTool     bool     `json:",omitempty"`
-	Containers   []string `json:",omitempty"`
-	FileIDs      []string `json:",omitempty"`
-	SkillIDs     []string `json:",omitempty"`
-	VectorStores []string `json:",omitempty"`
-	History      string   `json:",omitempty"`
-	Items        []string `json:",omitempty"`
+	AccountID        int64
+	Target           string
+	ImageTool        bool     `json:",omitempty"`
+	ProgrammaticTool bool     `json:",omitempty"`
+	MCPTool          bool     `json:",omitempty"`
+	CodeTool         bool     `json:",omitempty"`
+	Containers       []string `json:",omitempty"`
+	FileIDs          []string `json:",omitempty"`
+	SkillIDs         []string `json:",omitempty"`
+	VectorStores     []string `json:",omitempty"`
+	History          string   `json:",omitempty"`
+	Items            []string `json:",omitempty"`
 }
 
 func responseBindingKey(g *gatewayIdentity, id string) string {
@@ -503,7 +545,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores, FileIDs: binding.FileIDs, SkillIDs: binding.SkillIDs})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, ProgrammaticTool: binding.ProgrammaticTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores, FileIDs: binding.FileIDs, SkillIDs: binding.SkillIDs})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -592,6 +634,7 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 			return nil, bad("response items must share the previous response upstream source")
 		}
 		imageTool := source.ImageTool || binding != nil && binding.ImageTool
+		programmaticTool := source.ProgrammaticTool || binding != nil && binding.ProgrammaticTool
 		mcpTool := source.MCPTool || binding != nil && binding.MCPTool
 		codeTool := source.CodeTool || binding != nil && binding.CodeTool
 		containers := source.Containers
@@ -616,7 +659,7 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 				return nil, err
 			}
 		}
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files, SkillIDs: skills}
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, ProgrammaticTool: programmaticTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files, SkillIDs: skills}
 	}
 	return binding, nil
 }

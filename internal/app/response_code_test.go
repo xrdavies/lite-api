@@ -129,7 +129,6 @@ func TestResponseHostedShell(t *testing.T) {
 		t.Fatal("hosted shell container lost", observation, err)
 	}
 	for _, tool := range []string{
-		`{"type":"shell","environment":{"type":"container_auto"},"allowed_callers":["programmatic"]}`,
 		`{"type":"shell","environment":{"type":"container_auto","file_ids":[42]}}`,
 		`{"type":"shell","environment":{"type":"container_auto","network_policy":{"type":"allowlist","allowed_domains":["https://example.test"]}}}`,
 		`{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_team","file_ids":["foreign"]}}`,
@@ -193,7 +192,6 @@ func TestResponseCode(t *testing.T) {
 		`{"type":"code_interpreter","container":{"type":"auto","file_ids":["../foreign"]}}`,
 		`{"type":"code_interpreter","container":{"type":"auto","memory_limit":"2g"}}`,
 		`{"type":"code_interpreter","container":{"type":"auto","network_policy":{"type":"allowlist","allowed_domains":["https://example.test"]}}}`,
-		`{"type":"code_interpreter","container":{"type":"auto"},"allowed_callers":["programmatic"]}`,
 	} {
 		if _, _, err := parse(`{"tools":[` + tool + `]}`); err == nil {
 			t.Fatal("invalid code interpreter declaration accepted", tool)

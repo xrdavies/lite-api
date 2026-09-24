@@ -50,7 +50,6 @@ func TestResponseLocalTools(t *testing.T) {
 		`{"type":"shell","environment":{"type":"local","file_ids":["foreign"]}}`,
 		`{"type":"shell","environment":{"type":"local","skills":null}}`,
 		`{"type":"shell","environment":{"type":"local","skills":[{"name":"n","path":"p"}]}}`,
-		`{"type":"apply_patch","allowed_callers":["programmatic"]}`,
 		`{"type":"local_shell","environment":{"type":"local"}}`,
 		`{"type":"local_shell","allowed_callers":["direct"]}`,
 		`{"type":"apply_patch","container_id":"foreign"}`,
@@ -61,7 +60,7 @@ func TestResponseLocalTools(t *testing.T) {
 	}
 	for _, item := range []string{
 		`{"type":"shell_call","call_id":"c","environment":{"type":"container_reference","container_id":"foreign"},"action":{"commands":["ls"]}}`,
-		`{"type":"shell_call","call_id":"c","caller":{"type":"program","caller_id":"p"},"action":{"commands":["ls"]}}`,
+		`{"type":"shell_call","call_id":"c","caller":{"type":"program","caller_id":"../foreign"},"action":{"commands":["ls"]}}`,
 		`{"type":"shell_call","call_id":"c","action":{"commands":null}}`,
 		`{"type":"shell_call","call_id":"c","action":{"commands":"ls"}}`,
 		`{"type":"shell_call_output","call_id":"c","container_id":"foreign","output":[]}`,

@@ -22,16 +22,17 @@ const backgroundPending = "gateway:background:pending"
 // encrypted with the same deployment key as other resumable gateway tasks.
 type backgroundResponse struct {
 	videoTask
-	Store, Stream   bool
-	Effort, Tier    string
-	RequestedEffort *string
-	Items           []string
-	MCPTool         bool     `json:",omitempty"`
-	CodeTool        bool     `json:",omitempty"`
-	Containers      []string `json:",omitempty"`
-	FileIDs         []string `json:",omitempty"`
-	SkillIDs        []string `json:",omitempty"`
-	VectorStores    []string `json:",omitempty"`
+	Store, Stream    bool
+	Effort, Tier     string
+	RequestedEffort  *string
+	Items            []string
+	ProgrammaticTool bool     `json:",omitempty"`
+	MCPTool          bool     `json:",omitempty"`
+	CodeTool         bool     `json:",omitempty"`
+	Containers       []string `json:",omitempty"`
+	FileIDs          []string `json:",omitempty"`
+	SkillIDs         []string `json:",omitempty"`
+	VectorStores     []string `json:",omitempty"`
 }
 
 func backgroundKey(id string) string { return "gateway:background:task:" + id }
@@ -127,6 +128,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 	}
 	t := &backgroundResponse{videoTask: videoTask{ID: id, Target: responseTarget(s.Account), Stage: "submitting", Identity: *g, Selection: *s, Requested: in.Model, Payload: payload, IP: clientIP(r), UserAgent: truncate(r.UserAgent(), 512), Inbound: r.URL.Path, Created: started}, Store: in.Store, Stream: in.Stream, Effort: effort, Tier: in.Tier, RequestedEffort: requestedEffort}
 	t.MCPTool = in.NativeMCP
+	t.ProgrammaticTool = in.NativeProgrammatic
 	t.CodeTool = in.NativeCode
 	t.Containers = in.ResponseContainers
 	t.VectorStores, t.FileIDs = in.VectorStores, in.FileIDs
@@ -240,7 +242,7 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 		t.Result, _ = json.Marshal(result)
 		return a.saveBackgroundResponse(persist, t)
 	}
-	observation := textObservation{Protocol: "responses", Tier: t.Tier}
+	observation := textObservation{Protocol: "responses", Tier: t.Tier, Programmatic: t.ProgrammaticTool}
 	err = observation.observe(raw)
 	failed := status == "failed" || status == "cancelled"
 	if err != nil && !failed {
@@ -304,7 +306,7 @@ func (a *App) settleBackgroundResponse(ctx context.Context, t *backgroundRespons
 	var result struct{ Status string }
 	_ = json.Unmarshal(t.Result, &result)
 	if t.Store && (result.Status == "completed" || result.Status == "incomplete") {
-		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool, CodeTool: t.CodeTool, Containers: t.Containers, VectorStores: t.VectorStores, FileIDs: t.FileIDs, SkillIDs: t.SkillIDs}
+		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, ProgrammaticTool: t.ProgrammaticTool, MCPTool: t.MCPTool, CodeTool: t.CodeTool, Containers: t.Containers, VectorStores: t.VectorStores, FileIDs: t.FileIDs, SkillIDs: t.SkillIDs}
 		if err := a.storeResponseBinding(ctx, &t.Identity, t.UpstreamID, binding); err != nil {
 			return err
 		}
@@ -324,7 +326,7 @@ func (a *App) backgroundSource(ctx context.Context, t *backgroundResponse) (*ups
 	return u, nil
 }
 func (a *App) refreshBackgroundResponse(ctx context.Context, t *backgroundResponse) error {
-	if t.MCPTool || t.CodeTool {
+	if t.MCPTool || t.CodeTool || t.ProgrammaticTool {
 		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 	}
 	if t.Stage == "terminal" {
@@ -424,7 +426,7 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 		fail(missing())
 		return
 	}
-	if t.MCPTool || t.CodeTool {
+	if t.MCPTool || t.CodeTool || t.ProgrammaticTool {
 		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 		r = r.WithContext(ctx)
 	}

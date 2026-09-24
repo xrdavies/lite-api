@@ -85,7 +85,7 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request, g *
 			if task.Stage != "terminal" {
 				return conflict("cancel or finish the background response before deleting it")
 			}
-			deletion.Source = responseBinding{AccountID: task.Selection.Account.ID, Target: task.Target, Items: task.Items, MCPTool: task.MCPTool, CodeTool: task.CodeTool, Containers: task.Containers, VectorStores: task.VectorStores, FileIDs: task.FileIDs, SkillIDs: task.SkillIDs}
+			deletion.Source = responseBinding{AccountID: task.Selection.Account.ID, Target: task.Target, Items: task.Items, ProgrammaticTool: task.ProgrammaticTool, MCPTool: task.MCPTool, CodeTool: task.CodeTool, Containers: task.Containers, VectorStores: task.VectorStores, FileIDs: task.FileIDs, SkillIDs: task.SkillIDs}
 		} else {
 			binding, err := a.previousResponse(ctx, g, id)
 			if err != nil {
@@ -97,7 +97,7 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request, g *
 			deletion.Source = *binding
 		}
 	}
-	if deletion.Source.MCPTool || deletion.Source.CodeTool {
+	if deletion.Source.MCPTool || deletion.Source.CodeTool || deletion.Source.ProgrammaticTool {
 		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 	}
 	u, err := a.loadAccount(ctx, deletion.Source.AccountID)

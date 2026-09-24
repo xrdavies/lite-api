@@ -54,7 +54,7 @@ func TestResponseMCP(t *testing.T) {
 		`"headers":{"Bad\nName":"value"}`, `"headers":{"Authorization":"Bearer s\r\nInjected: true"}`, `"headers":{"Key":123}`,
 		`"allowed_tools":{"read_only":null}`, `"allowed_tools":{"tool_names":[""]}`, `"allowed_tools":[5]`,
 		`"require_approval":"sometimes"`, `"require_approval":{"always":null}`, `"require_approval":{"always":["read"]}`,
-		`"defer_loading":null`, `"allowed_callers":["programmatic"]`, `"authorization":"oauth"`, `"connector_id":"connector_dropbox"`, `"tunnel_id":"foreign"`,
+		`"defer_loading":null`, `"authorization":"oauth"`, `"connector_id":"connector_dropbox"`, `"tunnel_id":"foreign"`,
 	} {
 		var tool map[string]json.RawMessage
 		_ = json.Unmarshal([]byte(`{"type":"mcp","server_label":"team","server_url":"https://example.test/mcp"}`), &tool)

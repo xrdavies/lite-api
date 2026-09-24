@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "shell", "files", "uploads"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "shell", "files", "uploads", "program"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -401,6 +401,7 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	t.Helper()
 	containerTool := kind == "code" || kind == "shell"
+	programTool := kind == "program"
 	reference := func(id string) json.RawMessage {
 		if kind == "shell" {
 			return json.RawMessage(fmt.Sprintf(`[{"type":"shell","environment":{"type":"container_reference","container_id":%q}}]`, id))
@@ -443,6 +444,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if kind == "files" || kind == "uploads" {
 		declaration, output, history, marker, toolMarker = nativeFileTools, nativeFileCalls, nativeFileCalls, `"type":"file_search_call"`, `"vector_store_ids":["vs_team"]`
 		ip = "192.0.2.187:1234"
+	}
+	if programTool {
+		declaration, output, history, marker, toolMarker = nativeProgramTools, nativeProgramCalls, nativeProgramCalls[:len(nativeProgramCalls)-1]+","+nativeProgramHistory[1:], `"type":"program"`, `"programmatic"`
+		ip = "192.0.2.189:1234"
 	}
 	grantKey, resourceID := responseStoresKey, "vs_team"
 	if kind == "uploads" {
@@ -495,7 +500,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		if strings.HasPrefix(r.URL.Path, "/v1/responses/") && rejectResources.Load() {
 			resourceRejections.Add(1)
 			w.WriteHeader(503)
-			fmt.Fprint(w, `{"error":{"message":"unavailable client-domain-secret"}}`)
+			fmt.Fprint(w, `{"error":{"message":"unavailable client-mcp-secret client-domain-secret"}}`)
 			return
 		}
 		if r.Method == "GET" && r.Header.Get("Upgrade") == "" {
@@ -544,6 +549,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		if containerTool && conn != nil {
 			response = strings.ReplaceAll(strings.ReplaceAll(response, "ci_team", "ci_socket"), "cntr_team", "cntr_socket")
 		}
+		if programTool && conn != nil {
+			response = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(response, "pc_team", "pc_socket"), "prog_team", "prog_socket"), "po_team", "po_socket")
+		}
 		if textOnly.Load() {
 			response = fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":[{"id":"msg_code_%d","type":"message","role":"assistant","content":[{"type":"output_text","text":"4","annotations":[]}]}],%s}`, n, n, responseUsage)
 		}
@@ -581,7 +589,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
 				t.Error(err)
 			}
-			if containerTool || kind == "files" || kind == "uploads" {
+			if containerTool || kind == "files" || kind == "uploads" || programTool {
 				_, next, err := conn.Read(r.Context())
 				if err != nil || containerTool && !bytes.Contains(next, []byte("cntr_socket")) || !bytes.Contains(next, []byte(`"store":false`)) {
 					t.Error("socket container continuation", err, string(next))
@@ -704,6 +712,33 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 		delete(body, "previous_response_id") // Owned item IDs alone must select the original source.
 	}
+	if programTool {
+		foreign := map[string]any{"model": "tool-model", "input": json.RawMessage(history)}
+		for _, raw := range []string{history, nativeProgramHistory} {
+			foreign["input"] = json.RawMessage(raw)
+			if got := call("POST", "/responses", other, foreign, ""); got.Code != 404 || calls.Load() != 1 {
+				t.Fatal("foreign program history dispatched", got.Code)
+			}
+		}
+		for _, raw := range []string{
+			strings.ReplaceAll(history, "opaque-program-replay", "altered-fingerprint"),
+			strings.ReplaceAll(history, "return await", "throw await"),
+			strings.ReplaceAll(nativeProgramCalls, `"result":"9007199254740993"`, `"result":"altered"`),
+			strings.ReplaceAll(nativeProgramHistory, "pc_team", "pc_unknown"),
+		} {
+			foreign["input"] = json.RawMessage(raw)
+			if got := call("POST", "/responses", key, foreign, ""); got.Code != 404 || calls.Load() != 1 {
+				t.Fatal("unknown or altered program history dispatched", got.Code, got.Body.String())
+			}
+		}
+		for _, path := range []string{"/responses/compact", "/responses/input_tokens"} {
+			request := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
+			if got := call("POST", path, key, request, ""); got.Code != 400 || calls.Load() != 1 {
+				t.Fatal("implicit program admitted on auxiliary endpoint", got.Code)
+			}
+		}
+		delete(body, "previous_response_id")
+	}
 	if kind == "files" || kind == "uploads" {
 		foreign := map[string]any{"model": "tool-model", "input": json.RawMessage(history)}
 		if got := call("POST", "/responses", other, foreign, ""); got.Code != 404 || calls.Load() != 1 {
@@ -769,7 +804,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	body["type"] = "response.create"
-	if containerTool || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" || programTool {
 		body["store"] = false
 	}
 	raw, _ := json.Marshal(body)
@@ -786,12 +821,16 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("tool credentials exposed over WS")
 	}
 	contextExtra := 0
-	if containerTool || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" || programTool {
 		var event struct{ Response struct{ ID string } }
 		_ = json.Unmarshal(raw, &event)
 		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": reference("cntr_socket")}
-		if kind == "files" || kind == "uploads" {
+		if kind == "files" || kind == "uploads" || programTool {
 			delete(request, "tools")
+		}
+		if programTool {
+			delete(request, "previous_response_id")
+			request["input"] = json.RawMessage(strings.ReplaceAll(nativeProgramHistory, "pc_team", "pc_socket"))
 		}
 		next, _ := json.Marshal(request)
 		if err := conn.Write(wsCtx, websocket.MessageText, next); err != nil {
@@ -814,10 +853,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	delete(body, "type")
 	check(3 + contextExtra)
 	body["background"], body["store"] = true, true
-	if containerTool || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" || programTool {
 		body["previous_response_id"] = first.ID
 		delete(body, "tools")
-		textOnly.Store(true) // Plain replies must retain inherited resource grants.
+		textOnly.Store(!programTool) // Programs exercise terminal native output on recovery; others inherit grants.
 	}
 	if kind == "search" {
 		body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
@@ -860,6 +899,15 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 	}
 	check(4 + contextExtra)
+	if programTool {
+		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
+		if err != nil || binding == nil || !binding.ProgrammaticTool || !task.ProgrammaticTool {
+			t.Fatal("program scope lost across background recovery", binding, err)
+		}
+		if source, err := fresh.responseItemSource(ctx, identity, []string{programCallReference("pc_team")}, nil); err != nil || !source.ProgrammaticTool {
+			t.Fatal("program caller not bound after recovery", err)
+		}
+	}
 	if containerTool {
 		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
 		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
@@ -908,7 +956,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("search wallet/key drift", err)
 	}
 	delete(body, "background")
-	if containerTool || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" || programTool {
 		delete(body, "previous_response_id")
 		body["tools"] = json.RawMessage(declaration)
 		textOnly.Store(false)
@@ -1098,7 +1146,28 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			}
 		}
 	}
-	if kind == "mcp" {
+	if programTool {
+		request := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
+		textOnly.Store(true)
+		got := call("POST", "/responses", key, request, "")
+		textOnly.Store(false)
+		if got.Code != 200 {
+			t.Fatal("plain program continuation", got.Code, got.Body.String())
+		}
+		var continued struct{ ID string }
+		_ = json.Unmarshal(got.Body.Bytes(), &continued)
+		binding, err := fresh.previousResponse(ctx, identity, continued.ID)
+		if err != nil || binding == nil || !binding.ProgrammaticTool {
+			t.Fatal("program safeguards lost on plain response", err)
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
+		before := calls.Load()
+		if got := call("POST", "/responses", key, request, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("program context followed changed credentials", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "hosted-search-provider"}})
+	}
+	if kind == "mcp" || programTool {
 		rule := must("POST", "/api/v1/admin/error-passthrough-rules", admin, map[string]any{"name": "MCP upstream failure", "enabled": true, "error_codes": []int{503}, "keywords": []string{"client-mcp-secret"}, "match_mode": "all", "passthrough_code": true, "passthrough_body": true})
 		defer must("DELETE", "/api/v1/admin/error-passthrough-rules/"+fmt.Sprint(id(rule)), admin, nil)
 		must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second MCP provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}})
@@ -1116,6 +1185,30 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		got = call("POST", "/responses", key, continuation, "mcp-implicit")
 		if got.Code != 503 || calls.Load() != before+2 || strings.Contains(got.Body.String(), "client-mcp-secret") || !strings.Contains(got.Body.String(), "upstream tool request rejected") {
 			t.Fatal("implicit MCP continuation lost safeguards", got.Code, got.Body.String())
+		}
+		if programTool {
+			rejectResources.Store(true)
+			for _, operation := range []struct{ method, path string }{
+				{"GET", "/responses/" + first.ID},
+				{"GET", "/responses/" + first.ID + "/input_items"},
+				{"GET", "/responses/" + accepted.ID + "?include=reasoning.encrypted_content"},
+				{"DELETE", "/responses/" + accepted.ID},
+			} {
+				prior := resourceRejections.Load()
+				if got := call(operation.method, operation.path, other, nil, ""); got.Code != 404 || resourceRejections.Load() != prior {
+					t.Fatal("foreign program resource dispatched", got.Code)
+				}
+				got := call(operation.method, operation.path, key, nil, "")
+				if got.Code != 503 || resourceRejections.Load() != prior+1 || strings.Contains(got.Body.String(), "client-domain-secret") {
+					t.Fatal("program resource error exposed", got.Code, got.Body.String())
+				}
+			}
+			pendingTask := *task
+			pendingTask.Stage = "pending"
+			if err := fresh.refreshBackgroundResponse(ctx, &pendingTask); err == nil || strings.Contains(err.Error(), "client-domain-secret") {
+				t.Fatal("program worker error exposed", err)
+			}
+			rejectResources.Store(false)
 		}
 		var leaked bool
 		if err := a.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM idempotency_records WHERE response_body LIKE '%client-mcp-secret%')`).Scan(&leaked); err != nil || leaked {

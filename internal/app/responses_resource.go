@@ -147,7 +147,7 @@ func validateResponseResource(raw []byte, id string, items bool) error {
 
 func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, id string, query url.Values) error {
 	binding, err := a.previousResponse(r.Context(), g, id)
-	if binding != nil && (binding.MCPTool || binding.CodeTool) {
+	if binding != nil && (binding.MCPTool || binding.CodeTool || binding.ProgrammaticTool) {
 		r = r.WithContext(context.WithValue(r.Context(), responseSecretsKey{}, true))
 	}
 	if err != nil {

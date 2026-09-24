@@ -29,6 +29,7 @@ type textRequest struct {
 	HostedSearch                                 bool
 	HostedToolSearch                             bool
 	NativeClientTools                            bool
+	NativeProgrammatic                           bool
 	NativeMCP                                    bool
 	NativeCode                                   bool
 	NativeFileSearch                             bool
@@ -513,6 +514,7 @@ type textObservation struct {
 	ResponseContainers    []string
 	Usage                 priceUsage
 	HasUsage, CountOnly   bool
+	Programmatic          bool
 	started, stopped      bool
 	finished              map[int]bool
 	blocked               bool
