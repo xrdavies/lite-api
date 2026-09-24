@@ -111,7 +111,7 @@ func upstreamURL(base, path string) (string, error) {
 func (a *App) upstreamRequest(ctx context.Context, account *upstreamAccount, method, path string, body []byte) (*http.Response, error) {
 	return a.upstreamRequestHeaders(ctx, account, method, path, body, nil)
 }
-func (a *App) upstreamRequestHeaders(ctx context.Context, account *upstreamAccount, method, path string, body []byte, headers http.Header) (*http.Response, error) {
+func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount, method, path string, body []byte, headers http.Header) (*http.Response, error) {
 	base, err := account.baseURL()
 	if err != nil {
 		return nil, err

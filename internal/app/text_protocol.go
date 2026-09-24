@@ -202,6 +202,9 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 		}
 		for _, name := range []string{"Anthropic-Version", "Anthropic-Beta"} {
 			value := r.Header.Get(name)
+			if name == "Anthropic-Beta" {
+				value = strings.Join(r.Header.Values(name), ",")
+			}
 			if len(value) > 1024 || strings.ContainsAny(value, "\r\n\x00") {
 				return in, bad("invalid protocol header")
 			}

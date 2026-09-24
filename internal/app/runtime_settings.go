@@ -252,6 +252,7 @@ func (a *App) runtimeSettingsRoutes() {
 	for path, h := range map[string]handler{
 		"overload-cooldown": a.overloadConfig, "rate-limit-429-cooldown": a.rate429Config, "panel-rate-limit": a.panelConfig,
 		"stream-timeout": a.streamTimeoutConfig,
+		"beta-policy":    a.betaConfig, "rectifier": a.rectifierConfig,
 	} {
 		a.route("GET /api/v1/admin/settings/"+path, "admin", h)
 		a.route("PUT /api/v1/admin/settings/"+path, "admin", h)
