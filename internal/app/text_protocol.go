@@ -28,6 +28,7 @@ type textRequest struct {
 	Search                                       *grokSearchRequest
 	HostedSearch                                 bool
 	HostedToolSearch                             bool
+	NativeClientTools                            bool
 	ResponseImage                                *responseImageConfig
 }
 

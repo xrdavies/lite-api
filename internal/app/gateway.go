@@ -428,7 +428,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if in.HostedSearch {
 			matches = (u.Platform == "grok" || u.Platform == "openai") && u.protocol() == "responses"
 		}
-		if in.ResponseImage != nil || in.HostedToolSearch {
+		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools {
 			matches = u.Platform == "openai" && u.protocol() == "responses"
 		}
 		if !matches {
@@ -806,6 +806,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if in.HostedToolSearch && g.Group.Platform != "openai" {
 		fail(bad("hosted tool search requires an OpenAI target"))
+		return
+	}
+	if in.NativeClientTools && g.Group.Platform != "openai" {
+		fail(bad("native client tools require an OpenAI target"))
 		return
 	}
 	if (protocol == "images" || in.ResponseImage != nil) && !g.Group.AllowImage {

@@ -391,13 +391,30 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
+	for _, local := range []bool{false, true} {
+		t.Run(fmt.Sprintf("native-tools-local-%v", local), func(t *testing.T) { testNativeResponseTools(t, a, admin, local) })
+	}
+}
+
+// Shared native transports, identity, and recovery assertions apply to both
+// server tool discovery and client-owned execution tools.
+func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
 	t.Helper()
 	defer pauseTestWorkers(a)()
 	ctx := context.Background()
+	email := fmt.Sprintf("native-tools-%v@example.test", local)
+	name := fmt.Sprintf("Native tools local=%v", local)
+	ip := "192.0.2.181:1234"
+	declaration := `[{"type":"tool_search"},{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object"},"defer_loading":true}]}]`
+	output, history, marker, toolMarker := serverSearchHistory, serverSearchHistory, `"execution":"server"`, `"defer_loading":true`
+	if local {
+		declaration, output, history, marker, toolMarker = nativeLocalTools, nativeLocalCalls, nativeLocalHistory, `"type":"shell_call"`, `"type":"local"`
+		ip = "192.0.2.182:1234"
+	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
-		r.RemoteAddr = "192.0.2.181:1234"
+		r.RemoteAddr = ip
 		r.Header.Set("Authorization", "Bearer "+token)
 		r.Header.Set("Idempotency-Key", idem)
 		r.Header.Set("Cookie", "private-cookie")
@@ -415,10 +432,10 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 		return out.Data
 	}
 	id := func(v map[string]any) int64 { return int64(v["id"].(float64)) }
-	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "hosted-tool-search@example.test", "password": "search-password", "balance": 100}))
-	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "hosted-tool-search@example.test", "password": "search-password"})["access_token"].(string)
+	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": email, "password": "search-password", "balance": 100}))
+	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": email, "password": "search-password"})["access_token"].(string)
 	prices := []any{map[string]any{"platform": "openai", "models": []string{"tool-model"}, "input_price": "0.01", "output_price": "0.02", "cache_read_price": "0.003", "cache_write_price": "0.004"}}
-	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Hosted tool search", "platform": "openai", "search_price_per_1k": 1000, "model_pricing": prices}))
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": name, "platform": "openai", "search_price_per_1k": 1000, "model_pricing": prices}))
 	gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
 	k := must("POST", "/api/v1/keys", user, map[string]any{"name": "search", "group_id": gid, "quota": 100})
 	key, kid := k["key"].(string), id(k)
@@ -456,7 +473,7 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 		}
 		received.Store(body)
 		n := calls.Add(1)
-		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, serverSearchHistory, responseUsage)
+		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, output, responseUsage)
 		if string(body["background"]) == "true" {
 			pending.Store(response)
 			fmt.Fprintf(w, `{"id":"resp_hosted_tool_%d","object":"response","status":"queued"}`, n)
@@ -480,7 +497,7 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 	defer up.Close()
 	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
-	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(`[{"type":"tool_search"},{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object"},"defer_loading":true}]}]`)}
+	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(declaration)}
 	check := func(logs int) {
 		t.Helper()
 		var count int
@@ -490,7 +507,7 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 		}
 	}
 	w := call("POST", "/responses", key, body, "hosted-search-json")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"execution":"server"`) || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["tools"]), `"defer_loading":true`) {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), marker) || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["tools"]), toolMarker) {
 		t.Fatal("native hosted search", w.Code, w.Body.String())
 	}
 	check(1)
@@ -506,9 +523,9 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 	if w = call("POST", "/responses", other, body, ""); w.Code != 404 || calls.Load() != 1 {
 		t.Fatal("foreign search continuation", w.Code)
 	}
-	body["input"], body["stream"] = json.RawMessage(serverSearchHistory), true
+	body["input"], body["stream"] = json.RawMessage(history), true
 	w = call("POST", "/responses", key, body, "")
-	if !strings.Contains(w.Body.String(), "response.completed") || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["input"]), `"execution":"server"`) {
+	if !strings.Contains(w.Body.String(), "response.completed") || string(received.Load().(map[string]json.RawMessage)["input"]) != history {
 		t.Fatal("hosted history or SSE lost", w.Code, w.Body.String())
 	}
 	check(2)
@@ -531,13 +548,15 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 	}
 	_, raw, err = conn.Read(wsCtx)
 	conn.CloseNow()
-	if err != nil || !bytes.Contains(raw, []byte(`"response.completed"`)) || !bytes.Contains(raw, []byte(`"execution":"server"`)) {
+	if err != nil || !bytes.Contains(raw, []byte(`"response.completed"`)) || !bytes.Contains(raw, []byte(marker)) {
 		t.Fatal("hosted search WS", string(raw), err)
 	}
 	delete(body, "type")
 	check(3)
 	body["background"], body["store"] = true, true
-	body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
+	if !local {
+		body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
+	}
 	w = call("POST", "/responses", key, body, "hosted-search-background")
 	var accepted struct{ ID string }
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &accepted) != nil || accepted.ID == "" {
@@ -578,7 +597,7 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 	}
 	delete(body, "background")
 	// Composite admission uses the resolved provider, not the public model name.
-	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Composite tool search", "platform": "composite", "model_pricing": prices}))
+	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Composite " + name, "platform": "composite", "model_pricing": prices}))
 	cp := fmt.Sprintf("/api/v1/admin/groups/%d", cgid)
 	route := must("POST", cp+"/composite-routes", admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "openai", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
 	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})

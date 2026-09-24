@@ -81,6 +81,12 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				if responseLocalItem(kind) {
+					if err := validateResponseLocalItem(item); err != nil {
+						return in, err
+					}
+					in.NativeClientTools = true
+				}
 				if (kind == "tool_search_call" || kind == "tool_search_output") && credentialString(item, "execution") == "server" {
 					in.HostedToolSearch = true
 				}
@@ -139,6 +145,13 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if responseLocalTool(credentialString(tool, "type")) {
+			if err := validateResponseLocalTool(tool); err != nil {
+				return in, err
+			}
+			in.NativeClientTools = true
+			continue
+		}
 		if hostedToolSearch(tool) {
 			if err := validateHostedToolSearch(tool); err != nil {
 				return in, err

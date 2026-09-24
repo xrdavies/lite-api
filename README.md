@@ -209,6 +209,10 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。
 
+OpenAI 类型的原生 Responses 账号支持客户端执行的 `apply_patch`、`local_shell` 和 `shell`，后者必须显式配置 `environment.type="local"`。命令、补丁、环境变量、工作目录、本地技能说明和执行结果按原生协议传递；网关不运行命令、不修改文件或加载技能路径。客户端通过 `apply_patch_call_output`、`shell_call_output` 的 `call_id` 或旧 `local_shell_call_output.id` 返回结果。协议见 [Apply Patch](https://developers.openai.com/api/docs/guides/tools-apply-patch)、[Local shell](https://developers.openai.com/api/docs/guides/tools-local-shell) 和 [Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
+
+这些工具支持 HTTP JSON/SSE、WebSocket、后台响应和指向 OpenAI 的 composite 路由，复用模型 token 计费、当前 Key 续接和故障恢复；不转换为 Chat/Messages/Gemini 函数。`allowed_callers` 仅允许 direct；托管容器、programmatic 调用和通过工具发现注入这些专用工具当前拒绝。输入限 4 MiB；本地 skills 最多 128 项，客户端自行执行和控制权限。原生流可在扣费前返回工具增量或调用项，客户端须等 `response.completed` / `response.incomplete` 后执行；终态等待结算，失败不发布成功标记。当前为本地协议及数据库验证，真实供应商能力取决于具体模型和账号。
+
 条目元数据与响应关联在 Redis 原子保存 30 天，不保存原生内容；最多 1024 个引用/输出项。HTTP `store=false` 不保存条目，WebSocket `store=false` 仅在原连接最近 1024 个响应内使用；断线后须重发完整内容。来自旧版本且未记录条目 ID 的响应仍可 previous_response 续接，但无法凭空恢复其条目归属。幂等重放不重新派发或计费，token 计数引用只做权限和来源校验。
 
 HTTP Responses 支持 `background=true`，只调度原生 Responses API Key 账号；创建复用模型/额度/路由/价格预检，返回上游 response ID。三个前缀均提供 `GET /responses/{id}` 查询和 `POST /responses/{id}/cancel` 取消，只允许创建时的 Key/分组访问。查询和取消无需剩余余额，但仍检查 Key 状态、IP、RPM、用户与账号并发。凭证/地址/协议变更后暂停轮询，恢复原来源后继续，不换账号或重新生成。
