@@ -62,13 +62,6 @@ func plazaPrice(p modelPrice, longContext bool) modelPrice {
 
 func (a *App) modelPlaza(w http.ResponseWriter, r *http.Request) error {
 	catalog := a.prices.Load()
-	n, err := a.Redis.Eval(r.Context(), `local n=redis.call('INCR',KEYS[1]);if n==1 then redis.call('EXPIRE',KEYS[1],60) end;return n`, []string{"lite-api:plaza:" + clientIP(r)}).Int()
-	if err != nil {
-		return err
-	}
-	if n > 60 {
-		return &apiError{429, "too many model directory requests"}
-	}
 	// Invalid, expired or disabled identities must not fall back to an anonymous view.
 	var userID int64
 	if r.Header.Get("Authorization") != "" {

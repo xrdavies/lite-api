@@ -65,6 +65,14 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 独立上游验证无需数据库：设置本地 `UPSTREAM_BASE_URL`、`UPSTREAM_API_KEY`、`UPSTREAM_MODEL` 后执行 `./bin/lite-api upstream-check`。命令发起一次 JSON 和一次 SSE 文本生成，仅输出状态和时延摘要。Go 客户端对指定中转和 `gpt-5.6-luna` 的 JSON/SSE 已实测成功；其他平台当前由协议模拟测试覆盖，不能据此宣称所有原厂模型均已联调。
 
+## 运行设置
+
+管理员可对 `/api/v1/admin/settings/overload-cooldown`、`/rate-limit-429-cooldown` 和 `/panel-rate-limit`（均使用相同 settings 前缀）执行 GET/PUT。配置保存在原 settings 表，写入有权限校验和审计，不向公开设置返回。PUT 替换整组配置，客户端应提交完整对象。
+
+529 设置为 `{"enabled":true,"cooldown_minutes":10}`，范围 1–120 分钟；收到 529 后暂停该账号调度，并在未输出响应时沿用最多三个不同账号的换号规则。429 设置为 `{"enabled":true,"cooldown_seconds":5}`，范围 1–7200 秒，仅在缺少有效 `Retry-After` 时使用；关闭默认冷却仍尊重有效的上游秒数或 HTTP 日期（最多两小时）。禁用时提交越界时长会归一化为默认值。更新配置不清除已生效的冷却；如需立即恢复，使用原账号恢复接口。502/503/504 保留独立的短暂冷却，账号认证失败和已识别的余额不足继续按各自规则处理。
+
+管理 API 限流默认为 `{"enabled":true,"user_rpm":240,"heavy_rpm":60,"exempt_admin":true,"public_ip_rpm":300}`。RPM 接受 0–100000，0 不限制该档；认证接口按用户计数，本人 usage 和 Key 每日用量同时计入重查询档。公开设置与模型广场共用 IP 桶，私网/回环来源跳过该档；只使用连接来源地址，不信任客户端转发头。每个桶从首个请求起计 60 秒，超限返回 429 和 `Retry-After`。写入后下一请求生效，普通配置读取缓存 60 秒；读配置失败保留最近有效值，限流 Redis 错误放行，身份认证和登录保护仍独立执行。管理 API 限流与客户端模型调用 RPM 互不混用。
+
 ## 渠道与定价
 
 管理员通过 `/api/v1/admin/channels` 管理渠道、分组关联、模型映射、价格和账号成本规则。一个分组只能属于一个渠道；关联与价格替换在同一事务中完成。价格沿用各字段的十进制精度，token 价格单位为 USD/token，支持科学计数法。`billing_model_source` 可配置 requested、channel_mapped、upstream 或 response_model。Chat Completions 已使用请求开始时的价格快照结算，消费期间修改价格不会回改该次费用。
@@ -123,7 +131,7 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 `POST /v1/alpha/search`、`/alpha/search`、`/backend-api/codex/alpha/search` 提供独立 JSON 搜索代理。请求必须包含 `model`，搜索命令及扩展字段透传；移除不属于独立搜索的 `prompt_cache_key`、`prompt_cache_retention`、`store`。选择 OpenAI 平台 Chat/Responses 协议的 API Key 账号，上游路径为 `/v1/alpha/search`；复合路由使用 responses 端点并仅允许 OpenAI 目标。该入口不支持流式，不代表任意上游已提供此端点。
 
-alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token usage。管理员通过分组 `web_search_price_per_call` 设置 USD/次：未配置默认 0.01，0 为免费，负数清除覆盖值，省略/null 保持。默认值是固定兼容计价规则，不代表上游报价。费用为单价乘本人专属/分组倍率，渠道与分组模型 token 价格不替代搜索单价，渠道模型限制仍生效；金额按既有 10/8 位口径记录和扣减。三种别名共享幂等与账务，失败不记成功消费。401/404/405 可尝试其他合格账号且不改变原账号全局健康状态；429/502/503/504 使用既有有限切换，网络结果不明时不重发。
+alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token usage。管理员通过分组 `web_search_price_per_call` 设置 USD/次：未配置默认 0.01，0 为免费，负数清除覆盖值，省略/null 保持。默认值是固定兼容计价规则，不代表上游报价。费用为单价乘本人专属/分组倍率，渠道与分组模型 token 价格不替代搜索单价，渠道模型限制仍生效；金额按既有 10/8 位口径记录和扣减。三种别名共享幂等与账务，失败不记成功消费。401/404/405 可尝试其他合格账号且不改变原账号全局健康状态；429/502/503/504/529 使用既有有限切换，网络结果不明时不重发。
 
 `POST /v1/web_search`、`/v1/x_search` 及根路径别名提供 Grok 独立搜索，仅限 Grok 分组。请求接受 `query`（空缺时使用字符串 `input`），`max_results` 默认为 5、最多 20；X 搜索另接受 `allowed_x_handles`、`excluded_x_handles`、`from_date`、`to_date` 和图片/视频理解开关。使用固定默认模型 `grok-4.6`，经渠道/账号映射后调用 `/v1/responses` 的原生搜索工具；客户端 `model`、`tools` 和 `store` 不控制上游请求。账号可配置 Chat 或 Responses 协议，搜索不建立文本会话粘性。返回 `query/results/provider/max_results`，只收录上游搜索来源或引用标注中的 HTTP(S) URL；模型文本仅可补充已引用 URL 的标题与摘要。
 
@@ -153,7 +161,7 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 网关支持 Bearer、`X-Api-Key` 和 `X-Goog-Api-Key`；Gemini 原生入口还支持兼容的 `key` 查询参数，该参数不会转发到上游。客户端原始鉴权、Cookie 和任意自定义 header 不透传。各 token 计数入口仍检查权限、余额与限额，返回计数而不写消费日志或扣余额。
 
-账号选择考虑优先级、并发、额度、到期及冷却；上游 429/502/503/504 在尚未输出时最多尝试三个不同账号。401/403 标记认证错误，429 写入冷却。客户端取消传至上游，结算后释放并发名额。流式请求自动要求 usage，只有完成和结算成功才输出协议对应的结束事件；缺失 usage 返回待核查错误，已收到的 usage 在后续断流时仍结算。
+账号选择考虑优先级、并发、额度、到期及冷却；上游 429/502/503/504/529 在尚未输出时最多尝试三个不同账号。401/403 标记认证错误，429 写入冷却。客户端取消传至上游，结算后释放并发名额。流式请求自动要求 usage，只有完成和结算成功才输出协议对应的结束事件；缺失 usage 返回待核查错误，已收到的 usage 在后续断流时仍结算。
 
 文本会话支持一小时滑动过期的账号粘性。Chat/Responses 优先读取 `Session-Id`、`Session_id`、`Conversation_id` 及兼容会话头，其次 `prompt_cache_key`；缺省时按模型、工具、系统指令和首条用户输入形成摘要。Anthropic 优先使用 `metadata.user_id` 中的新旧会话标识，其次缓存内容和消息摘要。Gemini 使用会话头或模型/系统指令/首条用户输入，Grok 另支持 `X-Grok-Conv-Id` 并按模型隔离。Redis 仅保存摘要、账号 ID 和上游来源指纹，按客户端 Key、分组、平台、协议隔离，刷新发生在实际派发前。
 

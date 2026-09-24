@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -347,20 +346,39 @@ func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, statu
 		a.markBalanceFailure(ctx, s.Account)
 		return
 	}
-	seconds := int64(30)
-	if n, err := strconv.ParseInt(retry, 10, 64); err == nil && n > 0 {
-		seconds = min(n, 3600)
-	} else if at, err := http.ParseTime(retry); err == nil {
-		seconds = min(max(int64(time.Until(at).Seconds()), 1), 3600)
-	}
+	seconds := retryAfterSeconds(retry, time.Now(), 7200)
 	var clause string
 	switch status {
 	case 401, 403:
 		clause = "status='error',error_message='upstream authentication rejected'"
 	case 429:
-		clause = "rate_limited_at=now(),rate_limit_reset_at=now()+$3::bigint*interval '1 second'"
+		if seconds == 0 {
+			settings, err := a.loadRate429Settings(ctx)
+			if err != nil {
+				slog.Warn("429 policy unavailable; using default")
+			}
+			if !settings.Enabled {
+				return
+			}
+			seconds = int64(settings.Seconds)
+		}
+		clause = "rate_limited_at=now(),rate_limit_reset_at=GREATEST(rate_limit_reset_at,now()+$3::bigint*interval '1 second')"
+	case 529:
+		settings, err := a.loadOverloadSettings(ctx)
+		if err != nil {
+			slog.Warn("529 policy unavailable; using default")
+		}
+		if !settings.Enabled {
+			return
+		}
+		seconds = int64(settings.Minutes) * 60
+		clause = "overload_until=GREATEST(overload_until,now()+$3::bigint*interval '1 second')"
 	case 502, 503, 504:
-		clause = "overload_until=now()+$3::bigint*interval '1 second'"
+		if seconds == 0 {
+			seconds = 30
+		}
+		seconds = min(seconds, 3600)
+		clause = "overload_until=GREATEST(overload_until,now()+$3::bigint*interval '1 second')"
 	default:
 		return
 	}
@@ -368,7 +386,9 @@ func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, statu
 	if status != 401 && status != 403 {
 		args = append(args, seconds)
 	}
-	_, _ = a.DB.ExecContext(ctx, "UPDATE accounts SET "+clause+" WHERE id=$1 AND updated_at=$2 AND status='active' AND deleted_at IS NULL", args...)
+	if _, err := a.DB.ExecContext(ctx, "UPDATE accounts SET "+clause+",updated_at=now() WHERE id=$1 AND updated_at=$2 AND status='active' AND deleted_at IS NULL", args...); err != nil {
+		slog.Error("account failure state update failed", "account_id", s.Account.ID)
+	}
 }
 func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelection, r *http.Request, cause error, started time.Time) {
 	// Invalid unauthenticated requests do not create an unbounded database audit stream.

@@ -237,7 +237,7 @@ func testModelPlaza(t *testing.T, a *App, admin string) {
 	expect(400, "PUT", "/api/v1/admin/settings", admin, map[string]any{"model_plaza_description": strings.Repeat("x", 10001)})
 	must("PUT", "/api/v1/admin/settings", admin, map[string]any{"model_plaza_enabled": false})
 	expect(404, "GET", path, "", nil)
-	if _, err := a.Redis.Set(t.Context(), "lite-api:plaza:192.0.2.77", 60, time.Minute).Result(); err != nil {
+	if _, err := a.Redis.Set(t.Context(), "lite-api:panel:public:ip:192.0.2.77", 300, time.Minute).Result(); err != nil {
 		t.Fatal(err)
 	}
 	expect(429, "GET", path, "", nil)

@@ -1172,7 +1172,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		selected.Release()
 		grokRetry := (in.Search != nil || audioIn != nil) && (status == 401 || status == 402 || status == 403 || status >= 500)
-		if !searchEndpointError && !grokRetry && !balanceFailure(selected.Account.Platform, status, failureBody) && status != 429 && status != 502 && status != 503 && status != 504 {
+		if !searchEndpointError && !grokRetry && !balanceFailure(selected.Account.Platform, status, failureBody) && status != 429 && status != 502 && status != 503 && status != 504 && status != 529 {
 			fail(&apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
 			return
 		}

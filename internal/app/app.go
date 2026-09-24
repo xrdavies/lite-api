@@ -77,6 +77,9 @@ type App struct {
 	priceFile         string
 	priceMu           sync.Mutex
 	prices            atomic.Pointer[priceCatalog]
+	panelMu           sync.Mutex
+	panelCache        *panelRateSettings
+	panelExpires      time.Time
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -228,6 +231,9 @@ func (a *App) route(pattern, access string, h handler) {
 				}
 				r = r.WithContext(context.WithValue(r.Context(), identityKey{}, user))
 			}
+			if err := a.panelRateLimit(w, r, user); err != nil {
+				return err
+			}
 			return h(w, r)
 		}()
 		if err != nil {
@@ -359,6 +365,7 @@ func (a *App) routes() {
 		return reply(w, map[string]string{"status": "ok"})
 	})
 	a.settingsRoutes()
+	a.runtimeSettingsRoutes()
 	a.imageStorageRoutes()
 	a.imageTaskRoutes()
 	a.batchImageRoutes()
