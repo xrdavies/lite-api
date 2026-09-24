@@ -187,7 +187,11 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 客户端工具发现支持 `type=tool_search`、`execution=client`，与 [OpenAI 工具搜索文档](https://developers.openai.com/api/docs/guides/tools-tool-search) 中的客户端执行模式一致。原生 Responses HTTP/SSE/WS 保留声明及调用；Chat 转换保留 description/parameters/strict，并将调用还原为 `tool_search_call`、`execution=client` 和对象形式的 arguments。流式搜索参数累计到 output_item.done 一并发送，该完成事件等待结算成功。网关不执行客户端工具，也不另收独立搜索费用，仍结算上游文本 usage。
 
-`tool_search_output.tools` 中成功返回的 function/custom/namespace 加入 Chat 下一次工具声明，并随加密续接历史保留；不要求重新声明 tool_search。失败或未完成结果保留为工具输出，不启用发现的工具；纯 output 文本/对象保留为历史，不当作工具定义解析。同一工具定义去重，不同 schema、名称或命名空间冲突拒绝；声明顺序和 JSON 对象键顺序不改变结果。发现的托管工具拒绝。省略 execution 或指定 server 的托管搜索尚未实现；Chat 自定义工具的格式约束仍按 input 字符串函数转换。
+`tool_search_output.tools` 中成功返回的 function/custom/namespace 加入 Chat 下一次工具声明，并随加密续接历史保留；不要求重新声明 tool_search。失败或未完成结果保留为工具输出，不启用发现的工具；纯 output 文本/对象保留为历史，不当作工具定义解析。同一工具定义去重，不同 schema、名称或命名空间冲突拒绝；声明顺序和 JSON 对象键顺序不改变结果。发现的托管工具拒绝；Chat 自定义工具的格式约束仍按 input 字符串函数转换。
+
+托管工具搜索支持 `{"type":"tool_search"}` 或显式 `execution="server"`，只使用 OpenAI 类型的原生 Responses API Key 账号，支持 HTTP JSON/SSE、WebSocket 和后台执行，以及指向 OpenAI 的 composite 路由。`defer_loading` 和 namespace 声明保持原样；原生历史的 `tool_search_call/tool_search_output` 保留 `execution="server"` 和 null `call_id`，不会转换成客户端函数调用。查询仍须由上游实际支持，网关不按模型名称推定能力。协议依据同一份 [OpenAI 工具搜索指南](https://developers.openai.com/api/docs/guides/tools-tool-search)。
+
+两种工具搜索均沿用模型 token 用量和价格，不套用网页搜索的 `search_price_per_1k`；这是本系统账务口径，不代表中转商不会另行收费。托管声明不接受客户端 description/parameters 配置（null 可省略），发现结果只允许现有 function/custom/namespace；MCP、文件搜索、代码执行和其他托管工具仍按各自准入规则拒绝。续接、幂等和结算失败恢复复用原路径。已通过本地协议和 Docker 数据库验证，真实托管工具搜索上游尚未联调。
 
 转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 

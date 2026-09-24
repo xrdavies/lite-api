@@ -81,6 +81,9 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				if (kind == "tool_search_call" || kind == "tool_search_output") && credentialString(item, "execution") == "server" {
+					in.HostedToolSearch = true
+				}
 				if kind == "image_generation_call" && item["id"] != nil {
 					id := credentialString(item, "id")
 					if !validResponseID(id) || len(in.ItemReferences) >= 1024 {
@@ -136,6 +139,13 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if hostedToolSearch(tool) {
+			if err := validateHostedToolSearch(tool); err != nil {
+				return in, err
+			}
+			in.HostedToolSearch = true
+			continue
+		}
 		if credentialString(tool, "type") == "image_generation" {
 			if in.ResponseImage != nil {
 				return in, bad("only one image_generation tool is supported")
@@ -154,7 +164,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.ResponseImage != nil) && (in.Action != "" || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil) && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	if in.ResponseImage != nil {

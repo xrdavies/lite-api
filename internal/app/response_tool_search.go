@@ -29,7 +29,7 @@ func validateResponseClientTool(tool map[string]json.RawMessage) error {
 		return nil
 	case "tool_search":
 		if credentialString(tool, "execution") != "client" {
-			return bad("tool search requires execution=client; hosted search is not yet available")
+			return bad("hosted tool search requires a native OpenAI Responses account")
 		}
 		if raw := tool["parameters"]; raw != nil {
 			var schema map[string]json.RawMessage
@@ -41,6 +41,52 @@ func validateResponseClientTool(tool map[string]json.RawMessage) error {
 	default:
 		return bad("hosted tool billing is not yet available")
 	}
+}
+
+func hostedToolSearch(tool map[string]json.RawMessage) bool {
+	return credentialString(tool, "type") == "tool_search" && (tool["execution"] == nil || string(tool["execution"]) == `"server"`)
+}
+
+func validateHostedToolSearch(tool map[string]json.RawMessage) error {
+	for field, raw := range tool {
+		switch field {
+		case "type", "execution":
+		case "description", "parameters":
+			if string(raw) != "null" {
+				return bad("hosted tool search does not accept client search configuration")
+			}
+		default:
+			return bad("unsupported hosted tool search option")
+		}
+	}
+	return nil
+}
+
+// Server search only loads client tool definitions. It never grants admission
+// to remote MCP servers, shared files, or other independently billed tools.
+func serverSearchItem(item map[string]json.RawMessage) error {
+	if raw := item["call_id"]; raw != nil && string(raw) != "null" {
+		return bad("server tool search history requires a null call ID")
+	}
+	if raw := item["id"]; raw != nil && string(raw) != "null" && !validResponseID(credentialString(item, "id")) {
+		return bad("invalid server tool search item ID")
+	}
+	if raw := item["status"]; raw != nil && string(raw) != "null" {
+		switch credentialString(item, "status") {
+		case "in_progress", "completed", "incomplete":
+		default:
+			return bad("invalid server tool search status")
+		}
+	}
+	if credentialString(item, "type") == "tool_search_call" {
+		_, err := searchCallArguments(item["arguments"])
+		return err
+	}
+	if raw := item["tools"]; raw == nil || string(raw) == "null" {
+		return bad("server tool search output requires tools")
+	}
+	_, err := searchDiscoveredTools(item)
+	return err
 }
 
 func clientSearchItem(item map[string]json.RawMessage) error {
@@ -57,6 +103,10 @@ func searchOutputTools(item map[string]json.RawMessage) ([]map[string]json.RawMe
 	if err := clientSearchItem(item); err != nil {
 		return nil, err
 	}
+	return searchDiscoveredTools(item)
+}
+
+func searchDiscoveredTools(item map[string]json.RawMessage) ([]map[string]json.RawMessage, error) {
 	var discoveries []map[string]json.RawMessage
 	if raw := item["tools"]; raw != nil && json.Unmarshal(raw, &discoveries) != nil {
 		return nil, bad("invalid discovered tools")
@@ -128,6 +178,15 @@ func mergeResponseDiscoveries(tools, items []map[string]json.RawMessage) ([]map[
 		}
 	}
 	for _, item := range items {
+		kind := credentialString(item, "type")
+		if (kind == "tool_search_call" || kind == "tool_search_output") && credentialString(item, "execution") == "server" {
+			if err := serverSearchItem(item); err != nil {
+				return nil, err
+			}
+			// Preserve native server discoveries in input, without promoting them
+			// into declarations or pretending the client executed a function.
+			continue
+		}
 		switch credentialString(item, "type") {
 		case "tool_search_call":
 			if err := clientSearchItem(item); err != nil {

@@ -462,11 +462,11 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	}
 	before = calls.Load()
 	search = body()
-	search["tools"] = []any{map[string]string{"type": "tool_search", "execution": "server"}}
+	search["tools"] = []any{map[string]string{"type": "tool_search", "execution": "invalid"}}
 	write(c, search)
 	assertResult(terminal(c), "error")
 	if calls.Load() != before {
-		t.Fatal("WS hosted tool search admitted")
+		t.Fatal("WS invalid tool search admitted")
 	}
 	c.CloseNow()
 	mode.Store(0)

@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 const clientSearchDeclaration = `{"type":"tool_search","execution":"client","description":"Find a tool","parameters":{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"]}}`
@@ -89,8 +92,8 @@ func TestClientToolSearch(t *testing.T) {
 		t.Fatal("discovery deduplication", err)
 	}
 	for _, invalid := range []string{
-		`{"tools":[{"type":"tool_search"}]}`,
-		`{"tools":[{"type":"tool_search","execution":"server"}]}`,
+		`{"tools":[{"type":"tool_search","execution":"invalid"}]}`,
+		`{"tools":[{"type":"tool_search","execution":null}]}`,
 		`{"tools":[{"type":"tool_search","execution":"client","parameters":[]} ]}`,
 		`{"input":[{"type":"tool_search_call","call_id":"c","execution":"server","arguments":{}}]}`,
 		`{"input":[{"type":"tool_search_call","call_id":"c","arguments":[]}]}`,
@@ -310,10 +313,10 @@ func testClientToolSearch(t *testing.T, a *App, admin string) {
 		if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", failed.Header().Get("X-Request-ID")).Scan(&count); err != nil || count != 1 || calls.Load() != before {
 			t.Fatal("tool search recovery", count, err)
 		}
-		for _, invalid := range []any{map[string]any{"type": "tool_search"}, map[string]any{"type": "tool_search", "execution": "server"}} {
+		for _, invalid := range []any{map[string]any{"type": "tool_search", "execution": "invalid"}, map[string]any{"type": "tool_search", "execution": "server", "parameters": map[string]any{}}} {
 			body["tools"] = []any{invalid}
 			if w := call("POST", "/responses", key, body, ""); w.Code != 400 || calls.Load() != before {
-				t.Fatal("hosted search admitted", w.Code)
+				t.Fatal("invalid search admitted", w.Code)
 			}
 		}
 		body["tools"] = []any{declaration}
@@ -328,5 +331,278 @@ func testClientToolSearch(t *testing.T, a *App, admin string) {
 	var balanced bool
 	if err := a.DB.QueryRow("SELECT 100-balance=(SELECT sum(round(actual_cost,8)) FROM usage_logs WHERE user_id=$1) FROM users WHERE id=$1", uid).Scan(&balanced); err != nil || !balanced {
 		t.Fatal("search cost reconciliation", err)
+	}
+}
+
+const serverSearchHistory = `[{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"paths":["files"]}},{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":` + discoveredClientTools + `}]`
+
+func TestHostedToolSearch(t *testing.T) {
+	parse := func(raw string) (textRequest, map[string]json.RawMessage, error) {
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatal(err)
+		}
+		body["model"] = json.RawMessage(`"m"`)
+		if body["input"] == nil {
+			body["input"] = json.RawMessage(`"hello"`)
+		}
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", body)
+		return in, body, err
+	}
+	for _, raw := range []string{
+		`{"tools":[{"type":"tool_search"}]}`,
+		`{"tools":[{"type":"tool_search","execution":"server","parameters":null,"description":null}]}`,
+		`{"input":[{"type":"additional_tools","tools":[{"type":"tool_search"}]}]}`,
+		`{"input":` + serverSearchHistory + `}`,
+	} {
+		in, body, err := parse(raw)
+		if err != nil || !in.HostedToolSearch || in.HostedSearch {
+			t.Fatal("server search admission", raw, in, err)
+		}
+		if _, err := responsesToChatRequest(body, nil); err == nil {
+			t.Fatal("server search converted to client execution", raw)
+		}
+		if _, _, err := responsesToAnthropicRequest(body, nil); err == nil {
+			t.Fatal("server search converted to Messages", raw)
+		}
+		meter := hostedSearchMeter{OpenAI: true}
+		if err := meter.observe([]byte(`{"status":"completed","output":` + serverSearchHistory + `}`)); err != nil || meter.count() != 0 {
+			t.Fatal("tool discovery billed as web search", err)
+		}
+	}
+	for _, raw := range []string{
+		`{"tools":[{"type":"tool_search","parameters":{}}]}`,
+		`{"tools":[{"type":"tool_search","description":"client configuration"}]}`,
+		`{"tools":[{"type":"tool_search","endpoint":"https://example.test"}]}`,
+		`{"tools":[{"type":"tool_search"},{"type":"mcp","server_url":"https://example.test"}]}`,
+		`{"input":[{"type":"tool_search_output","execution":"server","tools":[{"type":"image_generation"}]}]}`,
+		`{"input":[{"type":"tool_search_output","execution":"server","status":"incomplete","tools":[{"type":"web_search"}]}]}`,
+		`{"input":[{"type":"tool_search_output","execution":"server","tools":[{"type":"namespace","name":"x","tools":[{"type":"mcp"}]}]}]}`,
+		`{"input":[{"type":"tool_search_output","execution":"server","tools":null}]}`,
+		`{"input":[{"type":"tool_search_output","execution":"server","status":"bad","tools":[]}]}`,
+		`{"input":[{"type":"tool_search_call","execution":"server","id":"../other","arguments":{}}]}`,
+		`{"input":[{"type":"tool_search_call","execution":"server","call_id":"client","arguments":{}}]}`,
+		`{"input":[{"type":"tool_search_call","execution":"server","arguments":[]}]}`,
+	} {
+		if _, _, err := parse(raw); err == nil {
+			t.Fatal("invalid server search admitted", raw)
+		}
+	}
+}
+
+func testHostedToolSearch(t *testing.T, a *App, admin string) {
+	t.Helper()
+	defer pauseTestWorkers(a)()
+	ctx := context.Background()
+	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.181:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Idempotency-Key", idem)
+		r.Header.Set("Cookie", "private-cookie")
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	must := func(method, path, token string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, token, body, "")
+		var out struct{ Data map[string]any }
+		if w.Code != 200 && w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	id := func(v map[string]any) int64 { return int64(v["id"].(float64)) }
+	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "hosted-tool-search@example.test", "password": "search-password", "balance": 100}))
+	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "hosted-tool-search@example.test", "password": "search-password"})["access_token"].(string)
+	prices := []any{map[string]any{"platform": "openai", "models": []string{"tool-model"}, "input_price": "0.01", "output_price": "0.02", "cache_read_price": "0.003", "cache_write_price": "0.004"}}
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Hosted tool search", "platform": "openai", "search_price_per_1k": 1000, "model_pricing": prices}))
+	gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
+	k := must("POST", "/api/v1/keys", user, map[string]any{"name": "search", "group_id": gid, "quota": 100})
+	key, kid := k["key"].(string), id(k)
+	var calls atomic.Int64
+	var pending, received atomic.Value
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer hosted-search-provider" || r.Header.Get("Cookie") != "" {
+			t.Error("search credential isolation")
+		}
+		if r.Method == "GET" && r.Header.Get("Upgrade") == "" {
+			fmt.Fprint(w, pending.Load().(string))
+			return
+		}
+		var conn *websocket.Conn
+		var body map[string]json.RawMessage
+		if r.Header.Get("Upgrade") == "websocket" {
+			var err error
+			conn, err = websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.CloseNow()
+			_, raw, err := conn.Read(r.Context())
+			if err != nil || json.Unmarshal(raw, &body) != nil {
+				t.Error("search WS request", err)
+				return
+			}
+		} else if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Error("search JSON request")
+			return
+		}
+		if r.URL.Path != "/v1/responses" || credentialString(body, "model") != "native-tool" {
+			t.Error("search native routing")
+		}
+		received.Store(body)
+		n := calls.Add(1)
+		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, serverSearchHistory, responseUsage)
+		if string(body["background"]) == "true" {
+			pending.Store(response)
+			fmt.Fprintf(w, `{"id":"resp_hosted_tool_%d","object":"response","status":"queued"}`, n)
+			return
+		}
+		if string(body["stream"]) != "true" && conn == nil {
+			fmt.Fprint(w, response)
+			return
+		}
+		event := `{"type":"response.completed","response":` + response + `}`
+		if conn != nil {
+			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
+				t.Error(err)
+			}
+			_, _, _ = conn.Read(r.Context())
+		} else {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+	}))
+	defer up.Close()
+	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}}))
+	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
+	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(`[{"type":"tool_search"},{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object"},"defer_loading":true}]}]`)}
+	check := func(logs int) {
+		t.Helper()
+		var count int
+		var correct bool
+		if err := a.DB.QueryRow(`SELECT count(*),bool_and(actual_cost=0.307 AND model='tool-model') FROM usage_logs WHERE api_key_id=$1`, kid).Scan(&count, &correct); err != nil || count != logs || !correct {
+			t.Fatal("search token billing", count, logs, correct, err)
+		}
+	}
+	w := call("POST", "/responses", key, body, "hosted-search-json")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"execution":"server"`) || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["tools"]), `"defer_loading":true`) {
+		t.Fatal("native hosted search", w.Code, w.Body.String())
+	}
+	check(1)
+	for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
+		if replay := call("POST", path, key, body, "hosted-search-json"); replay.Body.String() != w.Body.String() || calls.Load() != 1 {
+			t.Fatal("hosted search replay", replay.Code)
+		}
+	}
+	var first struct{ ID string }
+	_ = json.Unmarshal(w.Body.Bytes(), &first)
+	other := must("POST", "/api/v1/keys", user, map[string]any{"name": "other-search", "group_id": gid})["key"].(string)
+	body["previous_response_id"] = first.ID
+	if w = call("POST", "/responses", other, body, ""); w.Code != 404 || calls.Load() != 1 {
+		t.Fatal("foreign search continuation", w.Code)
+	}
+	body["input"], body["stream"] = json.RawMessage(serverSearchHistory), true
+	w = call("POST", "/responses", key, body, "")
+	if !strings.Contains(w.Body.String(), "response.completed") || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["input"]), `"execution":"server"`) {
+		t.Fatal("hosted history or SSE lost", w.Code, w.Body.String())
+	}
+	check(2)
+	delete(body, "previous_response_id")
+	delete(body, "stream")
+	body["input"] = "continue"
+	// Both WebSocket and background execution retain native semantics and pricing.
+	server := httptest.NewServer(a.Handler())
+	defer server.Close()
+	wsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(wsCtx, "ws"+strings.TrimPrefix(server.URL, "http")+"/responses", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + key}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body["type"] = "response.create"
+	raw, _ := json.Marshal(body)
+	if err = conn.Write(wsCtx, websocket.MessageText, raw); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, err = conn.Read(wsCtx)
+	conn.CloseNow()
+	if err != nil || !bytes.Contains(raw, []byte(`"response.completed"`)) || !bytes.Contains(raw, []byte(`"execution":"server"`)) {
+		t.Fatal("hosted search WS", string(raw), err)
+	}
+	delete(body, "type")
+	check(3)
+	body["background"], body["store"] = true, true
+	body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
+	w = call("POST", "/responses", key, body, "hosted-search-background")
+	var accepted struct{ ID string }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &accepted) != nil || accepted.ID == "" {
+		t.Fatal("hosted search background", w.Code, w.Body.String())
+	}
+	identity := &gatewayIdentity{Key: gatewayKey{ID: kid, GroupID: gid}}
+	taskID, err := a.Redis.Get(ctx, backgroundIndex(identity, accepted.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	must("PUT", gp, admin, map[string]any{"rate_multiplier": 9})
+	if _, err = a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_hosted_tool_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID"); err != nil {
+		t.Fatal(err)
+	}
+	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_hosted_tool_failure")
+	task, err := a.loadBackgroundResponse(ctx, taskID)
+	if err != nil || a.refreshBackgroundResponse(ctx, task) == nil {
+		t.Fatal("unsettled search succeeded", err)
+	}
+	if _, err = a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT test_hosted_tool_failure"); err != nil {
+		t.Fatal(err)
+	}
+	before := calls.Load()
+	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret}
+	for range 2 {
+		task, err = fresh.loadBackgroundResponse(ctx, taskID)
+		if err != nil || fresh.refreshBackgroundResponse(ctx, task) != nil {
+			t.Fatal("search recovery", err)
+		}
+	}
+	check(4)
+	if calls.Load() != before {
+		t.Fatal("search recovery dispatched again")
+	}
+	var balanced bool
+	if err = a.DB.QueryRow(`SELECT u.balance=100-s.cost AND k.quota_used=s.cost FROM users u JOIN api_keys k ON k.user_id=u.id CROSS JOIN (SELECT sum(round(actual_cost,8)) cost FROM usage_logs WHERE api_key_id=$1)s WHERE k.id=$1`, kid).Scan(&balanced); err != nil || !balanced {
+		t.Fatal("search wallet/key drift", err)
+	}
+	delete(body, "background")
+	// Composite admission uses the resolved provider, not the public model name.
+	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Composite tool search", "platform": "composite", "model_pricing": prices}))
+	cp := fmt.Sprintf("/api/v1/admin/groups/%d", cgid)
+	route := must("POST", cp+"/composite-routes", admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "openai", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
+	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})
+	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
+	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
+		t.Fatal("composite hosted search", w.Code, w.Body.String())
+	}
+	before = calls.Load()
+	must("PUT", cp+"/composite-routes/"+fmt.Sprint(id(route)), admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "grok", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
+	if w = call("POST", "/responses", ckey, body, ""); w.Code != 400 {
+		t.Fatal("hosted discovery routed to Grok", w.Code)
+	}
+	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "chat_completions"}})
+	if w = call("POST", "/responses", key, body, ""); w.Code != 503 {
+		t.Fatal("hosted search converted", w.Code)
+	}
+	if w = call("POST", "/responses", admin, body, ""); w.Code != 401 {
+		t.Fatal("JWT admitted", w.Code)
+	}
+	must("PUT", fmt.Sprintf("/api/v1/admin/users/%d", uid), admin, map[string]any{"status": "disabled"})
+	if w = call("POST", "/responses", key, body, ""); w.Code != 401 {
+		t.Fatal("disabled user admitted", w.Code)
+	}
+	if calls.Load() != before {
+		t.Fatal("rejected search dispatched")
 	}
 }

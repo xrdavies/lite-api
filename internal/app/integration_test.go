@@ -292,6 +292,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testGrokVideo(t, a, admin)
 	testResponsesChat(t, a, admin)
 	testClientToolSearch(t, a, admin)
+	testHostedToolSearch(t, a, admin)
 	testLiveGateway(t, a, admin)
 	testAccountBalances(t, a, admin, otherToken)
 	testGeminiImages(t, a, admin)

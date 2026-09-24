@@ -27,6 +27,7 @@ type textRequest struct {
 	Headers                                      http.Header
 	Search                                       *grokSearchRequest
 	HostedSearch                                 bool
+	HostedToolSearch                             bool
 	ResponseImage                                *responseImageConfig
 }
 
