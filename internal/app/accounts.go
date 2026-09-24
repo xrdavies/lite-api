@@ -69,6 +69,11 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Credentials {
 		switch key {
+		case "tier_id":
+			var tier string
+			if string(value) == "null" || json.Unmarshal(value, &tier) != nil || tier != "" && tier != "aistudio_free" && tier != "aistudio_paid" {
+				return bad("unsupported API key quota tier")
+			}
 		case "openai_capabilities":
 			if _, _, err := openAICapabilities(value); err != nil {
 				return err
@@ -160,7 +165,7 @@ func (in *accountInput) validate(create bool) error {
 	return nil
 }
 func accountJSON(ctx context.Context, q queryer, id int64) (json.RawMessage, error) {
-	return jsonRow(q.QueryRowContext(ctx, `SELECT (to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb)) FROM accounts a WHERE id=$1 AND deleted_at IS NULL`, id))
+	return jsonRow(q.QueryRowContext(ctx, `SELECT (to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','tier_id',credentials->'tier_id','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb)) FROM accounts a WHERE id=$1 AND deleted_at IS NULL`, id))
 }
 func setAccountGroups(ctx context.Context, tx *sql.Tx, id int64, platform string, groups []int64, priority int) error {
 	if len(groups) > 1000 {
@@ -195,6 +200,9 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 		return bad("credentials.api_key is required")
 	}
 	u := &upstreamAccount{Platform: *in.Platform, Credentials: in.Credentials}
+	if u.Platform != "gemini" && in.Credentials["tier_id"] != nil {
+		return bad("tier_id requires a Gemini account")
+	}
 	base, err := u.baseURL()
 	if err != nil {
 		return err
@@ -285,6 +293,9 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	if in.Platform != nil && *in.Platform != u.Platform {
 		return bad("account platform is immutable")
 	}
+	if u.Platform != "gemini" && in.Credentials["tier_id"] != nil {
+		return bad("tier_id requires a Gemini account")
+	}
 	oldTarget := responseTarget(u)
 	for key, value := range in.Credentials {
 		u.Credentials[key] = value
@@ -358,7 +369,7 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 			args = append(args, string(b))
 			expression := fmt.Sprintf("%s || $%d::jsonb", entry.name, len(args))
 			if entry.name == "extra" && (oldTarget != responseTarget(u) || in.ProxyID != nil) {
-				expression = "(" + expression + ") - 'upstream_model_metadata' - 'upstream_billing_probe'"
+				expression = "(" + expression + ") - 'upstream_model_metadata' - 'upstream_billing_probe' - 'grok_usage_snapshot'"
 			}
 			sets = append(sets, entry.name+"="+expression)
 		}
@@ -366,7 +377,7 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	if (oldTarget != responseTarget(u) || in.ProxyID != nil) && in.Extra == nil {
 		// Capability snapshots belong to the previous upstream credential/root.
 		// Configuration patches cannot retain them after the upstream changes.
-		sets = append(sets, "extra=extra - 'upstream_model_metadata' - 'upstream_billing_probe'")
+		sets = append(sets, "extra=extra - 'upstream_model_metadata' - 'upstream_billing_probe' - 'grok_usage_snapshot'")
 	}
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -540,6 +551,8 @@ func (a *App) accountState(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) accountRoutes() {
 	a.billingProbeRoutes()
+	a.route("POST /api/v1/admin/accounts/check-mixed-channel", "admin", a.checkMixedChannel)
+	a.route("GET /api/v1/admin/accounts/{id}/usage", "admin", a.accountUsage)
 	a.route("POST /api/v1/admin/accounts/{id}/revert-proxy-fallback", "admin", a.revertProxyFallback)
 	a.route("GET /api/v1/admin/cn-providers/accounts/{id}/balance", "admin", a.accountBalance)
 	a.route("GET /api/v1/admin/accounts", "admin", a.listAccounts)

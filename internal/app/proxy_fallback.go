@@ -68,7 +68,7 @@ func resolveProxyTarget(ctx context.Context, q queryer, id int64, at time.Time) 
 func invalidateProxySnapshots(ctx context.Context, tx *sql.Tx, id int64) error {
 	_, err := tx.ExecContext(ctx, `WITH RECURSIVE affected(id) AS (
  SELECT $1::bigint UNION SELECT p.id FROM proxies p JOIN affected a ON p.backup_proxy_id=a.id WHERE p.deleted_at IS NULL
-) UPDATE accounts SET extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata',updated_at=clock_timestamp()
+) UPDATE accounts SET extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata' - 'grok_usage_snapshot',updated_at=clock_timestamp()
  WHERE proxy_id IN (SELECT id FROM affected) AND deleted_at IS NULL`, id)
 	return err
 }
@@ -129,7 +129,7 @@ func (a *App) expireProxies(ctx context.Context) error {
 			targetID = target.ID
 		}
 		if _, err = tx.ExecContext(ctx, `UPDATE accounts SET proxy_id=$2,proxy_fallback_origin_id=COALESCE(proxy_fallback_origin_id,$1),
- extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata',updated_at=clock_timestamp()
+ extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata' - 'grok_usage_snapshot',updated_at=clock_timestamp()
  WHERE proxy_id=$1 AND deleted_at IS NULL`, id, targetID); err != nil {
 			return err
 		}
@@ -165,7 +165,7 @@ func (a *App) revertProxyFallback(w http.ResponseWriter, r *http.Request) error 
 		return conflict("renew and activate the original proxy before reverting")
 	}
 	if _, err = tx.ExecContext(r.Context(), `UPDATE accounts SET proxy_id=proxy_fallback_origin_id,proxy_fallback_origin_id=NULL,
- extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata',updated_at=clock_timestamp() WHERE id=$1`, id); err != nil {
+ extra=extra - 'upstream_billing_probe' - 'upstream_model_metadata' - 'grok_usage_snapshot',updated_at=clock_timestamp() WHERE id=$1`, id); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

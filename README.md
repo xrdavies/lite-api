@@ -47,6 +47,12 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 策略处理显式 `reasoning.effort`、`reasoning_effort`、`output_config.effort`，保留嵌套其他字段；缺省值不补写，未知值交由上游处理。Chat、Responses、Messages 及其复合派发均使用实际转发 effort 的价格倍率；用量中的 `requested_reasoning_effort` 单独保留规范化的客户端请求值（未知/none 为 null，缺省时可记录模型名的已知后缀）。在途修改策略不改变该次结算，已完成的幂等请求仍可原样重放。省略/null 保留配置，空上限取消限制，空映射数组清除规则；策略不用于 Gemini 或其他具体平台。
 
+管理员还可通过 `GET /api/v1/admin/accounts/{id}/usage` 查询适用的账号额度信息。Grok 返回已观察到的请求/token 限额、重置时间、Retry-After 与时间戳，并附本地当日及滚动 24 小时精确用量；HTTP（含 SSE 响应头）与 WebSocket 握手共用采集，尚无观测时明确返回 `quota_unknown`。快照仅保留已解析数值，不保存任意头、Cookie 或 plan 声明；不改变账号配置版本、消费计数或人工状态。凭证、地址、协议及代理变化清除快照，旧请求不能覆盖新配置。无额度头的普通成功响应保留上次观测及原时间戳；401/403/429 记录最近拒绝，不把缺少额度当成零。快照是历史观测，不保证当前剩余额度，也不直接改变调度。
+
+Gemini 同一路径返回 `source=local`、`quota_basis=compatibility_default` 的本地估算，按模型名 flash/lite 与其余 Pro 分类；每日按 America/Los_Angeles 自然日（含夏令时），每分钟按固定分钟统计。`credentials.tier_id` 仅 Gemini 接受空字符串、`aistudio_free`、`aistudio_paid`；缺省沿用固定兼容值 Pro 50/日、2/分钟及 Flash 1500/日、15/分钟，paid 不显示日额度、分钟分别为 1000/2000。这些值不是实时原厂额度，估算不用于调度；历史 `gemini_quota_policy` 自定义规则尚未接入。窗口 `cost` 沿用用户实际消费口径。
+
+该查询接受 `source=active|passive` 和 `force=true|false`，在当前 API Key 范围内均只读，不发起收费探测或自动恢复账号；其他六个平台明确返回 400，原始本地用量仍通过 `today-stats` 查询。`POST /api/v1/admin/accounts/check-mixed-channel` 接受 `platform`、`group_ids` 和可选 `account_id`，对允许的平台返回 `has_risk=false`；原告警所依赖的平台组合已不在范围内，实际绑定仍由账号保存接口校验。
+
 ## 上游与健康测试
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video，以及 Grok 专用 search、tts、stt、realtime；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。

@@ -164,6 +164,7 @@ func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount,
 		return nil, &apiError{502, "upstream connection failed"}
 	}
 	resp.Body = &transportBody{ReadCloser: resp.Body, transport: tr}
+	a.recordGrokQuota(ctx, account, resp)
 	return resp, nil
 }
 

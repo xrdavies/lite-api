@@ -310,7 +310,9 @@ func (a *App) dialUpstreamSocket(ctx context.Context, account *upstreamAccount, 
 	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: socketTransport{tr, req.URL.Opaque}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return websocket.Dial(ctx, req.URL.String(), &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, Host: req.Host, CompressionMode: websocket.CompressionDisabled})
+	conn, resp, err := websocket.Dial(ctx, req.URL.String(), &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, Host: req.Host, CompressionMode: websocket.CompressionDisabled})
+	a.recordGrokQuota(ctx, account, resp)
+	return conn, resp, err
 }
 
 type socketTransport struct {

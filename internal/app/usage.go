@@ -156,18 +156,22 @@ func (a *App) accountTodayStats(w http.ResponseWriter, r *http.Request) error {
 	}
 	now := time.Now()
 	start, _ := quotaStarts(now)
-	// Account cost uses the historical cost override and multiplier, never the
-	// current account configuration. An explicit zero override remains zero.
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT to_jsonb(s) FROM accounts a CROSS JOIN LATERAL (
- SELECT count(*) AS requests,COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens,
- COALESCE(sum(COALESCE(account_stats_cost,total_cost)*COALESCE(account_rate_multiplier,1)),0) AS cost,
- COALESCE(sum(total_cost),0) AS standard_cost,COALESCE(sum(actual_cost),0) AS user_cost
- FROM usage_logs WHERE account_id=a.id AND created_at >= $2 AND created_at < $3
- )s WHERE a.id=$1 AND a.deleted_at IS NULL`, id, start, now))
+	raw, err := a.accountWindowStats(r.Context(), id, start, now)
 	if err != nil {
 		return err
 	}
 	return reply(w, raw)
+}
+
+func (a *App) accountWindowStats(ctx context.Context, id int64, start, end time.Time) (json.RawMessage, error) {
+	// Account cost uses the historical cost override and multiplier, never the
+	// current account configuration. An explicit zero override remains zero.
+	return jsonRow(a.DB.QueryRowContext(ctx, `SELECT to_jsonb(s) FROM accounts a CROSS JOIN LATERAL (
+ SELECT count(*) AS requests,COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens,
+ COALESCE(sum(COALESCE(account_stats_cost,total_cost)*COALESCE(account_rate_multiplier,1)),0) AS cost,
+ COALESCE(sum(total_cost),0) AS standard_cost,COALESCE(sum(actual_cost),0) AS user_cost
+ FROM usage_logs WHERE account_id=a.id AND created_at >= $2 AND created_at < $3
+ )s WHERE a.id=$1 AND a.deleted_at IS NULL`, id, start, end))
 }
 
 func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
