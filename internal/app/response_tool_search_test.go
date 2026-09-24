@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "files"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -426,6 +426,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if kind == "code" {
 		declaration, output, history, marker, toolMarker = nativeCodeTools, nativeCodeCalls, nativeCodeCalls, `"type":"code_interpreter_call"`, `"memory_limit":"4g"`
 		ip = "192.0.2.186:1234"
+	}
+	if kind == "files" {
+		declaration, output, history, marker, toolMarker = nativeFileTools, nativeFileCalls, nativeFileCalls, `"type":"file_search_call"`, `"vector_store_ids":["vs_team"]`
+		ip = "192.0.2.187:1234"
 	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
@@ -538,9 +542,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
 				t.Error(err)
 			}
-			if kind == "code" {
+			if kind == "code" || kind == "files" {
 				_, next, err := conn.Read(r.Context())
-				if err != nil || !bytes.Contains(next, []byte(`"container":"cntr_socket"`)) || !bytes.Contains(next, []byte(`"store":false`)) {
+				if err != nil || kind == "code" && !bytes.Contains(next, []byte(`"container":"cntr_socket"`)) || !bytes.Contains(next, []byte(`"store":false`)) {
 					t.Error("socket container continuation", err, string(next))
 					return
 				}
@@ -560,6 +564,22 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(declaration)}
+	if kind == "files" {
+		body["include"] = []string{"file_search_call.results"}
+		before := calls.Load()
+		if got := call("POST", "/responses", key, body, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("ungranted store dispatched", got.Code)
+		}
+		grants := map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}
+		if got := call("PUT", ap, user, map[string]any{"extra": grants}, ""); got.Code != 403 {
+			t.Fatal("user changed store grants", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"extra": grants})
+		unknown := map[string]any{"model": "tool-model", "input": "read", "tools": json.RawMessage(`[{"type":"file_search","vector_store_ids":["vs_foreign"]}]`)}
+		if got := call("POST", "/responses", key, unknown, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("foreign store dispatched", got.Code)
+		}
+	}
 	check := func(logs int) {
 		t.Helper()
 		var count int
@@ -615,6 +635,29 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 		delete(body, "previous_response_id") // Owned item IDs alone must select the original source.
 	}
+	if kind == "files" {
+		foreign := map[string]any{"model": "tool-model", "input": json.RawMessage(history)}
+		if got := call("POST", "/responses", other, foreign, ""); got.Code != 404 || calls.Load() != 1 {
+			t.Fatal("foreign file search history dispatched", got.Code)
+		}
+		implicit := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
+		if got := call("POST", "/responses/compact", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+			t.Fatal("implicit file search compaction dispatched", got.Code)
+		}
+		implicit["input"] = json.RawMessage(`[{"role":"user","content":[{"type":"input_file","file_id":"file_foreign"}]}]`)
+		if got := call("POST", "/responses", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+			t.Fatal("implicit file search file access bypass", got.Code)
+		}
+		implicit["input"] = "continue"
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{}}})
+		for _, request := range []map[string]any{implicit, foreign} {
+			if got := call("POST", "/responses", key, request, ""); got.Code != 503 || calls.Load() != 1 {
+				t.Fatal("revoked store history dispatched", got.Code, got.Body.String())
+			}
+		}
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}})
+		delete(body, "previous_response_id")
+	}
 	body["input"], body["stream"] = json.RawMessage(history), true
 	if kind == "mcp" {
 		delete(body, "previous_response_id")
@@ -652,7 +695,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	body["type"] = "response.create"
-	if kind == "code" {
+	if kind == "code" || kind == "files" {
 		body["store"] = false
 	}
 	raw, _ := json.Marshal(body)
@@ -668,11 +711,14 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		conn.CloseNow()
 		t.Fatal("MCP headers exposed over WS")
 	}
-	codeExtra := 0
-	if kind == "code" {
+	contextExtra := 0
+	if kind == "code" || kind == "files" {
 		var event struct{ Response struct{ ID string } }
 		_ = json.Unmarshal(raw, &event)
 		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_socket"}]`)}
+		if kind == "files" {
+			delete(request, "tools")
+		}
 		next, _ := json.Marshal(request)
 		if err := conn.Write(wsCtx, websocket.MessageText, next); err != nil {
 			conn.CloseNow()
@@ -688,16 +734,16 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			conn.CloseNow()
 			t.Fatal("store=false container escaped socket context", got.Code)
 		}
-		codeExtra = 1
+		contextExtra = 1
 	}
 	conn.CloseNow()
 	delete(body, "type")
-	check(3 + codeExtra)
+	check(3 + contextExtra)
 	body["background"], body["store"] = true, true
-	if kind == "code" {
+	if kind == "code" || kind == "files" {
 		body["previous_response_id"] = first.ID
 		delete(body, "tools")
-		textOnly.Store(true) // A plain reply must retain its inherited container context.
+		textOnly.Store(true) // Plain replies must retain inherited resource grants.
 	}
 	if kind == "search" {
 		body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
@@ -732,11 +778,17 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			t.Fatal("search recovery", err)
 		}
 	}
-	check(4 + codeExtra)
+	check(4 + contextExtra)
 	if kind == "code" {
 		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
 		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
 			t.Fatal("code ownership lost across background recovery", binding, err)
+		}
+	}
+	if kind == "files" {
+		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
+		if err != nil || binding == nil || len(binding.VectorStores) != 1 || binding.VectorStores[0] != "vs_team" {
+			t.Fatal("store scope lost across background recovery", binding, err)
 		}
 	}
 	if kind == "mcp" {
@@ -756,7 +808,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("search wallet/key drift", err)
 	}
 	delete(body, "background")
-	if kind == "code" {
+	if kind == "code" || kind == "files" {
 		delete(body, "previous_response_id")
 		body["tools"] = json.RawMessage(declaration)
 		textOnly.Store(false)
@@ -767,6 +819,13 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	route := must("POST", cp+"/composite-routes", admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "openai", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
 	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})
 	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
+	if kind == "files" {
+		before := calls.Load()
+		if got := call("POST", "/responses", ckey, body, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("cross-group store access", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}, fmt.Sprint(cgid): {"vs_team"}}}})
+	}
 	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
 		t.Fatal("composite hosted search", w.Code, w.Body.String())
 	}
@@ -799,6 +858,42 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		_ = call("POST", "/responses", key, body, "code-ambiguous")
 		if calls.Load() != before+1 {
 			t.Fatal("code idempotency repeated rejected execution")
+		}
+		reject.Store(false)
+		must("PUT", "/api/v1/admin/accounts/"+fmt.Sprint(id(second)), admin, map[string]any{"status": "inactive"})
+		must("POST", ap+"/recover-state", admin, map[string]any{})
+	}
+	if kind == "files" {
+		request := map[string]any{"model": "tool-model", "previous_response_id": accepted.ID, "input": "continue"}
+		textOnly.Store(true)
+		got := call("POST", "/responses", key, request, "")
+		textOnly.Store(false)
+		if got.Code != 200 {
+			t.Fatal("file search plain continuation", got.Code, got.Body.String())
+		}
+		var continued struct{ ID string }
+		_ = json.Unmarshal(got.Body.Bytes(), &continued)
+		binding, err := fresh.previousResponse(ctx, identity, continued.ID)
+		if err != nil || binding == nil || len(binding.VectorStores) != 1 || binding.VectorStores[0] != "vs_team" {
+			t.Fatal("store scope lost across plain HTTP reply", binding, err)
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
+		before := calls.Load()
+		for _, input := range []map[string]any{body, request} {
+			if got := call("POST", "/responses", key, input, ""); got.Code != 503 || calls.Load() != before {
+				t.Fatal("store grant followed credential rotation", got.Code)
+			}
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "hosted-search-provider"}})
+		second := must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second file search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}, "extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}})
+		reject.Store(true)
+		got = call("POST", "/responses", key, body, "files-ambiguous")
+		if got.Code != 502 || calls.Load() != before+1 {
+			t.Fatal("file search retried after ambiguous rejection", got.Code, calls.Load()-before)
+		}
+		_ = call("POST", "/responses", key, body, "files-ambiguous")
+		if calls.Load() != before+1 {
+			t.Fatal("file search idempotency repeated execution")
 		}
 		reject.Store(false)
 		must("PUT", "/api/v1/admin/accounts/"+fmt.Sprint(id(second)), admin, map[string]any{"status": "inactive"})

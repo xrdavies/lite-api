@@ -119,6 +119,10 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case responseStoresKey:
+			if _, err := parseResponseStoreGrants(value); err != nil {
+				return err
+			}
 		case webSearchFeature:
 			var mode string
 			if string(value) != "true" && string(value) != "false" && (json.Unmarshal(value, &mode) != nil || mode != "default" && mode != "enabled" && mode != "disabled") {
@@ -205,6 +209,9 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 		return bad("credentials.api_key is required")
 	}
 	u := &upstreamAccount{Platform: *in.Platform, Credentials: in.Credentials}
+	if err := in.bindResponseStoreGrants(u); err != nil {
+		return err
+	}
 	if u.Platform != "anthropic" && in.Extra[webSearchFeature] != nil {
 		return bad("web_search_emulation requires an Anthropic account")
 	}
@@ -310,6 +317,9 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	oldTarget := responseTarget(u)
 	for key, value := range in.Credentials {
 		u.Credentials[key] = value
+	}
+	if err := in.bindResponseStoreGrants(u); err != nil {
+		return err
 	}
 	if len(in.Credentials) > 0 {
 		base, err := u.baseURL()

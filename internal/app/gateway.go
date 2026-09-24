@@ -428,13 +428,16 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if in.HostedSearch {
 			matches = (u.Platform == "grok" || u.Platform == "openai") && u.protocol() == "responses"
 		}
-		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools || in.NativeMCP || in.NativeCode {
+		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools || in.NativeMCP || in.NativeCode || in.NativeFileSearch {
 			matches = u.Platform == "openai" && u.protocol() == "responses"
 		}
 		if !matches {
 			continue
 		}
 		if !u.allowsOpenAIProtocol(protocol) {
+			continue
+		}
+		if !u.allowsResponseStores(g.Key.GroupID, in.VectorStores) {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
@@ -824,6 +827,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("code interpreter requires an OpenAI target"))
 		return
 	}
+	if in.NativeFileSearch && g.Group.Platform != "openai" {
+		fail(bad("file search requires an OpenAI target"))
+		return
+	}
 	if (protocol == "images" || in.ResponseImage != nil) && !g.Group.AllowImage {
 		fail(denied())
 		return
@@ -860,6 +867,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if err == nil && binding != nil && binding.CodeTool {
 		in.NativeCode = true
+	}
+	if err == nil && binding != nil {
+		in.VectorStores, err = mergeResponseStores(binding.VectorStores, in.VectorStores)
+		in.NativeFileSearch = in.NativeFileSearch || len(in.VectorStores) > 0
+	}
+	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" || in.NativeCompaction) {
+		err = bad("file search requires scoped stores and a normal Responses request")
 	}
 	if err == nil {
 		err = validateResponseContainers(in, request, binding)
@@ -1321,7 +1335,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
 		}
 		selected.Release()
-		if in.NativeMCP || in.NativeCode {
+		if in.NativeMCP || in.NativeCode || in.NativeFileSearch {
 			// A tool may already have acted before the provider returned an error.
 			fail(failure)
 			return
@@ -1825,10 +1839,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	in.NativeCode = in.NativeCode || len(observation.ResponseContainers) > 0
 	if turn := socketTurn(ctx); turn != nil {
 		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
-		if in.ResponseImage != nil || in.NativeMCP || in.NativeCode || len(observation.ResponseContainers) > 0 {
+		if in.ResponseImage != nil || in.NativeMCP || in.NativeCode || in.NativeFileSearch {
 			binding := turn.socket.responses[observation.ResponseID]
 			binding.ImageTool, binding.MCPTool = in.ResponseImage != nil, in.NativeMCP
 			binding.CodeTool, binding.Containers = in.NativeCode, observation.ResponseContainers
+			binding.VectorStores = in.VectorStores
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
@@ -1842,7 +1857,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers})
+				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers, VectorStores: in.VectorStores})
 			}
 		}
 		bindingCancel()

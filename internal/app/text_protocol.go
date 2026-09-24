@@ -31,6 +31,8 @@ type textRequest struct {
 	NativeClientTools                            bool
 	NativeMCP                                    bool
 	NativeCode                                   bool
+	NativeFileSearch                             bool
+	VectorStores                                 []string
 	ContainerReferences                          []string
 	ResponseContainers                           []string
 	ResponseImage                                *responseImageConfig

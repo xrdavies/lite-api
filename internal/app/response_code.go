@@ -101,9 +101,9 @@ func responseCodeItem(item map[string]json.RawMessage) (string, string, error) {
 }
 
 func validateResponseContainers(in textRequest, body map[string]json.RawMessage, binding *responseBinding) error {
-	if in.NativeCode {
+	if in.NativeCode || in.NativeFileSearch {
 		if in.Action != "" || in.NativeCompaction {
-			return bad("code interpreter requires a normal Responses request")
+			return bad("hosted tools require a normal Responses request")
 		}
 		var items []map[string]json.RawMessage
 		_ = json.Unmarshal(body["input"], &items)
@@ -113,7 +113,7 @@ func validateResponseContainers(in textRequest, body map[string]json.RawMessage,
 				_ = json.Unmarshal(item[field], &parts)
 				for _, part := range parts {
 					if raw := part["file_id"]; raw != nil && string(raw) != "null" {
-						return bad("code interpreter inputs require inline content or URLs; unscoped file IDs are not supported")
+						return bad("hosted tool inputs require inline content or URLs; unscoped file IDs are not supported")
 					}
 				}
 			}
