@@ -30,14 +30,14 @@ func TestResponseImages(t *testing.T) {
 			t.Fatal("image tool rejected", additional, in, err)
 		}
 	}
-	for _, option := range []string{`"partial_images":4`, `"partial_images":null`, `"output_compression":-1`, `"output_compression":1.5`, `"size":"0x1024"`, `"size":null`, `"quality":"bad"`, `"quality":"low|high"`, `"model":"a*"`, `"action":"remove"`, `"input_image_mask":{"file_id":"foreign"}`, `"input_image_mask":null`, `"api_key":"secret"`} {
+	for _, option := range []string{`"partial_images":4`, `"partial_images":null`, `"output_compression":-1`, `"output_compression":1.5`, `"size":"0x1024"`, `"size":null`, `"quality":"bad"`, `"quality":"low|high"`, `"model":"a*"`, `"action":"remove"`, `"input_image_mask":{"file_id":"../foreign"}`, `"input_image_mask":null`, `"api_key":"secret"`} {
 		if _, err := parse(`{"type":"image_generation",`+option+`}`, false); err == nil {
 			t.Fatal("invalid option accepted", option)
 		}
 	}
 	for _, raw := range []string{
 		`{"model":"m","input":"draw","tools":[{"type":"image_generation"},{"type":"image_generation"}]}`,
-		`{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"foreign"}]}],"tools":[{"type":"image_generation"}]}`,
+		`{"model":"m","input":[{"role":"user","content":[{"type":"input_image","file_id":"../foreign"}]}],"tools":[{"type":"image_generation"}]}`,
 		`{"model":"m","input":[{"type":"tool_search_output","call_id":"call_1","tools":[{"type":"image_generation"}]}]}`,
 	} {
 		var body map[string]json.RawMessage

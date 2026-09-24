@@ -40,8 +40,8 @@ func responseCodeTool(tool map[string]json.RawMessage) (string, error) {
 			}
 		case "file_ids":
 			var files []string
-			if string(raw) != "null" && (json.Unmarshal(raw, &files) != nil || len(files) != 0) {
-				return "", bad("uploaded files require scoped file ownership")
+			if string(raw) != "null" && (json.Unmarshal(raw, &files) != nil || len(files) > 100) {
+				return "", bad("invalid code interpreter file list")
 			}
 		case "network_policy":
 			var policy map[string]json.RawMessage
@@ -100,23 +100,10 @@ func responseCodeItem(item map[string]json.RawMessage) (string, string, error) {
 	return id, container, nil
 }
 
-func validateResponseContainers(in textRequest, body map[string]json.RawMessage, binding *responseBinding) error {
+func validateResponseContainers(in textRequest, binding *responseBinding) error {
 	if in.NativeCode || in.NativeFileSearch {
 		if in.Action != "" || in.NativeCompaction {
 			return bad("hosted tools require a normal Responses request")
-		}
-		var items []map[string]json.RawMessage
-		_ = json.Unmarshal(body["input"], &items)
-		for _, item := range items {
-			for _, field := range []string{"content", "output"} {
-				var parts []map[string]json.RawMessage
-				_ = json.Unmarshal(item[field], &parts)
-				for _, part := range parts {
-					if raw := part["file_id"]; raw != nil && string(raw) != "null" {
-						return bad("hosted tool inputs require inline content or URLs; unscoped file IDs are not supported")
-					}
-				}
-			}
 		}
 	}
 	for _, id := range in.ContainerReferences {

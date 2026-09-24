@@ -39,8 +39,8 @@ func validateComputerItem(item map[string]json.RawMessage) error {
 			switch field {
 			case "type", "image_url":
 			case "file_id":
-				if string(raw) != "null" {
-					return bad("computer screenshots require an image URL or data URL, not a shared file ID")
+				if string(raw) != "null" && !validResponseID(credentialString(output, "file_id")) {
+					return bad("invalid screenshot file ID")
 				}
 			case "detail":
 				switch credentialString(output, field) {
@@ -52,8 +52,10 @@ func validateComputerItem(item map[string]json.RawMessage) error {
 				return bad("unsupported screenshot option")
 			}
 		}
-		if _, err := anthropicMediaSource(credentialString(output, "image_url"), true); err != nil {
-			return err
+		if credentialString(output, "file_id") == "" {
+			if _, err := anthropicMediaSource(credentialString(output, "image_url"), true); err != nil {
+				return err
+			}
 		}
 	} else {
 		var actions []map[string]json.RawMessage

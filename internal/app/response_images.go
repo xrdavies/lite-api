@@ -60,8 +60,8 @@ func parseResponseImageTool(tool map[string]json.RawMessage) (*responseImageConf
 			continue
 		case "input_image_mask":
 			var mask map[string]json.RawMessage
-			if json.Unmarshal(raw, &mask) != nil || len(mask) != 1 || !validImageSource(credentialString(mask, "image_url")) {
-				return nil, bad("image mask requires image_url; unscoped file IDs are not supported")
+			if json.Unmarshal(raw, &mask) != nil || len(mask) != 1 || (!validImageSource(credentialString(mask, "image_url")) && !validResponseID(credentialString(mask, "file_id"))) {
+				return nil, bad("image mask requires an image URL or file ID")
 			}
 			continue
 		default:

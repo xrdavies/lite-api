@@ -190,7 +190,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			if err != nil {
 				return in, err
 			}
-			in.VectorStores, err = mergeResponseStores(in.VectorStores, ids)
+			in.VectorStores, err = mergeResponseResources(in.VectorStores, ids)
 			if err != nil {
 				return in, err
 			}
@@ -253,24 +253,15 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
-	if in.ResponseImage != nil {
-		var items []map[string]json.RawMessage
-		_ = json.Unmarshal(body["input"], &items)
-		for _, item := range items {
-			var content []map[string]json.RawMessage
-			_ = json.Unmarshal(item["content"], &content)
-			for _, part := range content {
-				if part["file_id"] != nil && string(part["file_id"]) != "null" {
-					return in, bad("media inputs require inline content or URLs; unscoped file IDs are not supported")
-				}
-			}
-		}
+	in.FileIDs, err = requestFileIDs(body, tools, "responses")
+	if err != nil {
+		return in, err
 	}
 	if in.Background && in.NativeCompaction {
 		return in, bad("native compaction cannot run in the background")
 	}
 	// Container ownership is checked after resolving response/item affinity.
-	if err := validateResponseContainers(textRequest{NativeCode: in.NativeCode, NativeFileSearch: in.NativeFileSearch}, body, nil); err != nil {
+	if err := validateResponseContainers(textRequest{NativeCode: in.NativeCode, NativeFileSearch: in.NativeFileSearch}, nil); err != nil {
 		return in, err
 	}
 	return in, nil
@@ -440,6 +431,7 @@ type responseBinding struct {
 	MCPTool      bool     `json:",omitempty"`
 	CodeTool     bool     `json:",omitempty"`
 	Containers   []string `json:",omitempty"`
+	FileIDs      []string `json:",omitempty"`
 	VectorStores []string `json:",omitempty"`
 	History      string   `json:",omitempty"`
 	Items        []string `json:",omitempty"`
@@ -484,7 +476,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores, FileIDs: binding.FileIDs})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -577,8 +569,13 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 		codeTool := source.CodeTool || binding != nil && binding.CodeTool
 		containers := source.Containers
 		stores := source.VectorStores
+		files := source.FileIDs
 		if binding != nil {
-			stores, err = mergeResponseStores(binding.VectorStores, stores)
+			files, err = mergeResponseResources(binding.FileIDs, files)
+			if err != nil {
+				return nil, err
+			}
+			stores, err = mergeResponseResources(binding.VectorStores, stores)
 			if err != nil {
 				return nil, err
 			}
@@ -587,7 +584,7 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 				return nil, err
 			}
 		}
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores}
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files}
 	}
 	return binding, nil
 }

@@ -33,6 +33,7 @@ type textRequest struct {
 	NativeCode                                   bool
 	NativeFileSearch                             bool
 	VectorStores                                 []string
+	FileIDs                                      []string
 	ContainerReferences                          []string
 	ResponseContainers                           []string
 	ResponseImage                                *responseImageConfig
@@ -290,6 +291,13 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	var messages []json.RawMessage
 	if json.Unmarshal(body["messages"], &messages) != nil || len(messages) == 0 {
 		return in, bad("messages are required")
+	}
+	if protocol == "chat_completions" {
+		var err error
+		in.FileIDs, err = requestFileIDs(body, nil, protocol)
+		if err != nil {
+			return in, err
+		}
 	}
 	return in, nil
 }

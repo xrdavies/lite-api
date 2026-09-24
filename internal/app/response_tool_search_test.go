@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "files"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "files", "uploads"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -427,9 +427,18 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		declaration, output, history, marker, toolMarker = nativeCodeTools, nativeCodeCalls, nativeCodeCalls, `"type":"code_interpreter_call"`, `"memory_limit":"4g"`
 		ip = "192.0.2.186:1234"
 	}
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		declaration, output, history, marker, toolMarker = nativeFileTools, nativeFileCalls, nativeFileCalls, `"type":"file_search_call"`, `"vector_store_ids":["vs_team"]`
 		ip = "192.0.2.187:1234"
+	}
+	grantKey, resourceID := responseStoresKey, "vs_team"
+	if kind == "uploads" {
+		declaration = `[]`
+		output = `[{"type":"message","id":"msg_uploaded","role":"assistant","content":[{"type":"output_text","text":"Read the file.","annotations":[]}]}]`
+		history = `[{"type":"item_reference","id":"msg_uploaded"}]`
+		marker, toolMarker = `"text":"Read the file."`, `[]`
+		grantKey, resourceID = responseFilesKey, "file_team"
+		ip = "192.0.2.188:1234"
 	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
@@ -491,6 +500,12 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			t.Error("search JSON request")
 			return
 		}
+		if kind == "uploads" && r.URL.Path == "/v1/chat/completions" {
+			calls.Add(1)
+			received.Store(body)
+			fmt.Fprint(w, `{"id":"chat_file","object":"chat.completion","model":"native-tool","choices":[{"index":0,"message":{"role":"assistant","content":"Read the file."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":4}}}`)
+			return
+		}
 		if r.URL.Path != "/v1/responses" || credentialString(body, "model") != "native-tool" {
 			t.Error("search native routing")
 		}
@@ -502,6 +517,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			return
 		}
 		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, output, responseUsage)
+		if kind == "uploads" && n > 1 {
+			response = strings.ReplaceAll(response, `"msg_uploaded"`, fmt.Sprintf(`"msg_uploaded_%d"`, n))
+		}
 		if kind == "code" && conn != nil {
 			response = strings.ReplaceAll(strings.ReplaceAll(response, "ci_team", "ci_socket"), "cntr_team", "cntr_socket")
 		}
@@ -542,7 +560,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
 				t.Error(err)
 			}
-			if kind == "code" || kind == "files" {
+			if kind == "code" || kind == "files" || kind == "uploads" {
 				_, next, err := conn.Read(r.Context())
 				if err != nil || kind == "code" && !bytes.Contains(next, []byte(`"container":"cntr_socket"`)) || !bytes.Contains(next, []byte(`"store":false`)) {
 					t.Error("socket container continuation", err, string(next))
@@ -564,18 +582,25 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(declaration)}
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		body["include"] = []string{"file_search_call.results"}
+		if kind == "uploads" {
+			delete(body, "include")
+			body["input"] = json.RawMessage(`[{"role":"user","content":[{"type":"input_file","file_id":"file_team"}]}]`)
+		}
 		before := calls.Load()
 		if got := call("POST", "/responses", key, body, ""); got.Code != 503 || calls.Load() != before {
 			t.Fatal("ungranted store dispatched", got.Code)
 		}
-		grants := map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}
+		grants := map[string]any{grantKey: map[string][]string{fmt.Sprint(gid): {resourceID}}}
 		if got := call("PUT", ap, user, map[string]any{"extra": grants}, ""); got.Code != 403 {
 			t.Fatal("user changed store grants", got.Code)
 		}
 		must("PUT", ap, admin, map[string]any{"extra": grants})
 		unknown := map[string]any{"model": "tool-model", "input": "read", "tools": json.RawMessage(`[{"type":"file_search","vector_store_ids":["vs_foreign"]}]`)}
+		if kind == "uploads" {
+			unknown = map[string]any{"model": "tool-model", "input": json.RawMessage(`[{"role":"user","content":[{"type":"input_file","file_id":"file_foreign"}]}]`)}
+		}
 		if got := call("POST", "/responses", key, unknown, ""); got.Code != 503 || calls.Load() != before {
 			t.Fatal("foreign store dispatched", got.Code)
 		}
@@ -622,7 +647,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			}
 		}
 		implicit := map[string]any{"model": "tool-model", "previous_response_id": first.ID, "input": []any{map[string]any{"role": "user", "content": []any{map[string]string{"type": "input_file", "file_id": "foreign"}}}}}
-		if got := call("POST", "/responses", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+		if got := call("POST", "/responses", key, implicit, ""); got.Code != 503 || calls.Load() != 1 {
 			t.Fatal("implicit code file access bypass", got.Code, got.Body.String())
 		}
 		implicit["input"] = "continue"
@@ -635,27 +660,29 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 		delete(body, "previous_response_id") // Owned item IDs alone must select the original source.
 	}
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		foreign := map[string]any{"model": "tool-model", "input": json.RawMessage(history)}
 		if got := call("POST", "/responses", other, foreign, ""); got.Code != 404 || calls.Load() != 1 {
 			t.Fatal("foreign file search history dispatched", got.Code)
 		}
 		implicit := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
-		if got := call("POST", "/responses/compact", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
-			t.Fatal("implicit file search compaction dispatched", got.Code)
+		if kind == "files" {
+			if got := call("POST", "/responses/compact", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+				t.Fatal("implicit file search compaction dispatched", got.Code)
+			}
 		}
 		implicit["input"] = json.RawMessage(`[{"role":"user","content":[{"type":"input_file","file_id":"file_foreign"}]}]`)
-		if got := call("POST", "/responses", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+		if got := call("POST", "/responses", key, implicit, ""); got.Code != 503 || calls.Load() != 1 {
 			t.Fatal("implicit file search file access bypass", got.Code)
 		}
 		implicit["input"] = "continue"
-		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{}}})
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{grantKey: map[string][]string{}}})
 		for _, request := range []map[string]any{implicit, foreign} {
 			if got := call("POST", "/responses", key, request, ""); got.Code != 503 || calls.Load() != 1 {
 				t.Fatal("revoked store history dispatched", got.Code, got.Body.String())
 			}
 		}
-		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}})
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{grantKey: map[string][]string{fmt.Sprint(gid): {resourceID}}}})
 		delete(body, "previous_response_id")
 	}
 	body["input"], body["stream"] = json.RawMessage(history), true
@@ -685,6 +712,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	delete(body, "stream")
 	body["input"] = "continue"
 	body["tools"] = json.RawMessage(declaration)
+	if kind == "uploads" {
+		body["input"] = json.RawMessage(`[{"role":"user","content":[{"type":"input_image","file_id":"file_team"}]}]`)
+	}
 	// Both WebSocket and background execution retain native semantics and pricing.
 	server := httptest.NewServer(a.Handler())
 	defer server.Close()
@@ -695,7 +725,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	body["type"] = "response.create"
-	if kind == "code" || kind == "files" {
+	if kind == "code" || kind == "files" || kind == "uploads" {
 		body["store"] = false
 	}
 	raw, _ := json.Marshal(body)
@@ -712,11 +742,11 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("MCP headers exposed over WS")
 	}
 	contextExtra := 0
-	if kind == "code" || kind == "files" {
+	if kind == "code" || kind == "files" || kind == "uploads" {
 		var event struct{ Response struct{ ID string } }
 		_ = json.Unmarshal(raw, &event)
 		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_socket"}]`)}
-		if kind == "files" {
+		if kind == "files" || kind == "uploads" {
 			delete(request, "tools")
 		}
 		next, _ := json.Marshal(request)
@@ -740,7 +770,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	delete(body, "type")
 	check(3 + contextExtra)
 	body["background"], body["store"] = true, true
-	if kind == "code" || kind == "files" {
+	if kind == "code" || kind == "files" || kind == "uploads" {
 		body["previous_response_id"] = first.ID
 		delete(body, "tools")
 		textOnly.Store(true) // Plain replies must retain inherited resource grants.
@@ -757,6 +787,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	taskID, err := a.Redis.Get(ctx, backgroundIndex(identity, accepted.ID)).Result()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if kind == "uploads" {
+		// Removing future access must not lose consumption already accepted upstream.
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseFilesKey: map[string][]string{}}})
 	}
 	must("PUT", gp, admin, map[string]any{"rate_multiplier": 9})
 	if _, err = a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_hosted_tool_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID"); err != nil {
@@ -785,9 +819,16 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			t.Fatal("code ownership lost across background recovery", binding, err)
 		}
 	}
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
-		if err != nil || binding == nil || len(binding.VectorStores) != 1 || binding.VectorStores[0] != "vs_team" {
+		var resources []string
+		if binding != nil {
+			resources = binding.VectorStores
+			if kind == "uploads" {
+				resources = binding.FileIDs
+			}
+		}
+		if err != nil || len(resources) != 1 || resources[0] != resourceID {
 			t.Fatal("store scope lost across background recovery", binding, err)
 		}
 	}
@@ -808,10 +849,13 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("search wallet/key drift", err)
 	}
 	delete(body, "background")
-	if kind == "code" || kind == "files" {
+	if kind == "code" || kind == "files" || kind == "uploads" {
 		delete(body, "previous_response_id")
 		body["tools"] = json.RawMessage(declaration)
 		textOnly.Store(false)
+		if kind == "uploads" {
+			body["input"] = json.RawMessage(`[{"role":"user","content":[{"type":"input_file","file_id":"file_team"}]}]`)
+		}
 	}
 	// Composite admission uses the resolved provider, not the public model name.
 	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Composite " + name, "platform": "composite", "model_pricing": prices}))
@@ -819,12 +863,12 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	route := must("POST", cp+"/composite-routes", admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "openai", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
 	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})
 	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		before := calls.Load()
 		if got := call("POST", "/responses", ckey, body, ""); got.Code != 503 || calls.Load() != before {
 			t.Fatal("cross-group store access", got.Code)
 		}
-		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}, fmt.Sprint(cgid): {"vs_team"}}}})
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{grantKey: map[string][]string{fmt.Sprint(gid): {resourceID}, fmt.Sprint(cgid): {resourceID}}}})
 	}
 	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
 		t.Fatal("composite hosted search", w.Code, w.Body.String())
@@ -863,7 +907,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		must("PUT", "/api/v1/admin/accounts/"+fmt.Sprint(id(second)), admin, map[string]any{"status": "inactive"})
 		must("POST", ap+"/recover-state", admin, map[string]any{})
 	}
-	if kind == "files" {
+	if kind == "files" || kind == "uploads" {
 		request := map[string]any{"model": "tool-model", "previous_response_id": accepted.ID, "input": "continue"}
 		textOnly.Store(true)
 		got := call("POST", "/responses", key, request, "")
@@ -874,7 +918,14 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		var continued struct{ ID string }
 		_ = json.Unmarshal(got.Body.Bytes(), &continued)
 		binding, err := fresh.previousResponse(ctx, identity, continued.ID)
-		if err != nil || binding == nil || len(binding.VectorStores) != 1 || binding.VectorStores[0] != "vs_team" {
+		var resources []string
+		if binding != nil {
+			resources = binding.VectorStores
+			if kind == "uploads" {
+				resources = binding.FileIDs
+			}
+		}
+		if err != nil || len(resources) != 1 || resources[0] != resourceID {
 			t.Fatal("store scope lost across plain HTTP reply", binding, err)
 		}
 		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
@@ -885,7 +936,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			}
 		}
 		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "hosted-search-provider"}})
-		second := must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second file search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}, "extra": map[string]any{responseStoresKey: map[string][]string{fmt.Sprint(gid): {"vs_team"}}}})
+		second := must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second file search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}, "extra": map[string]any{grantKey: map[string][]string{fmt.Sprint(gid): {resourceID}}}})
 		reject.Store(true)
 		got = call("POST", "/responses", key, body, "files-ambiguous")
 		if got.Code != 502 || calls.Load() != before+1 {
@@ -962,9 +1013,61 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			t.Fatal(err)
 		}
 	}
+	if kind == "uploads" {
+		requests := []map[string]any{
+			{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(`[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]`)},
+			{"model": "tool-model", "input": json.RawMessage(`[{"type":"custom_tool_call_output","call_id":"c","output":[{"type":"input_file","file_id":"file_team"}]}]`)},
+			{"model": "tool-model", "input": json.RawMessage(`[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"file_team"}}]`)},
+			{"model": "tool-model", "prompt": json.RawMessage(`{"id":"pmpt_team","variables":{"doc":{"type":"input_file","file_id":"file_team"}}}`)},
+		}
+		for _, request := range requests {
+			raw, _ := json.Marshal(request)
+			var foreign map[string]any
+			_ = json.Unmarshal(bytes.ReplaceAll(raw, []byte("file_team"), []byte("file_foreign")), &foreign)
+			before := calls.Load()
+			if got := call("POST", "/responses", key, foreign, ""); got.Code != 503 || calls.Load() != before {
+				t.Fatal("ungranted tool or prompt file dispatched", got.Code)
+			}
+			got := call("POST", "/responses", key, request, "")
+			wire, _ := json.Marshal(received.Load())
+			if got.Code != 200 || calls.Load() != before+1 || !bytes.Contains(wire, []byte("file_team")) {
+				t.Fatal("authorized file tool input", got.Code, got.Body.String())
+			}
+			var response struct{ ID string }
+			_ = json.Unmarshal(got.Body.Bytes(), &response)
+			binding, err := a.previousResponse(ctx, identity, response.ID)
+			if err != nil || binding == nil || len(binding.FileIDs) != 1 || binding.FileIDs[0] != "file_team" {
+				t.Fatal("tool or prompt file scope not retained", binding, err)
+			}
+		}
+		chat := map[string]any{"model": "tool-model", "messages": json.RawMessage(`[{"role":"user","content":[{"type":"file","file":{"file_id":"file_team"}}]}]`)}
+		if got := call("POST", "/v1/chat/completions", key, chat, ""); got.Code != 200 || !bytes.Contains(received.Load().(map[string]json.RawMessage)["input"], []byte("file_team")) {
+			t.Fatal("Chat file converted to Responses", got.Code, got.Body.String())
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "chat_completions"}})
+		before := calls.Load()
+		if got := call("POST", "/v1/chat/completions", key, chat, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("file grant reused after protocol change", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseFilesKey: map[string][]string{fmt.Sprint(gid): {"file_team"}}}})
+		if got := call("POST", "/v1/chat/completions", key, chat, ""); got.Code != 200 || !bytes.Contains(received.Load().(map[string]json.RawMessage)["messages"], []byte("file_team")) {
+			t.Fatal("native Chat file authorization", got.Code, got.Body.String())
+		}
+		before = calls.Load()
+		foreignChat := map[string]any{"model": "tool-model", "messages": json.RawMessage(`[{"role":"user","content":[{"type":"file","file":{"file_id":"file_foreign"}}]}]`)}
+		if got := call("POST", "/v1/chat/completions", key, foreignChat, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("native Chat bypassed file authorization", got.Code)
+		}
+		// Even a valid grant cannot make Responses resource IDs convertible to Chat.
+		if got := call("POST", "/responses", key, body, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("authorized Responses file converted to Chat", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "responses"}})
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseFilesKey: map[string][]string{fmt.Sprint(gid): {"file_team"}, fmt.Sprint(cgid): {"file_team"}}}})
+	}
 	before = calls.Load()
 	must("PUT", cp+"/composite-routes/"+fmt.Sprint(id(route)), admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "grok", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
-	if w = call("POST", "/responses", ckey, body, ""); w.Code != 400 {
+	if w = call("POST", "/responses", ckey, body, ""); w.Code != 400 && !(kind == "uploads" && w.Code == 503) {
 		t.Fatal("hosted discovery routed to Grok", w.Code)
 	}
 	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "chat_completions"}})

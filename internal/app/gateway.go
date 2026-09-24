@@ -431,13 +431,16 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools || in.NativeMCP || in.NativeCode || in.NativeFileSearch {
 			matches = u.Platform == "openai" && u.protocol() == "responses"
 		}
+		if len(in.FileIDs) > 0 {
+			matches = matches && u.Platform == "openai" && (u.protocol() == "responses" || protocol == "chat_completions" && u.protocol() == "chat_completions")
+		}
 		if !matches {
 			continue
 		}
 		if !u.allowsOpenAIProtocol(protocol) {
 			continue
 		}
-		if !u.allowsResponseStores(g.Key.GroupID, in.VectorStores) {
+		if !u.allowsResponseResources(responseStoresKey, g.Key.GroupID, in.VectorStores) || !u.allowsResponseResources(responseFilesKey, g.Key.GroupID, in.FileIDs) {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
@@ -869,14 +872,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		in.NativeCode = true
 	}
 	if err == nil && binding != nil {
-		in.VectorStores, err = mergeResponseStores(binding.VectorStores, in.VectorStores)
+		in.FileIDs, err = mergeResponseResources(binding.FileIDs, in.FileIDs)
+		if err == nil {
+			in.VectorStores, err = mergeResponseResources(binding.VectorStores, in.VectorStores)
+		}
 		in.NativeFileSearch = in.NativeFileSearch || len(in.VectorStores) > 0
 	}
 	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" || in.NativeCompaction) {
 		err = bad("file search requires scoped stores and a normal Responses request")
 	}
 	if err == nil {
-		err = validateResponseContainers(in, request, binding)
+		err = validateResponseContainers(in, binding)
 	}
 	if err == nil && binding != nil {
 		in.ResponseContainers = binding.Containers
@@ -1335,7 +1341,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
 		}
 		selected.Release()
-		if in.NativeMCP || in.NativeCode || in.NativeFileSearch {
+		if in.NativeMCP || in.NativeCode || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			// A tool may already have acted before the provider returned an error.
 			fail(failure)
 			return
@@ -1839,11 +1845,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	in.NativeCode = in.NativeCode || len(observation.ResponseContainers) > 0
 	if turn := socketTurn(ctx); turn != nil {
 		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
-		if in.ResponseImage != nil || in.NativeMCP || in.NativeCode || in.NativeFileSearch {
+		if in.ResponseImage != nil || in.NativeMCP || in.NativeCode || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			binding := turn.socket.responses[observation.ResponseID]
 			binding.ImageTool, binding.MCPTool = in.ResponseImage != nil, in.NativeMCP
 			binding.CodeTool, binding.Containers = in.NativeCode, observation.ResponseContainers
-			binding.VectorStores = in.VectorStores
+			binding.VectorStores, binding.FileIDs = in.VectorStores, in.FileIDs
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
@@ -1857,7 +1863,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers, VectorStores: in.VectorStores})
+				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers, VectorStores: in.VectorStores, FileIDs: in.FileIDs})
 			}
 		}
 		bindingCancel()

@@ -45,7 +45,7 @@ func TestResponseCode(t *testing.T) {
 	for _, tool := range []string{
 		`{"type":"code_interpreter"}`, `{"type":"code_interpreter","container":null}`,
 		`{"type":"code_interpreter","container":"../foreign"}`,
-		`{"type":"code_interpreter","container":{"type":"auto","file_ids":["foreign"]}}`,
+		`{"type":"code_interpreter","container":{"type":"auto","file_ids":["../foreign"]}}`,
 		`{"type":"code_interpreter","container":{"type":"auto","memory_limit":"2g"}}`,
 		`{"type":"code_interpreter","container":{"type":"auto","network_policy":{"type":"allowlist","allowed_domains":["example.test"]}}}`,
 		`{"type":"code_interpreter","container":{"type":"auto"},"allowed_callers":["programmatic"]}`,
@@ -60,22 +60,22 @@ func TestResponseCode(t *testing.T) {
 		`{"input":[{"type":"code_interpreter_call","id":"c","container_id":"cntr","status":"invalid"}]}`,
 		`{"input":[{"type":"code_interpreter_call","id":"c","container_id":"cntr","status":"completed","outputs":[{"type":"logs","logs":null}]}]}`,
 		`{"input":[{"type":"code_interpreter_call","id":"c","container_id":"cntr","status":"completed","file_ids":["foreign"]}]}`,
-		`{"tools":` + nativeCodeTools + `,"input":[{"role":"user","content":[{"type":"input_file","file_id":"foreign"}]}]}`,
-		`{"tools":` + nativeCodeTools + `,"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_file","file_id":"foreign"}]}]}`,
+		`{"tools":` + nativeCodeTools + `,"input":[{"role":"user","content":[{"type":"input_file","file_id":"../foreign"}]}]}`,
+		`{"tools":` + nativeCodeTools + `,"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_file","file_id":"../foreign"}]}]}`,
 	} {
 		if _, _, err := parse(raw); err == nil {
 			t.Fatal("invalid code interpreter history accepted", raw)
 		}
 	}
-	in, body, err := parse(`{"input":` + nativeCodeCalls + `}`)
+	in, _, err := parse(`{"input":` + nativeCodeCalls + `}`)
 	if err != nil || !slices.Equal(in.ItemReferences, []string{"ci_team"}) || !slices.Equal(in.ContainerReferences, []string{"cntr_team"}) {
 		t.Fatal("code history lost ownership references", in, err)
 	}
-	if validateResponseContainers(in, body, nil) == nil || validateResponseContainers(in, body, &responseBinding{Containers: []string{"foreign"}}) == nil || validateResponseContainers(in, body, &responseBinding{Containers: []string{"cntr_team"}}) != nil {
+	if validateResponseContainers(in, nil) == nil || validateResponseContainers(in, &responseBinding{Containers: []string{"foreign"}}) == nil || validateResponseContainers(in, &responseBinding{Containers: []string{"cntr_team"}}) != nil {
 		t.Fatal("code container ownership gate")
 	}
 	for _, action := range []string{"/compact", "/input_tokens"} {
-		if validateResponseContainers(textRequest{NativeCode: true, Action: action}, nil, nil) == nil {
+		if validateResponseContainers(textRequest{NativeCode: true, Action: action}, nil) == nil {
 			t.Fatal("implicit code history bypassed action restrictions")
 		}
 	}

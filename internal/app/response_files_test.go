@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -82,8 +83,8 @@ func TestResponseFileSearch(t *testing.T) {
 		`[{"role":"user","content":[{"type":"input_file","file_id":"file_foreign"}]}]`,
 		`[{"type":"function_call_output","call_id":"c","output":[{"type":"input_file","file_id":"file_foreign"}]}]`,
 	} {
-		if _, _, err := parse(`{"tools":` + nativeFileTools + `,"input":` + input + `}`); err == nil {
-			t.Fatal("file search grant authorized a shared file ID", input)
+		if in, _, err := parse(`{"tools":` + nativeFileTools + `,"input":` + input + `}`); err != nil || !slices.Equal(in.FileIDs, []string{"file_foreign"}) {
+			t.Fatal("file search input lost separate file authorization", input, err)
 		}
 	}
 	filter := `{"type":"eq","key":"k","value":"v"}`
@@ -93,21 +94,88 @@ func TestResponseFileSearch(t *testing.T) {
 		t.Fatal("unbounded filter depth")
 	}
 	for _, raw := range []string{`null`, `[]`, `{"0":["vs_team"]}`, `{"01":["vs_team"]}`, `{"1":["vs_team","vs_team"]}`, `{"1":["../other"]}`} {
-		if _, err := parseResponseStoreGrants(json.RawMessage(raw)); err == nil {
+		if _, err := parseResponseResourceGrants(json.RawMessage(raw)); err == nil {
 			t.Fatal("invalid store grant", raw)
 		}
 	}
 	u := &upstreamAccount{Platform: "openai", Credentials: map[string]json.RawMessage{"api_key": json.RawMessage(`"source"`), "api_protocol": json.RawMessage(`"responses"`)}}
 	input := accountInput{Extra: map[string]json.RawMessage{responseStoresKey: json.RawMessage(`{"1":["vs_team"]}`)}}
-	if err := input.bindResponseStoreGrants(u); err != nil {
+	if err := input.bindResponseResourceGrants(u); err != nil {
 		t.Fatal(err)
 	}
 	u.Extra = input.Extra
-	if !u.allowsResponseStores(1, []string{"vs_team"}) || u.allowsResponseStores(2, []string{"vs_team"}) || u.allowsResponseStores(1, []string{"vs_foreign"}) {
+	if !u.allowsResponseResources(responseStoresKey, 1, []string{"vs_team"}) || u.allowsResponseResources(responseStoresKey, 2, []string{"vs_team"}) || u.allowsResponseResources(responseStoresKey, 1, []string{"vs_foreign"}) {
 		t.Fatal("store group authorization")
 	}
 	u.Credentials["api_key"] = json.RawMessage(`"rotated"`)
-	if u.allowsResponseStores(1, []string{"vs_team"}) {
+	if u.allowsResponseResources(responseStoresKey, 1, []string{"vs_team"}) {
 		t.Fatal("store grant followed credential rotation")
+	}
+}
+
+func TestRequestFileGrants(t *testing.T) {
+	for _, tc := range []struct{ protocol, raw string }{
+		{"responses", `{"input":[{"role":"user","content":[{"type":"input_file","file_id":"file_team"},{"type":"input_image","file_id":"file_team"}]}]}`},
+		{"responses", `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_file","file_id":"file_team"}]}]}`},
+		{"responses", `{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"file_team"}}]}`},
+		{"responses", `{"input":"calculate","tools":[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]}`},
+		{"responses", `{"input":"draw","tools":[{"type":"image_generation","input_image_mask":{"file_id":"file_team"}}]}`},
+		{"responses", `{"input":[{"type":"additional_tools","tools":[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]}]}`},
+		{"responses", `{"prompt":{"id":"pmpt_team","variables":{"doc":{"type":"input_file","file_id":"file_team"}}}}`},
+		{"chat_completions", `{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file_team"}}]}]}`},
+	} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(tc.raw), &body)
+		body["model"] = json.RawMessage(`"model"`)
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), tc.protocol, body)
+		if err != nil || !slices.Equal(in.FileIDs, []string{"file_team"}) {
+			t.Fatal("file ID bypass or supported input rejected", tc.raw, in.FileIDs, err)
+		}
+	}
+	for _, input := range []string{
+		`[{"role":"user","content":[{"type":"input_file","file_id":"../file"}]}]`,
+		`[{"role":"user","content":[{"type":"input_file","file_id":42}]}]`,
+		`[{"role":"user","content":[{"type":"input_file","file_id":"file_team","file_data":"YQ=="}]}]`,
+		`[{"type":"computer_call_output","output":{"type":"computer_screenshot","file_id":"file_team","image_url":"https://example.test/i.png"}}]`,
+	} {
+		if _, err := requestFileIDs(map[string]json.RawMessage{"input": json.RawMessage(input)}, nil, "responses"); err == nil {
+			t.Fatal("invalid or ambiguous file reference", input)
+		}
+	}
+	body := map[string]json.RawMessage{"input": json.RawMessage(`[{"type":"function_call","arguments":"{\"file_id\":\"untrusted\"}"},{"type":"file_search_call","results":[{"file_id":"cited_only"}]},{"type":"message","content":[{"type":"output_text","text":"file_id","annotations":[{"file_id":"cited_only"}]}]}]`)}
+	if ids, err := requestFileIDs(body, nil, "responses"); err != nil || len(ids) != 0 {
+		t.Fatal("citations or user data granted file access", ids, err)
+	}
+	u := &upstreamAccount{Platform: "openai", Credentials: map[string]json.RawMessage{"api_key": json.RawMessage(`"file-source"`), "api_protocol": json.RawMessage(`"responses"`)}}
+	in := accountInput{Extra: map[string]json.RawMessage{responseFilesKey: json.RawMessage(`{"1":["file_team"]}`)}}
+	if err := in.bindResponseResourceGrants(u); err != nil {
+		t.Fatal(err)
+	}
+	u.Extra = in.Extra
+	if !u.allowsResponseResources(responseFilesKey, 1, []string{"file_team"}) || u.allowsResponseResources(responseStoresKey, 1, []string{"file_team"}) || u.allowsResponseResources(responseFilesKey, 2, []string{"file_team"}) {
+		t.Fatal("resource authorization escaped its kind or group")
+	}
+	u.Credentials["api_protocol"] = json.RawMessage(`"chat_completions"`)
+	if u.allowsResponseResources(responseFilesKey, 1, []string{"file_team"}) {
+		t.Fatal("file grant followed protocol rotation")
+	}
+	var parts []map[string]string
+	for i := 0; i < 101; i++ {
+		parts = append(parts, map[string]string{"type": "input_file", "file_id": fmt.Sprintf("file_%03d", i)})
+	}
+	input, _ := json.Marshal([]any{map[string]any{"role": "user", "content": parts[:100]}})
+	ids, err := requestFileIDs(map[string]json.RawMessage{"input": input}, nil, "responses")
+	if err != nil || len(ids) != 100 {
+		t.Fatal("maximum file input rejected", len(ids), err)
+	}
+	if _, err = mergeResponseResources(ids, []string{"file_000"}); err != nil {
+		t.Fatal("repeated file reference counted twice", err)
+	}
+	if _, err = mergeResponseResources(ids, []string{"file_100"}); err == nil {
+		t.Fatal("continuation exceeded file limit")
+	}
+	input, _ = json.Marshal([]any{map[string]any{"role": "user", "content": parts}})
+	if _, err = requestFileIDs(map[string]json.RawMessage{"input": input}, nil, "responses"); err == nil {
+		t.Fatal("request exceeded file limit")
 	}
 }

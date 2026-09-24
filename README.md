@@ -205,7 +205,7 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 删除前持久保存意图，立即阻断该响应的读取、取消、续接和已知输出条目引用，包括 WebSocket 本地关联。上游结果不明确时保留无期限记录，重复 DELETE 向原来源核实；有效成功回执或上游 404 确认后，清除后台结果与响应关联，拒绝标记保留 30 天，重复 DELETE 直接返回成功。延迟写入不能恢复已删除关联或后台任务。此操作不清除创建请求的独立幂等响应缓存，仍按原 24 小时规则重放；已知 ID 的新续接被拒绝。在途请求不强制终止。普通 `store=false` 或协议转换响应不提供原生删除，后台临时结果可在本地归属有效期内删除。当前通过本地协议及 Docker 数据库验证，真实供应商删除联调仍待完成。
 
-`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation 及共享文件生命周期仍待对应归属实现；文件搜索、Code Interpreter 与 OpenAI/Grok 托管网页搜索见下文。
+`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation 仍待对应归属实现；文件搜索、上传文件引用、Code Interpreter 与 OpenAI/Grok 托管网页搜索见下文。
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。
 
@@ -213,15 +213,15 @@ OpenAI 类型的原生 Responses 账号支持客户端执行的 `apply_patch`、
 
 这些工具支持 HTTP JSON/SSE、WebSocket、后台响应和指向 OpenAI 的 composite 路由，复用模型 token 计费、当前 Key 续接和故障恢复；不转换为 Chat/Messages/Gemini 函数。`allowed_callers` 仅允许 direct；托管容器、programmatic 调用和通过工具发现注入这些专用工具当前拒绝。输入限 4 MiB；本地 skills 最多 128 项，客户端自行执行和控制权限。原生流可在扣费前返回工具增量或调用项，客户端须等 `response.completed` / `response.incomplete` 后执行；终态等待结算，失败不发布成功标记。当前为本地协议及数据库验证，真实供应商能力取决于具体模型和账号。
 
-同一原生链路支持 `{"type":"computer"}` 和旧版 `computer_use_preview`（需提供正数 display_width/display_height 及 windows/mac/linux/ubuntu/browser 环境）。`computer_call` 的单个 `action` 或批量 `actions`、`pending_safety_checks` 原样返回，客户端提交 `computer_call_output` 截图和自行确认的 `acknowledged_safety_checks`；网关不生成确认、不操作浏览器或桌面。截图接受 HTTP(S) URL 或 PNG/JPEG/GIF/WebP base64 data URL，可带 detail=auto/low/high/original；不读取本地路径、不拉取截图，未建立归属的上游 file_id 拒绝。协议依据 [OpenAI Computer use](https://developers.openai.com/api/docs/guides/tools-computer-use)。
+同一原生链路支持 `{"type":"computer"}` 和旧版 `computer_use_preview`（需提供正数 display_width/display_height 及 windows/mac/linux/ubuntu/browser 环境）。`computer_call` 的单个 `action` 或批量 `actions`、`pending_safety_checks` 原样返回，客户端提交 `computer_call_output` 截图和自行确认的 `acknowledged_safety_checks`；网关不生成确认、不操作浏览器或桌面。截图接受 HTTP(S) URL、PNG/JPEG/GIF/WebP base64 data URL 或管理员授权的上游 file_id，可带 detail=auto/low/high/original；不读取本地路径或拉取截图。协议依据 [OpenAI Computer use](https://developers.openai.com/api/docs/guides/tools-computer-use)。
 
-Computer 声明及完整调用/结果历史均要求 OpenAI 原生 Responses 账号，支持三前缀、JSON/SSE、WebSocket、后台恢复及 composite；历史单独提交也不能绕过平台限制。计费沿用模型 token 用量，不收本地执行或网页搜索附加费；模型与中转是否支持该工具需实际验证。请求仍限 4 MiB，客户端应等待已结算终态再执行动作，并自行落实上游返回的安全检查与操作授权。共享文件生命周期仍待实现；文件搜索、托管代码执行和 MCP 使用下述独立准入。
+Computer 声明及完整调用/结果历史均要求 OpenAI 原生 Responses 账号，支持三前缀、JSON/SSE、WebSocket、后台恢复及 composite；历史单独提交也不能绕过平台限制。计费沿用模型 token 用量，不收本地执行或网页搜索附加费；模型与中转是否支持该工具需实际验证。请求仍限 4 MiB，客户端应等待已结算终态再执行动作，并自行落实上游返回的安全检查与操作授权。共享文件通过下述管理员授权引用；文件搜索、托管代码执行和 MCP 使用各自准入规则。
 
 文件搜索支持 OpenAI 原生 Responses 的 `file_search`，包括 `vector_store_ids`、`max_num_results=1..50`、比较/组合 `filters`、`ranking_options` 和 `include=["file_search_call.results"]`。JSON/SSE、WebSocket、后台响应、`additional_tools` 和 OpenAI composite 路由共用原生执行链。查询、结果和引用保持原生结构，JSON 数字不重写为浮点数。协议见 [OpenAI 文件搜索](https://developers.openai.com/api/docs/guides/tools-file-search) 和 [Responses 请求定义](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
 管理员在上游管理平台准备知识库，再通过账号创建/更新接口的 `extra.response_vector_stores` 授权给网关分组，例如 `{"extra":{"response_vector_stores":{"12":["vs_team"]}}}`。授权对象整体替换，`{}` 撤销全部，省略保持；仅 OpenAI Responses 账号接受。每组最多 100 个向量库、每账号最多 1000 组；普通用户不能编辑。分组本身仍须获得账号调度和用户访问授权，fallback 使用客户端 Key 原分组的知识库授权。服务端将授权绑定到当前上游地址、协议和凭证；更换来源后需由管理员重新提交授权。同组用户可以搜索该组知识库，但响应和条目续接仍限定创建它们的客户端 Key。
 
-文件搜索历史的 `file_search_call.id` 必须属于当前 Key/分组；`previous_response_id`、条目引用和后续纯文本回复继承已用向量库，并在每次新调用时重新检查授权。撤销授权阻止新调用，已提交后台任务继续核算，原 Key 仍可按既有规则读取已生成的响应。非存储 WebSocket 续接仅限原连接。未知库、跨组、跨 Key 历史、协议转换与 compaction 拒绝；向量库授权不允许任意上传文件 ID。过滤器最多 8 层/256 节点，请求最多 100 个不同库；HTTP 上游拒绝不自动换号重试。
+文件搜索历史的 `file_search_call.id` 必须属于当前 Key/分组；`previous_response_id`、条目引用和后续纯文本回复继承已用向量库，并在每次新调用时重新检查授权。撤销授权阻止新调用，已提交后台任务继续核算，原 Key 仍可按既有规则读取已生成的响应。非存储 WebSocket 续接仅限原连接。未知库、跨组、跨 Key 历史、协议转换与 compaction 拒绝；向量库授权不授予文件 ID 访问权；直接文件引用须另行授权。过滤器最多 8 层/256 节点，请求最多 100 个不同库；HTTP 上游拒绝不自动换号重试。
 
 文件搜索按模型 token 或显式按次价格结算，不套用网页搜索费；上游的检索/存储费用没有独立内部价卡。网关不新增知识库上传或管理接口，知识库生命周期由管理员在上游管理。当前通过本地协议及数据库恢复验证，真实文件搜索上游联调仍待完成。
 
@@ -229,7 +229,13 @@ Code Interpreter 支持 OpenAI 原生 Responses 的 `{"type":"code_interpreter",
 
 显式 `container` ID 必须来自当前 Key/分组拥有的 `previous_response_id` 或输出条目引用；完整代码调用历史同样校验条目及容器归属，并固定原账号、协议、地址和凭证。后续纯文本响应继续保存已有容器关联，后台任务恢复保留该关联；WebSocket 的 `store=false` 关联仅在原连接内可用。容器每个响应上下文最多 1024 个，实际存活时间由上游决定；本地归属记录不延长上游容器寿命。未知或他人容器拒绝，凭证轮换不改投其他账号，HTTP 拒绝后不自动重试代码执行。
 
-内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID、容器文件下载/管理、网络 allowlist/domain secrets 和 programmatic 调用仍待完成，当前明确拒绝；内联文件或 URL 可按原生输入提交。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
+内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理、网络 allowlist/domain secrets 和 programmatic 调用仍待对应实现，当前明确拒绝。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
+
+管理员可通过账号创建/更新中的 `extra.response_files` 授权已上传的上游文件，例如 `{"extra":{"response_files":{"12":["file_team"]}}}`。沿用向量库的分组列表、数量上限和整体替换语义，但独立授权；授权绑定当前上游地址、协议和 Key。支持 OpenAI 账号的原生 Responses、原生 Chat 及 Chat→Responses 文件输入；跨平台和 Responses→Chat/Messages/Gemini 转换不会携带这些 ID。上游文件由管理员上传、维护和删除，网关不新增文件管理接口；文件格式、大小和模型适用性由上游校验，原生 Chat 文件输入仅支持 PDF。文件引用协议见 [OpenAI 文件输入](https://developers.openai.com/api/docs/guides/pdf-files)。
+
+授权适用于 Responses 的 input_file/input_image、函数/custom 工具结果、提示词变量、Computer 截图、图片工具遮罩及 Code Interpreter auto 容器的 file_ids；Chat 使用 messages.content 中的 file.file_id。一个输入只接受一种来源，非法/超限 ID 拒绝。每个请求最多100个不同文件；需要的全部文件必须由同一合格账号授权，任意相同名称不会授权另一来源。文件与向量库检索结果引用分开，结果中的 file_id、工具参数里的同名字段及引用注释不会自动授予访问权。
+
+普通 Responses、条目引用、后台恢复和 WebSocket 续接保留已使用文件集合，后续纯文本也重新检查授权；撤销授权或轮换来源后不再派发新的关联请求。已接受的后台消费继续结算，已生成响应仍按原Key归属读取；store=false WebSocket关联不离开原连接。文件字节不存入授权或关联元数据，费用沿用实际模型用量，SQL schema不变。当前是本地协议和数据库验证，真实文件提供方联调待完成。
 
 远程 MCP 支持 OpenAI 原生 Responses 的 `type=mcp`、`server_label`、HTTPS `server_url` 和调用方提供的 API Key `headers`；可配置 `allowed_tools`、`require_approval`、`defer_loading`、`server_description` 及 direct `allowed_callers`。执行由所选上游完成，网关不建立 MCP 连接、不代入账号 Key 或客户端 Key。保持省略/always/never/按工具过滤的审批策略，不自动批准。接口依据 [OpenAI 远程 MCP 指南](https://developers.openai.com/api/docs/guides/tools-remote-mcp)。OAuth authorization、旧 connector_id、共享 tunnel_id 和 programmatic 调用不在本系统 API Key 接入范围。
 

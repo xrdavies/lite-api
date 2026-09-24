@@ -68,7 +68,7 @@ func TestResponseComputer(t *testing.T) {
 		`{"input":[{"type":"computer_call","call_id":"c","action":{"type":"drag","path":[{"x":1}]}}]}`,
 		`{"input":[{"type":"computer_call","call_id":"c","action":{"type":"keypress","keys":null}}]}`,
 		`{"input":[{"type":"computer_call","call_id":"c","action":{"type":"type","text":null}}]}`,
-		`{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"foreign"}}]}`,
+		`{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"../foreign"}}]}`,
 		`{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","image_url":"file:///client.png"}}]}`,
 		`{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,%%%"}}]}`,
 		`{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","image_url":"https://secret@example.test/x"}}]}`,

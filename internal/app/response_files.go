@@ -7,25 +7,25 @@ import (
 )
 
 const responseStoresKey = "response_vector_stores"
-const responseStoresTargetKey = "response_vector_stores_target"
+const responseFilesKey = "response_files"
 
-// Administrators grant existing provider stores to gateway groups. The grant
-// is tied to the credential source, so rotation cannot authorize another store
+// Administrators grant existing provider resources to gateway groups. The grant
+// is tied to the credential source, so rotation cannot authorize another resource
 // that happens to have the same ID at a different provider.
-func parseResponseStoreGrants(raw json.RawMessage) (map[string][]string, error) {
+func parseResponseResourceGrants(raw json.RawMessage) (map[string][]string, error) {
 	var grants map[string][]string
 	if json.Unmarshal(raw, &grants) != nil || grants == nil || len(grants) > 1000 {
-		return nil, bad("response_vector_stores must map group IDs to store ID lists")
+		return nil, bad("resource grants must map group IDs to resource ID lists")
 	}
 	for group, ids := range grants {
 		id, err := strconv.ParseInt(group, 10, 64)
 		if err != nil || id <= 0 || strconv.FormatInt(id, 10) != group || len(ids) > 100 {
-			return nil, bad("invalid vector store group grant")
+			return nil, bad("invalid resource group grant")
 		}
 		seen := map[string]bool{}
 		for _, store := range ids {
 			if !validResponseID(store) || seen[store] {
-				return nil, bad("invalid or duplicate vector store ID")
+				return nil, bad("invalid or duplicate resource ID")
 			}
 			seen[store] = true
 		}
@@ -33,25 +33,27 @@ func parseResponseStoreGrants(raw json.RawMessage) (map[string][]string, error) 
 	return grants, nil
 }
 
-func (in *accountInput) bindResponseStoreGrants(u *upstreamAccount) error {
-	if in.Extra[responseStoresKey] == nil {
-		return nil
+func (in *accountInput) bindResponseResourceGrants(u *upstreamAccount) error {
+	for _, key := range []string{responseStoresKey, responseFilesKey} {
+		if in.Extra[key] == nil {
+			continue
+		}
+		if u.Platform != "openai" || u.protocol() != "responses" && (key != responseFilesKey || u.protocol() != "chat_completions") {
+			return bad("resource grants require a compatible OpenAI account")
+		}
+		in.Extra[key+"_target"], _ = json.Marshal(responseTarget(u))
 	}
-	if u.Platform != "openai" || u.protocol() != "responses" {
-		return bad("vector store grants require an OpenAI Responses account")
-	}
-	in.Extra[responseStoresTargetKey], _ = json.Marshal(responseTarget(u))
 	return nil
 }
 
-func (u *upstreamAccount) allowsResponseStores(groupID int64, ids []string) bool {
+func (u *upstreamAccount) allowsResponseResources(key string, groupID int64, ids []string) bool {
 	if len(ids) == 0 {
 		return true
 	}
-	if credentialString(u.Extra, responseStoresTargetKey) != responseTarget(u) {
+	if credentialString(u.Extra, key+"_target") != responseTarget(u) {
 		return false
 	}
-	grants, err := parseResponseStoreGrants(u.Extra[responseStoresKey])
+	grants, err := parseResponseResourceGrants(u.Extra[key])
 	if err != nil {
 		return false
 	}
@@ -61,6 +63,109 @@ func (u *upstreamAccount) allowsResponseStores(groupID int64, ids []string) bool
 		}
 	}
 	return true
+}
+
+// Inspect only protocol resource positions, never arbitrary function arguments,
+// document text, output citations, or JSON schemas that happen to say file_id.
+func requestFileIDs(body map[string]json.RawMessage, tools []map[string]json.RawMessage, protocol string) ([]string, error) {
+	var ids []string
+	add := func(raw json.RawMessage) error {
+		var id string
+		if json.Unmarshal(raw, &id) != nil || !validResponseID(id) {
+			return bad("invalid input file ID")
+		}
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+		if len(ids) > 100 {
+			return bad("too many input file IDs")
+		}
+		return nil
+	}
+	part := func(p map[string]json.RawMessage) error {
+		raw := p["file_id"]
+		if raw == nil || string(raw) == "null" {
+			return nil
+		}
+		for _, alternative := range []string{"file_data", "file_url", "image_url"} {
+			if value := p[alternative]; value != nil && string(value) != "null" {
+				return bad("use one file input source")
+			}
+		}
+		return add(raw)
+	}
+	var items []map[string]json.RawMessage
+	input := body["input"]
+	if protocol == "chat_completions" {
+		input = body["messages"]
+	}
+	if err := json.Unmarshal(input, &items); err != nil {
+		var text string
+		if protocol == "chat_completions" || input != nil && json.Unmarshal(input, &text) != nil {
+			return nil, bad("invalid file input items")
+		}
+	}
+	for _, item := range items {
+		if err := part(item); err != nil {
+			return nil, err
+		}
+		for _, field := range []string{"content", "output"} {
+			var parts []map[string]json.RawMessage
+			if json.Unmarshal(item[field], &parts) != nil {
+				var object map[string]json.RawMessage
+				if json.Unmarshal(item[field], &object) == nil && object != nil {
+					parts = []map[string]json.RawMessage{object}
+				}
+			}
+			for _, p := range parts {
+				if err := part(p); err != nil {
+					return nil, err
+				}
+				if protocol == "chat_completions" && credentialString(p, "type") == "file" {
+					var file map[string]json.RawMessage
+					if json.Unmarshal(p["file"], &file) != nil || file == nil {
+						return nil, bad("invalid Chat file input")
+					}
+					if err := part(file); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+	}
+	var prompt struct{ Variables map[string]json.RawMessage }
+	_ = json.Unmarshal(body["prompt"], &prompt)
+	for _, raw := range prompt.Variables {
+		var variable map[string]json.RawMessage
+		if json.Unmarshal(raw, &variable) == nil {
+			if err := part(variable); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, tool := range tools {
+		if credentialString(tool, "type") == "code_interpreter" {
+			var container struct {
+				Files []json.RawMessage `json:"file_ids"`
+			}
+			if json.Unmarshal(tool["container"], &container) == nil {
+				for _, raw := range container.Files {
+					if err := add(raw); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+		if credentialString(tool, "type") == "image_generation" {
+			var mask map[string]json.RawMessage
+			_ = json.Unmarshal(tool["input_image_mask"], &mask)
+			if err := part(mask); err != nil {
+				return nil, err
+			}
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
 }
 
 func responseFileSearch(tool map[string]json.RawMessage) ([]string, error) {
@@ -128,7 +233,7 @@ func responseFileSearch(tool map[string]json.RawMessage) ([]string, error) {
 			return nil, bad("unsupported file search option")
 		}
 	}
-	return mergeResponseStores(nil, ids)
+	return mergeResponseResources(nil, ids)
 }
 
 func responseFileFilter(raw json.RawMessage, depth int, nodes *int) error {
@@ -210,7 +315,7 @@ func responseFileSearchItem(item map[string]json.RawMessage) error {
 	return nil
 }
 
-func mergeResponseStores(previous, current []string) ([]string, error) {
+func mergeResponseResources(previous, current []string) ([]string, error) {
 	ids := append([]string(nil), previous...)
 	for _, id := range current {
 		if !slices.Contains(ids, id) {
@@ -218,7 +323,7 @@ func mergeResponseStores(previous, current []string) ([]string, error) {
 		}
 	}
 	if len(ids) > 100 {
-		return nil, bad("too many response vector stores")
+		return nil, bad("too many response resource IDs")
 	}
 	slices.Sort(ids)
 	return ids, nil
