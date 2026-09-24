@@ -275,6 +275,25 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 		if w := lookup(job, key); w.Code != 200 || strings.Contains(w.Body.String(), "private-provider-error") {
 			t.Fatal("video failure", w.Code, w.Body.String())
 		}
+		job = create("/v1/videos/"+op, key, op+"-done")
+		v, err := a.loadVideoTask(context.Background(), job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		states[v.UpstreamID] = "done"
+		mu.Unlock()
+		for i := 0; i < 2; i++ {
+			if w := lookup(job, key); w.Code != 200 || !strings.Contains(w.Body.String(), `"status":"done"`) {
+				t.Fatal("video operation completion", op, w.Code, w.Body.String())
+			}
+		}
+		if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text,min(video_duration_seconds) FROM usage_logs WHERE request_id=$1", job).Scan(&count, &actual, &seconds); err != nil || count != 1 || actual != "0.0300000000" || seconds != 6 {
+			t.Fatal("video operation settlement", op, count, actual, seconds, err)
+		}
+		if w := call("GET", "/videos/"+op+"/"+job+"/content", key, nil, ""); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), []byte{0, 1, 2, 3, 4}) {
+			t.Fatal("video operation download", op, w.Code, w.Body.String())
+		}
 	}
 	manage("PUT", gpath, admin, map[string]any{"allow_image_generation": false})
 	if w := call("POST", "/videos", key, body, "disabled"); w.Code != 403 {
@@ -311,7 +330,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if creates != before+1 || downloads != 8 || operations["/v1/videos/edits"] != 1 || operations["/v1/videos/extensions"] != 2 {
+	if creates != before+1 || downloads != 10 || operations["/v1/videos/edits"] != 2 || operations["/v1/videos/extensions"] != 3 {
 		t.Fatal("video dispatch counts", creates, before, downloads, operations)
 	}
 }

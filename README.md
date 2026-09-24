@@ -356,7 +356,7 @@ Grok API Key 及路由到 Grok 的 composite 分组支持 `POST /v1/videos`、`/
 
 Grok 在首次观察到 `done` 且存在 `video.url` 时结算，优先使用上游时长，缺少时使用提交时长（默认 8 秒）；沿用原整数秒口径，小数截断，限制在 1–15 秒。编辑和扩展的精细时长语义依赖上游返回，当前不改变原数据库字段含义。用量写入原 `video_count`、`video_resolution`、`video_duration_seconds` 和 `billing_mode=video`。失败/过期任务不扣费，重复查询和下载不重复扣费。
 
-Seedance 使用 `POST /api/v3/contents/generations/tasks`、GET/DELETE `.../{task_id}`，同样支持 `/v3`、`/v1` 和无前缀。账号须为 `platform=openai,type=apikey`，显式设置 `base_url` 和 `credentials.openai_capabilities=["seedance"]`（也接受布尔对象）。设置能力集合后，文本、Embedding、alpha 搜索按各自能力准入；未设置仍保留原普通接口行为。Seedance 可用显式 OpenAI composite 路由；保留原生多模态 content、草稿及参数，草稿只能引用同一客户端 Key 的已完成草稿，并固定原上游账号。回调和计费工具当前拒绝。成功后按上游 completion_tokens 结算；DELETE 对排队任务请求取消，对已结算终态任务删除上游记录，运行中能否取消由上游决定。
+Seedance 使用 `POST /api/v3/contents/generations/tasks`、GET/DELETE `.../{task_id}`，同样支持 `/v3`、`/v1` 和无前缀。账号须为 `platform=openai,type=apikey`，显式设置 `base_url` 和 `credentials.openai_capabilities=["seedance"]`（也接受布尔对象）。设置能力集合后，文本、Embedding、alpha 搜索按各自能力准入；未设置仍保留原普通接口行为。Seedance 可用显式 OpenAI composite 路由；保留原生多模态 content、草稿及参数，草稿只能引用同一客户端 Key 的已完成草稿，并固定原上游账号。回调和计费工具当前拒绝。成功结果须同时具有有效的 `content.video_url` 和 `usage.completion_tokens` 才结算；缺失或无效结果返回 502，任务保留待核查，不扣费，后续有效结果可继续恢复。按上游 completion_tokens 计费；DELETE 对排队任务请求取消，对已结算终态任务删除上游记录，运行中能否取消由上游决定。
 
 两类任务共用加密 Redis 记录和恢复 worker，无需 schema 变更。记录不保存提示词或上游 Key；保存原用户/Key/分组、上游来源指纹和不可变价格快照。最多 32 个待完成任务，单实例每 15 秒顺序轮询；终态记录保留七天，视频 URL 本身的有效期由上游决定。保留 Redis 持久卷和原 `JWT_SECRET`，待结算任务不自动过期。禁用新调度或额度耗尽不阻止原 Key 读取已创建任务；禁用/删除/到期 Key 仍拒绝。变更上游凭证/地址后需要恢复原来源才能继续轮询。
 

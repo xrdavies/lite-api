@@ -258,6 +258,10 @@ func seedanceStatus(raw []byte, t *videoTask) (json.RawMessage, string, int64, s
 	}
 	tokens := int64(0)
 	if status == "succeeded" {
+		var content map[string]json.RawMessage
+		if json.Unmarshal(fields["content"], &content) != nil || !validAudioURL(credentialString(content, "video_url")) {
+			return nil, "", 0, "", &apiError{502, "video completion output is missing or invalid"}
+		}
 		var usage map[string]json.RawMessage
 		if json.Unmarshal(fields["usage"], &usage) != nil || len(usage["completion_tokens"]) == 0 || string(usage["completion_tokens"]) == "null" || json.Unmarshal(usage["completion_tokens"], &tokens) != nil || tokens < 0 || tokens > 2147483647 {
 			return nil, "", 0, "", &apiError{502, "video completion usage is missing or invalid"}

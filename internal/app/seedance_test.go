@@ -36,9 +36,22 @@ func TestSeedanceContracts(t *testing.T) {
 		}
 	}
 	task := &videoTask{ID: "task_public", UpstreamID: "native"}
-	for _, raw := range []string{`{"id":"other","status":"queued"}`, `{"id":"native","status":"succeeded"}`, `{"id":"native","status":"succeeded","usage":{"completion_tokens":-1}}`, `{"id":"native","status":"succeeded","usage":{"completion_tokens":2147483648}}`, `{"id":"native","status":"surprise"}`} {
+	for _, raw := range []string{`{"id":"other","status":"queued"}`, `{"id":"native","status":"succeeded"}`, `{"id":"native","status":"succeeded","content":{"video_url":"https://example.test/v.mp4"},"usage":{"completion_tokens":-1}}`, `{"id":"native","status":"succeeded","content":{"video_url":"https://example.test/v.mp4"},"usage":{"completion_tokens":2147483648}}`, `{"id":"native","status":"surprise"}`} {
 		if _, _, _, _, err := seedanceStatus([]byte(raw), task); err == nil {
 			t.Fatal("invalid upstream status", raw)
+		}
+	}
+	for _, content := range []string{`null`, `{}`, `[]`, `{"video_url":null}`, `{"video_url":42}`, `{"video_url":""}`, `{"video_url":"file:///video.mp4"}`, `{"video_url":"https://secret@example.test/video.mp4"}`} {
+		raw := `{"id":"native","status":"succeeded","content":` + content + `,"usage":{"completion_tokens":11}}`
+		if _, _, _, _, err := seedanceStatus([]byte(raw), task); err == nil {
+			t.Fatal("accepted completion without valid video output", content)
+		}
+	}
+	for _, draft := range []bool{false, true} {
+		raw := fmt.Sprintf(`{"id":"native","status":"succeeded","draft":%t,"content":{"video_url":"https://example.test/video.mp4"},"usage":{"completion_tokens":11}}`, draft)
+		_, status, tokens, _, err := seedanceStatus([]byte(raw), task)
+		if err != nil || status != "succeeded" || tokens != 11 {
+			t.Fatal("valid video or draft rejected", draft, status, tokens, err)
 		}
 	}
 	result, status, _, _, err := seedanceStatus([]byte(`{"id":"native","status":"failed","error":{"message":"upstream-secret"}}`), task)
@@ -83,6 +96,7 @@ func testSeedance(t *testing.T, a *App, admin string) {
 	nextStatus := "queued"
 	creates, deletes := 0, 0
 	nextFailure := false
+	missingOutput := false
 	lastModel, lastDraft := "", ""
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -148,7 +162,9 @@ func testSeedance(t *testing.T, a *App, admin string) {
 		}
 		result := map[string]any{"id": native, "status": state, "model": "provider-video", "draft": drafts[native]}
 		if state == "succeeded" {
-			result["content"] = map[string]string{"video_url": "https://example.test/video.mp4?signature=private"}
+			if !missingOutput {
+				result["content"] = map[string]string{"video_url": "https://example.test/video.mp4?signature=private"}
+			}
 			result["usage"] = map[string]int{"completion_tokens": counts[native]}
 		}
 		if state == "failed" {
@@ -220,10 +236,33 @@ func testSeedance(t *testing.T, a *App, admin string) {
 	exec("UPDATE users SET balance=100 WHERE id=$1", uid)
 	// Change live prices after acceptance: reconciliation must use the old snapshot.
 	manage("PUT", fmt.Sprintf("/api/v1/admin/channels/%d", id(channel)), admin, map[string]any{"model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"team-video"}, "billing_mode": "token", "output_price": "0.5"}}})
+	mu.Lock()
+	states[stored.UpstreamID] = "succeeded"
+	missingOutput = true
+	mu.Unlock()
+	if w := call("GET", path(first), key, nil, ""); w.Code != 502 {
+		t.Fatal("completion without output accepted", w.Code, w.Body.String())
+	}
+	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
+	if err = fresh.runVideoTasks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := fresh.loadVideoTask(context.Background(), first)
+	if err != nil || pending.Stage != "pending" || pending.Receipt != nil {
+		t.Fatal("invalid completion did not remain recoverable", err)
+	}
+	var unsettled int
+	var unchangedBalance, unchangedQuota string
+	if err = a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", first).Scan(&unsettled); err != nil || unsettled != 0 {
+		t.Fatal("invalid completion billed", unsettled, err)
+	}
+	if err = a.DB.QueryRow("SELECT u.balance::text,k.quota_used::text FROM users u JOIN api_keys k ON k.user_id=u.id WHERE k.id=$1", kid).Scan(&unchangedBalance, &unchangedQuota); err != nil || unchangedBalance != "100.00000000" || unchangedQuota != "0.00000000" {
+		t.Fatal("invalid completion changed funds", unchangedBalance, unchangedQuota, err)
+	}
 	exec("ALTER TABLE usage_logs ADD CONSTRAINT test_video_failure CHECK(model<>'team-video') NOT VALID")
 	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_video_failure")
 	mu.Lock()
-	states[stored.UpstreamID] = "succeeded"
+	missingOutput = false
 	mu.Unlock()
 	w := call("GET", path(first), key, nil, "")
 	if w.Code != 503 && w.Code != 409 {
@@ -231,7 +270,6 @@ func testSeedance(t *testing.T, a *App, admin string) {
 	}
 	exec("ALTER TABLE usage_logs DROP CONSTRAINT test_video_failure")
 	// New application state and repeated recovery use the persisted receipt only.
-	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
 	for i := 0; i < 2; i++ {
 		if err := fresh.runVideoTasks(context.Background()); err != nil {
 			t.Fatal(err)
