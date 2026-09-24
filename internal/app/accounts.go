@@ -11,24 +11,29 @@ import (
 )
 
 type accountInput struct {
-	Name        *string                    `json:"name"`
-	Platform    *string                    `json:"platform"`
-	Type        *string                    `json:"type"`
-	Notes       *string                    `json:"notes"`
-	Status      *string                    `json:"status"`
-	Credentials map[string]json.RawMessage `json:"credentials"`
-	Extra       map[string]json.RawMessage `json:"extra"`
-	ProxyID     *int64                     `json:"proxy_id"`
-	Concurrency *int                       `json:"concurrency"`
-	Priority    *int                       `json:"priority"`
-	Rate        *json.Number               `json:"rate_multiplier"`
-	LoadFactor  *int                       `json:"load_factor"`
-	Groups      *[]int64                   `json:"group_ids"`
-	ExpiresAt   *int64                     `json:"expires_at"`
-	AutoPause   *bool                      `json:"auto_pause_on_expired"`
+	Name         *string                    `json:"name"`
+	Platform     *string                    `json:"platform"`
+	Type         *string                    `json:"type"`
+	Notes        *string                    `json:"notes"`
+	Status       *string                    `json:"status"`
+	Credentials  map[string]json.RawMessage `json:"credentials"`
+	Extra        map[string]json.RawMessage `json:"extra"`
+	ProxyID      *int64                     `json:"proxy_id"`
+	Concurrency  *int                       `json:"concurrency"`
+	Priority     *int                       `json:"priority"`
+	Rate         *json.Number               `json:"rate_multiplier"`
+	LoadFactor   *int                       `json:"load_factor"`
+	Groups       *[]int64                   `json:"group_ids"`
+	ExpiresAt    *int64                     `json:"expires_at"`
+	AutoPause    *bool                      `json:"auto_pause_on_expired"`
+	ProbeEnabled *bool                      `json:"upstream_billing_probe_enabled"`
+	RateSync     *bool                      `json:"upstream_billing_rate_sync_enabled"`
 }
 
 func (in *accountInput) validate(create bool) error {
+	if err := in.normalizeBillingFlags(create); err != nil {
+		return err
+	}
 	if create && (in.Name == nil || in.Platform == nil || in.Type == nil || in.Credentials == nil) {
 		return bad("name, platform, type and credentials are required")
 	}
@@ -109,6 +114,11 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case billingEnabledKey, billingSyncKey:
+			var enabled bool
+			if string(value) == "null" || json.Unmarshal(value, &enabled) != nil {
+				return bad("invalid billing probe switch")
+			}
 		case "openai_apikey_responses_websockets_v2_enabled", "responses_websockets_v2_enabled", "openai_ws_enabled", "openai_ws_force_http":
 			var enabled bool
 			if string(value) == "null" || json.Unmarshal(value, &enabled) != nil {
@@ -346,16 +356,16 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 			b, _ := json.Marshal(entry.value)
 			args = append(args, string(b))
 			expression := fmt.Sprintf("%s || $%d::jsonb", entry.name, len(args))
-			if entry.name == "extra" && oldTarget != responseTarget(u) {
-				expression = "(" + expression + ") - 'upstream_model_metadata'"
+			if entry.name == "extra" && (oldTarget != responseTarget(u) || in.ProxyID != nil) {
+				expression = "(" + expression + ") - 'upstream_model_metadata' - 'upstream_billing_probe'"
 			}
 			sets = append(sets, entry.name+"="+expression)
 		}
 	}
-	if oldTarget != responseTarget(u) && in.Extra == nil {
+	if (oldTarget != responseTarget(u) || in.ProxyID != nil) && in.Extra == nil {
 		// Capability snapshots belong to the previous upstream credential/root.
 		// Configuration patches cannot retain them after the upstream changes.
-		sets = append(sets, "extra=extra - 'upstream_model_metadata'")
+		sets = append(sets, "extra=extra - 'upstream_model_metadata' - 'upstream_billing_probe'")
 	}
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -364,6 +374,25 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	defer tx.Rollback()
 	if err = validateProxyAssignment(r.Context(), tx, in.ProxyID); err != nil {
 		return err
+	}
+	if in.Rate != nil {
+		var extra []byte
+		if err = tx.QueryRowContext(r.Context(), "SELECT extra FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", id).Scan(&extra); err != nil {
+			return err
+		}
+		var flags map[string]json.RawMessage
+		if err = json.Unmarshal(extra, &flags); err != nil {
+			return err
+		}
+		if flags == nil {
+			flags = map[string]json.RawMessage{}
+		}
+		for key, value := range in.Extra {
+			flags[key] = value
+		}
+		if billingFlag(flags, billingEnabledKey) && billingFlag(flags, billingSyncKey) {
+			return conflict("disable upstream billing rate sync before changing the account multiplier")
+		}
 	}
 	var priority int
 	if err = tx.QueryRowContext(r.Context(), "UPDATE accounts SET "+strings.Join(sets, ",")+" WHERE id=$1 AND deleted_at IS NULL RETURNING priority", args...).Scan(&priority); err != nil {
@@ -396,13 +425,13 @@ func (a *App) getAccount(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) listAccounts(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	search, platform, status := "%"+r.URL.Query().Get("search")+"%", r.URL.Query().Get("platform"), r.URL.Query().Get("status")
-	where := ` WHERE deleted_at IS NULL AND name ILIKE $1 AND ($2='' OR platform=$2) AND ($3='' OR status=$3)`
+	where, args := accountListFilter(r)
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts"+where, search, platform, status).Scan(&total); err != nil {
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts"+where, args...).Scan(&total); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT id FROM accounts"+where+" ORDER BY priority,id LIMIT $4 OFFSET $5", search, platform, status, size, (page-1)*size)
+	args = append(args, size, (page-1)*size)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT id FROM accounts"+where+" ORDER BY priority,id LIMIT $4 OFFSET $5", args...)
 	if err != nil {
 		return err
 	}
@@ -509,6 +538,7 @@ func (a *App) accountState(w http.ResponseWriter, r *http.Request) error {
 	return a.getAccount(w, r)
 }
 func (a *App) accountRoutes() {
+	a.billingProbeRoutes()
 	a.route("GET /api/v1/admin/cn-providers/accounts/{id}/balance", "admin", a.accountBalance)
 	a.route("GET /api/v1/admin/accounts", "admin", a.listAccounts)
 	a.route("POST /api/v1/admin/accounts", "admin", a.createAccount)
@@ -522,6 +552,11 @@ func (a *App) accountRoutes() {
 	a.route("DELETE /api/v1/admin/accounts/{id}/temp-unschedulable", "admin", a.accountState)
 	a.route("POST /api/v1/admin/accounts/{id}/test", "admin", a.testAccount)
 	a.route("GET /api/v1/admin/accounts/{id}/models", "admin", a.accountModels)
+}
+
+func accountListFilter(r *http.Request) (string, []any) {
+	return ` WHERE deleted_at IS NULL AND name ILIKE $1 AND ($2='' OR platform=$2) AND ($3='' OR status=$3)`,
+		[]any{"%" + r.URL.Query().Get("search") + "%", r.URL.Query().Get("platform"), r.URL.Query().Get("status")}
 }
 
 func validateProxyAssignment(ctx context.Context, tx *sql.Tx, id *int64) error {

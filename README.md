@@ -65,6 +65,14 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 独立上游验证无需数据库：设置本地 `UPSTREAM_BASE_URL`、`UPSTREAM_API_KEY`、`UPSTREAM_MODEL` 后执行 `./bin/lite-api upstream-check`。命令发起一次 JSON 和一次 SSE 文本生成，仅输出状态和时延摘要。Go 客户端对指定中转和 `gpt-5.6-luna` 的 JSON/SSE 已实测成功；其他平台当前由协议模拟测试覆盖，不能据此宣称所有原厂模型均已联调。
 
+管理员可通过 `/api/v1/admin/accounts/upstream-billing-probe/settings` 的 GET/PUT 配置倍率探测，默认 `{"enabled":true,"interval_minutes":30}`，间隔接受 5–1440 分钟。账号默认不参与；PUT `/api/v1/admin/accounts/{id}/upstream-billing-probe` 接受 `{"enabled":true}`，POST 同路径立即探测，POST `/api/v1/admin/accounts/upstream-billing-probe/batch` 接受最多 20 个 `account_ids`，去重并分别返回结果。全局开关只控制定时执行，手动探测不受它限制。单实例每分钟扫描到期账号，每轮最多 20 个、最多四个并发，同账号禁止重叠。
+
+探测支持八种已保留平台的中转账号，统一使用 Bearer Key 请求独立协议 `GET /v1/lite-api/billing`，版本根和自定义路径沿用账号配置；国内平台的 `/anthropic` 或 `/anthropic/v1` 后缀先还原。原厂域名直接记录 unsupported；此能力不是通用供应商余额接口，不支持本声明协议的中转不会产生有效倍率。客户端也可使用自己的 Key 调用此接口，返回 `object=lite-api.key_billing`、`schema_version=1`、`billing_scope=token`、组倍率、适用的用户专属倍率及生效倍率，零余额仍可查询。标准分组不应用订阅峰时系数，模型/媒体价格另行配置。
+
+`GET /api/v1/admin/accounts/upstream-billing-rates` 按账号列表相同的 search/platform/status 和分页条件读取持久快照，支持 ETag/304，不触发探测。快照使用原 `accounts.extra.upstream_billing_probe` 字段，保存白名单声明和时间、状态，失败保留上次有效数据及原 freshness；404/405 或原厂标记 unsupported，重探间隔扩大八倍并封顶一天，正常间隔有抖动，所有重探均尊重更长的 Retry-After。连接及正文共限 10 秒，响应最多 64 KiB；不跟随重定向、不重试未知结果，错误摘要不保存上游正文或凭证。
+
+账号编辑 `upstream_billing_rate_sync_enabled=true` 同时开启探测；创建时需先建账号再开启同步。同步只把声明的 `resolved_rate_multiplier` 四舍五入到四位小数写入账号成本倍率，自动值必须大于 0 且不超过 100；声明中的峰时系数不写入。声明校验包含精确数值、倍率关系及峰时时区/区间，未知字段丢弃。有效但超出自动同步范围的声明仍可查看，账号倍率保持原值。启用同步时手工改倍率返回 409，可在同次编辑关闭同步后修改；关闭探测也关闭同步。账号或代理及其备用链在探测期间变更时拒绝写回；更换账号凭证、来源或代理绑定清除旧快照。探测不恢复健康状态、不改写用户余额、消费额度或历史费用；后续请求沿用现有账号成本结算。
+
 ## 运行设置
 
 管理 API 支持密码登录产生的 Bearer JWT，以及独立的全局管理员机器凭证。`GET /api/v1/admin/settings/admin-api-key` 返回 `exists/masked_key`；`POST .../admin-api-key/regenerate` 生成 `admin-` 前缀的 32 字节随机 Key，仅本次响应返回完整值；`DELETE .../admin-api-key` 删除凭证。初次生成使用管理员 JWT，此后合法机器凭证也可轮换或删除自身。原 `settings.admin_api_key` 保持原始字符串语义，应与上游凭证一样限制数据库访问；通用设置、状态查询和审计均不返回完整 Key。

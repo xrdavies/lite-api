@@ -205,6 +205,7 @@ func (a *App) startWorkers() {
 	a.startBatchImages(ctx)
 	a.startVideoTasks(ctx)
 	a.startBalanceChecks(ctx)
+	a.startBillingProbes(ctx)
 	go func() {
 		defer close(a.workerDone)
 		if err := a.recoverRealtime(ctx); err != nil {
