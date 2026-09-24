@@ -97,7 +97,7 @@ func TestResponseMCPCredentialRedaction(t *testing.T) {
 		`{"data":[{"type":"additional_tools","tools":[` + tool + `]}]}`, // input_items
 		`{"tools":[{"type":"mcp","he\u0061ders":{"X-Key":"private-header"}}]}`,
 	} {
-		clean, err := sanitizeResponseMCP([]byte(raw))
+		clean, err := sanitizeResponseTools([]byte(raw))
 		if err != nil || !json.Valid(clean) || strings.Contains(string(clean), "private-") {
 			t.Fatal("MCP credentials exposed", string(clean), err)
 		}
@@ -106,9 +106,30 @@ func TestResponseMCPCredentialRedaction(t *testing.T) {
 		}
 	}
 	for _, raw := range []string{nativeMCPCalls, `{"output":[{"type":"function_call","arguments":"{\"headers\":{\"X-Context\":\"value\"}}"}]}`} {
-		clean, err := sanitizeResponseMCP([]byte(raw))
+		clean, err := sanitizeResponseTools([]byte(raw))
 		if err != nil || string(clean) != raw {
 			t.Fatal("unrelated tool output changed", err)
 		}
+	}
+}
+
+func TestResponseContainerSecretRedaction(t *testing.T) {
+	for _, tools := range []string{nativeCodeTools, nativeHostedShellTools} {
+		for _, raw := range []string{
+			`{"tools":` + tools + `,"output":` + nativeCodeCalls + `}`,
+			`{"type":"response.completed","response":{"tools":` + tools + `}}`,
+			`{"type":"response.output_item.added","item":{"type":"additional_tools","tools":` + tools + `}}`,
+			`{"data":[{"type":"additional_tools","tools":` + tools + `}]}`,
+			strings.ReplaceAll(`{"tools":`+tools+`}`, "domain_secrets", `domain_\u0073ecrets`),
+		} {
+			clean, err := sanitizeResponseTools([]byte(raw))
+			if err != nil || !json.Valid(clean) || strings.Contains(string(clean), "client-domain-secret") || strings.Contains(string(clean), "domain_secrets") || !strings.Contains(string(clean), `"allowed_domains":["example.test"]`) {
+				t.Fatal("container secret exposed or network policy lost", string(clean), err)
+			}
+		}
+	}
+	raw := `{"tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"domain_secrets":{"type":"string"}},"maximum":9007199254740993}}],"output":[{"type":"function_call","arguments":"{\"domain_secrets\":\"user data\"}"}]}`
+	if clean, err := sanitizeResponseTools([]byte(raw)); err != nil || string(clean) != raw {
+		t.Fatal("unrelated schema or function argument changed", string(clean), err)
 	}
 }

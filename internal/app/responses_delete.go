@@ -97,8 +97,8 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request, g *
 			deletion.Source = *binding
 		}
 	}
-	if deletion.Source.MCPTool {
-		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+	if deletion.Source.MCPTool || deletion.Source.CodeTool {
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 	}
 	u, err := a.loadAccount(ctx, deletion.Source.AccountID)
 	if err != nil {

@@ -97,7 +97,7 @@ func (a *App) readResponseResource(w http.ResponseWriter, r *http.Request, u *up
 	if err = validateResponseResource(raw, id, items); err != nil {
 		return err
 	}
-	raw, err = sanitizeResponseMCP(raw)
+	raw, err = sanitizeResponseTools(raw)
 	if err != nil {
 		return err
 	}
@@ -147,8 +147,8 @@ func validateResponseResource(raw []byte, id string, items bool) error {
 
 func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, id string, query url.Values) error {
 	binding, err := a.previousResponse(r.Context(), g, id)
-	if binding != nil && binding.MCPTool {
-		r = r.WithContext(context.WithValue(r.Context(), mcpRequestKey{}, true))
+	if binding != nil && (binding.MCPTool || binding.CodeTool) {
+		r = r.WithContext(context.WithValue(r.Context(), responseSecretsKey{}, true))
 	}
 	if err != nil {
 		return err

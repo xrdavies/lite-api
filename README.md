@@ -229,11 +229,15 @@ Code Interpreter 支持 OpenAI 原生 Responses 的 `{"type":"code_interpreter",
 
 显式 `container` ID 必须来自当前 Key/分组拥有的 `previous_response_id` 或输出条目引用；完整代码调用历史同样校验条目及容器归属，并固定原账号、协议、地址和凭证。后续纯文本响应继续保存已有容器关联，后台任务恢复保留该关联；WebSocket 的 `store=false` 关联仅在原连接内可用。容器每个响应上下文最多 1024 个，实际存活时间由上游决定；本地归属记录不延长上游容器寿命。未知或他人容器拒绝，凭证轮换不改投其他账号，HTTP 拒绝后不自动重试代码执行。
 
-内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理、网络 allowlist/domain secrets 和 programmatic 调用仍待对应实现，当前明确拒绝。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
+内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理和 programmatic 调用仍待对应实现，当前明确拒绝；网络白名单与域名密钥见下文。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
 
-托管 Shell 使用 OpenAI 原生 Responses 的 `{"type":"shell","environment":{"type":"container_auto"}}`，执行发生在上游容器。支持 `memory_limit=1g|4g|16g|64g`、已授权的 `file_ids`，以及省略网络策略或显式 `network_policy={"type":"disabled"}`；网络 allowlist/domain secrets、托管 skills 和 programmatic 分支仍待补齐。已有容器使用 `environment={"type":"container_reference","container_id":"cntr_..."}`，必须来自当前 Key/分组拥有的响应或条目关联；来源轮换、未知容器和跨 Key 历史均拒绝。字段依据 [OpenAI Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
+托管 Shell 使用 OpenAI 原生 Responses 的 `{"type":"shell","environment":{"type":"container_auto"}}`，执行发生在上游容器。支持 `memory_limit=1g|4g|16g|64g`、已授权的 `file_ids`，以及省略网络策略、显式 `network_policy={"type":"disabled"}` 或下述 allowlist 策略；托管 skills 和 programmatic 分支仍待补齐。已有容器使用 `environment={"type":"container_reference","container_id":"cntr_..."}`，必须来自当前 Key/分组拥有的响应或条目关联；来源轮换、未知容器和跨 Key 历史均拒绝。字段依据 [OpenAI Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
 
 `container_auto`、`container_reference` 和原 `local` 三种环境显式区分；网关不执行命令、不创建本地容器。托管 `shell_call` 的环境、命令及配对 `shell_call_output` 原样转发；JSON/SSE、WS、后台响应及 composite 复用原生链路，HTTP 拒绝后不换号重试。容器和已用文件的归属随纯文本续接、后台恢复继续保留；`store=false` 的 WS 关联仅在原连接有效。内部账务采用模型用量和原价快照，不新增容器费用价卡；供应商容器寿命及单独费用仍由上游决定。容器管理/文件下载和真实托管 Shell 上游联调尚待继续。
+
+Code Interpreter 自动容器及 Shell 的 `container_auto` 支持 `network_policy={"type":"allowlist","allowed_domains":["example.com"],"domain_secrets":[{"domain":"example.com","name":"API_KEY","value":"调用方提供的密钥"}]}`。每次请求最多 100 个不同域名、100 条密钥；只接受域名，不接受 URL、端口或通配符。密钥域名须与白名单一项匹配（忽略大小写），同域名的名称唯一；名称为最多 256 个字母、数字、下划线或连字符，值非空、最多 64 KiB 且不能含 CR/LF/NUL。空域名数组合法，实际网络限制和密钥注入由上游执行；网关不代理容器网络，也不代入账号 Key。
+
+返回或持久保存 Responses 前，共同清理路径会移除 Code Interpreter/Shell 声明里的 `domain_secrets`，保留其余网络配置。JSON/SSE/WS、后台轮询/恢复和响应资源查询均适用；带托管容器标记的续接沿用错误脱敏，即使管理员配置透传上游错误正文，也只返回固定工具错误，不回显调用方密钥。密钥只随当前请求发往上游，不写入响应归属或后台请求记录；普通工具参数、文本和 JSON schema 中的同名字段不作密钥处理。使用本地协议和持久恢复验证，不承诺第三方服务会遵循密钥处理协议。
 
 管理员可通过账号创建/更新中的 `extra.response_files` 授权已上传的上游文件，例如 `{"extra":{"response_files":{"12":["file_team"]}}}`。沿用向量库的分组列表、数量上限和整体替换语义，但独立授权；授权绑定当前上游地址、协议和 Key。支持 OpenAI 账号的原生 Responses、原生 Chat 及 Chat→Responses 文件输入；跨平台和 Responses→Chat/Messages/Gemini 转换不会携带这些 ID。上游文件由管理员上传、维护和删除，网关不新增文件管理接口；文件格式、大小和模型适用性由上游校验，原生 Chat 文件输入仅支持 PDF。文件引用协议见 [OpenAI 文件输入](https://developers.openai.com/api/docs/guides/pdf-files)。
 

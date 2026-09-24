@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 )
 
 // Code Interpreter and hosted Shell containers execute at the provider, never
@@ -48,12 +49,56 @@ func validateResponseAutoContainer(container map[string]json.RawMessage) error {
 				return bad("invalid container file list")
 			}
 		case "network_policy":
-			var policy map[string]json.RawMessage
-			if json.Unmarshal(raw, &policy) != nil || len(policy) != 1 || credentialString(policy, "type") != "disabled" {
-				return bad("container network policy must be disabled")
+			if err := validateContainerNetwork(raw); err != nil {
+				return err
 			}
 		default:
 			return bad("unsupported container option")
+		}
+	}
+	return nil
+}
+
+func validateContainerNetwork(raw json.RawMessage) error {
+	var policy map[string]json.RawMessage
+	if json.Unmarshal(raw, &policy) != nil || policy == nil {
+		return bad("invalid container network policy")
+	}
+	if credentialString(policy, "type") == "disabled" && len(policy) == 1 {
+		return nil
+	}
+	if credentialString(policy, "type") != "allowlist" {
+		return bad("invalid container network policy type")
+	}
+	for key := range policy {
+		if key != "type" && key != "allowed_domains" && key != "domain_secrets" {
+			return bad("unsupported container network option")
+		}
+	}
+	var domains []string
+	if json.Unmarshal(policy["allowed_domains"], &domains) != nil || domains == nil || len(domains) > 100 {
+		return bad("invalid container domain allowlist")
+	}
+	allowed := map[string]bool{}
+	for _, domain := range domains {
+		if !validDomainName(domain) || allowed[strings.ToLower(domain)] {
+			return bad("invalid or duplicate container domain")
+		}
+		allowed[strings.ToLower(domain)] = true
+	}
+	if raw := policy["domain_secrets"]; raw != nil {
+		var secrets []map[string]json.RawMessage
+		if json.Unmarshal(raw, &secrets) != nil || secrets == nil || len(secrets) > 100 {
+			return bad("invalid container domain secrets")
+		}
+		seen := map[string]bool{}
+		for _, secret := range secrets {
+			domain, name, value := credentialString(secret, "domain"), credentialString(secret, "name"), credentialString(secret, "value")
+			key := strings.ToLower(domain) + "\x00" + name
+			if len(secret) != 3 || !allowed[strings.ToLower(domain)] || !validResponseID(name) || value == "" || len(value) > 64<<10 || strings.ContainsAny(value, "\r\n\x00") || seen[key] {
+				return bad("domain secret requires a unique name, an allowed domain and a valid value")
+			}
+			seen[key] = true
 		}
 	}
 	return nil

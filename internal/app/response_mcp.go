@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-type mcpRequestKey struct{}
+type responseSecretsKey struct{}
 
 // Remote API Key MCP execution belongs to the selected Responses provider.
 // No connector OAuth, tunnels, or local MCP transport is started by the gateway.
@@ -155,8 +155,8 @@ func validateResponseMCPItem(item map[string]json.RawMessage) (string, error) {
 
 // Strip credential fields from Responses envelopes before returning or caching
 // them. RawMessage preserves numbers and leaves unrelated payloads untouched.
-func sanitizeResponseMCP(raw []byte) ([]byte, error) {
-	if !bytes.ContainsAny(raw, "\\") && !bytes.Contains(raw, []byte("headers")) && !bytes.Contains(raw, []byte("authorization")) {
+func sanitizeResponseTools(raw []byte) ([]byte, error) {
+	if !bytes.ContainsAny(raw, "\\") && !bytes.Contains(raw, []byte("headers")) && !bytes.Contains(raw, []byte("authorization")) && !bytes.Contains(raw, []byte("domain_secrets")) {
 		return raw, nil
 	}
 	var clean func(json.RawMessage, int) (json.RawMessage, bool, error)
@@ -198,6 +198,22 @@ func sanitizeResponseMCP(raw []byte) ([]byte, error) {
 					}
 				}
 			} else {
+				field := ""
+				switch credentialString(object, "type") {
+				case "code_interpreter":
+					field = "container"
+				case "shell", "shell_call":
+					field = "environment"
+				}
+				if field != "" {
+					var container, policy map[string]json.RawMessage
+					if json.Unmarshal(object[field], &container) == nil && json.Unmarshal(container["network_policy"], &policy) == nil && policy["domain_secrets"] != nil {
+						delete(policy, "domain_secrets")
+						container["network_policy"], _ = json.Marshal(policy)
+						object[field], _ = json.Marshal(container)
+						changed = true
+					}
+				}
 				for _, field := range []string{"response", "item", "tools", "input", "output", "data"} {
 					if child := object[field]; child != nil {
 						result, modified, err := clean(child, depth+1)

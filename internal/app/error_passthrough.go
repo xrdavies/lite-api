@@ -302,9 +302,9 @@ func (a *App) upstreamError(ctx context.Context, u *upstreamAccount, status int,
 			code = *rule.ResponseCode
 		}
 		message := upstreamErrorMessage(body, credentialString(u.Credentials, "api_key"))
-		if ctx.Value(mcpRequestKey{}) == true {
-			// Provider messages may echo arbitrary client-supplied MCP headers.
-			message = "upstream MCP request rejected"
+		if ctx.Value(responseSecretsKey{}) == true {
+			// Provider messages may echo client tool headers or domain secrets.
+			message = "upstream tool request rejected"
 		}
 		if !rule.PassthroughBody {
 			message = *rule.Message

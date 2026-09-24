@@ -648,8 +648,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	if in.NativeMCP {
-		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+	if in.NativeMCP || in.NativeCode {
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 		r = r.WithContext(ctx)
 	}
 	if in.Stream {
@@ -865,11 +865,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if err == nil && binding != nil && binding.MCPTool {
 		in.NativeMCP = true
-		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 		r = r.WithContext(ctx)
 	}
 	if err == nil && binding != nil && binding.CodeTool {
 		in.NativeCode = true
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
+		r = r.WithContext(ctx)
 	}
 	if err == nil && binding != nil {
 		in.FileIDs, err = mergeResponseResources(binding.FileIDs, in.FileIDs)
@@ -1430,7 +1432,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		} else {
 			forwardErr = observe(responseBody)
 			if wireIn.Protocol == "responses" && forwardErr == nil {
-				responseBody, forwardErr = sanitizeResponseMCP(responseBody)
+				responseBody, forwardErr = sanitizeResponseTools(responseBody)
 			}
 			if forwardErr == nil && in.CountOnly && protocol == "anthropic" && wireIn.Protocol == "gemini" {
 				var count struct {
@@ -1540,7 +1542,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			if wireIn.Protocol == "responses" && data != "" {
-				clean, err := sanitizeResponseMCP([]byte(data))
+				clean, err := sanitizeResponseTools([]byte(data))
 				if err != nil {
 					return err
 				}

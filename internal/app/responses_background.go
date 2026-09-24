@@ -219,7 +219,7 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 	}
 	// Acceptance remains recoverable even if the returned content cannot be
 	// sanitized. The initial checkpoint contains only identity, never tool headers.
-	clean, err := sanitizeResponseMCP(raw)
+	clean, err := sanitizeResponseTools(raw)
 	if err != nil {
 		return err
 	}
@@ -322,8 +322,8 @@ func (a *App) backgroundSource(ctx context.Context, t *backgroundResponse) (*ups
 	return u, nil
 }
 func (a *App) refreshBackgroundResponse(ctx context.Context, t *backgroundResponse) error {
-	if t.MCPTool {
-		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+	if t.MCPTool || t.CodeTool {
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 	}
 	if t.Stage == "terminal" {
 		return nil
@@ -422,8 +422,8 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 		fail(missing())
 		return
 	}
-	if t.MCPTool {
-		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+	if t.MCPTool || t.CodeTool {
+		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
 		r = r.WithContext(ctx)
 	}
 	if stream && !t.Stream {
@@ -587,7 +587,7 @@ func (a *App) streamBackgroundResponse(w http.ResponseWriter, r *http.Request, t
 			return &apiError{502, "background event missing response identity"}
 		}
 		raw, _ = json.Marshal(event)
-		raw, err := sanitizeResponseMCP(raw)
+		raw, err := sanitizeResponseTools(raw)
 		if err != nil {
 			return err
 		}

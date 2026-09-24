@@ -7,10 +7,37 @@ import (
 	"testing"
 )
 
-const nativeCodeTools = `[{"type":"code_interpreter","container":{"type":"auto","memory_limit":"4g","network_policy":{"type":"disabled"}}}]`
+const nativeCodeTools = `[{"type":"code_interpreter","container":{"type":"auto","memory_limit":"4g","network_policy":{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":"client-domain-secret"}]}}}]`
 const nativeCodeCalls = `[{"type":"code_interpreter_call","id":"ci_team","container_id":"cntr_team","status":"completed","code":"print(2+2)","outputs":[{"type":"logs","logs":"4"}]}]`
-const nativeHostedShellTools = `[{"type":"shell","environment":{"type":"container_auto","memory_limit":"4g","network_policy":{"type":"disabled"}}}]`
+const nativeHostedShellTools = `[{"type":"shell","environment":{"type":"container_auto","memory_limit":"4g","network_policy":{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":"client-domain-secret"}]}}}]`
 const nativeHostedShellCalls = `[{"type":"shell_call","id":"sc_team","call_id":"call_shell","environment":{"type":"container_reference","container_id":"cntr_team"},"action":{"commands":["printf 4"],"timeout_ms":1000,"max_output_length":2000},"status":"completed"},{"type":"shell_call_output","id":"sco_team","call_id":"call_shell","output":[{"stdout":"4","stderr":"","outcome":{"type":"exit","exit_code":0}}],"status":"completed"}]`
+
+func TestContainerNetworkPolicy(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"disabled"}`,
+		`{"type":"allowlist","allowed_domains":[]}`,
+		`{"type":"allowlist","allowed_domains":["example.test","cdn.example.test"],"domain_secrets":[{"domain":"EXAMPLE.TEST","name":"API_KEY","value":"private-key"}]}`,
+	} {
+		if err := validateContainerNetwork(json.RawMessage(raw)); err != nil {
+			t.Fatal("valid network policy rejected", err)
+		}
+	}
+	for _, raw := range []string{
+		`null`, `{}`, `{"type":"disabled","allowed_domains":[]}`,
+		`{"type":"allowlist","allowed_domains":null}`, `{"type":"allowlist","allowed_domains":["example.test","EXAMPLE.TEST"]}`,
+		`{"type":"allowlist","allowed_domains":["https://example.test"]}`, `{"type":"allowlist","allowed_domains":["*.example.test"]}`,
+		`{"type":"allowlist","allowed_domains":["-bad.test"]}`, `{"type":"allowlist","allowed_domains":["a..test"]}`,
+		`{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":null}`,
+		`{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"other.test","name":"API_KEY","value":"secret"}]}`,
+		`{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":""}]}`,
+		`{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":"s\r\nHeader: injected"}]}`,
+		`{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":"secret"},{"domain":"example.test","name":"API_KEY","value":"other"}]}`,
+	} {
+		if err := validateContainerNetwork(json.RawMessage(raw)); err == nil {
+			t.Fatal("invalid network policy admitted", raw)
+		}
+	}
+}
 
 func TestResponseHostedShell(t *testing.T) {
 	for _, raw := range []string{
@@ -46,7 +73,7 @@ func TestResponseHostedShell(t *testing.T) {
 	for _, tool := range []string{
 		`{"type":"shell","environment":{"type":"container_auto"},"allowed_callers":["programmatic"]}`,
 		`{"type":"shell","environment":{"type":"container_auto","file_ids":[42]}}`,
-		`{"type":"shell","environment":{"type":"container_auto","network_policy":{"type":"allowlist","allowed_domains":["example.test"]}}}`,
+		`{"type":"shell","environment":{"type":"container_auto","network_policy":{"type":"allowlist","allowed_domains":["https://example.test"]}}}`,
 		`{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_team","file_ids":["foreign"]}}`,
 	} {
 		var value map[string]json.RawMessage
@@ -107,7 +134,7 @@ func TestResponseCode(t *testing.T) {
 		`{"type":"code_interpreter","container":"../foreign"}`,
 		`{"type":"code_interpreter","container":{"type":"auto","file_ids":["../foreign"]}}`,
 		`{"type":"code_interpreter","container":{"type":"auto","memory_limit":"2g"}}`,
-		`{"type":"code_interpreter","container":{"type":"auto","network_policy":{"type":"allowlist","allowed_domains":["example.test"]}}}`,
+		`{"type":"code_interpreter","container":{"type":"auto","network_policy":{"type":"allowlist","allowed_domains":["https://example.test"]}}}`,
 		`{"type":"code_interpreter","container":{"type":"auto"},"allowed_callers":["programmatic"]}`,
 	} {
 		if _, _, err := parse(`{"tools":[` + tool + `]}`); err == nil {
