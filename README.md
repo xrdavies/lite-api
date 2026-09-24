@@ -67,6 +67,12 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 管理员先续期并激活原代理，再调用 `POST /api/v1/admin/accounts/{id}/revert-proxy-fallback` 还原，成功返回 `{"message":"reverted"}`；续期本身不移动账号。未处于回退状态或原代理不可用返回 409，账号不存在返回 404。手工设置账号 `proxy_id`（包括 0 直连）清除原代理记录；仍被账号当前绑定、原代理记录或备用链引用的代理不能删除。代理编辑、到期处理、账号指派和还原共用事务锁，避免并发续期被旧结果覆盖。代理及其备用链变更会清除受影响账号的倍率/模型快照并更新版本，消费累计和其他 JSON 保持；已通过路由选择的在途请求可以完成，新请求使用当前配置。
 
+`POST /api/v1/admin/proxies/{id}/quality-check` 检查指定代理的基础出口连通及 OpenAI、Anthropic、Gemini、Grok 四个固定目标，不发送上游 API Key、管理员凭证或 Cookie，也不允许请求指定检测 URL。原 `/test` 使用相同基础检查。两者都直接检测指定代理，即使它已停用/到期也不使用备用代理或直连；它们不会改变代理/账号的调度或到期状态。基础检查须获得合法出口 IP；失败时停止后续目标检测。各目标允许的未鉴权状态代表可达，不证明模型调用权限；429 记 warn，挑战页记 challenge，其他非预期状态记 fail。挑战识别参考 [Cloudflare cf-mitigated 说明](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)，并保留 403/429 HTML 特征检测，不尝试绕过挑战。
+
+质量响应包含 items、各类计数、score、grade、summary 和 checked_at；分数为 `max(0,100−10×warn−22×fail−30×challenge)`，90/75/60/40 分分别为 A/B/C/D，其余 F。基础连通失败可能仍有数值 B，实际可用性以逐项状态和 `quality_status` 为准。每目标最多 15 秒、总计 80 秒，响应头最多 64 KiB，正文只读取 8 KiB 分类前缀（基础 trace 必须完整且不超限）；不重试、不跟随重定向，继续校验 DNS、私网范围和 TLS 证书。单代理只允许一个检查，全局最多四个并发。诊断只保留固定摘要、出口 IP/国家代码/机房和格式有效的 cf-ray，不保存目标正文或代理密码。
+
+检查结果在 Redis 保留 24 小时，按代理数据库版本隔离；代理详情及列表显示当前版本的 latency/quality 字段，读取不触发探测。基础测试与质量检查分别保存，基础测试不抹去完整质量结果，连通字段以最新完成结果为准。检查期间代理配置发生变更返回 409，旧版本快照不会在新配置下显示；Redis 失败仍返回实际检测结果和 `cached=false`，管理查询仍可读取数据库信息。诊断缓存不作为调度或计费依据。
+
 独立上游验证无需数据库：设置本地 `UPSTREAM_BASE_URL`、`UPSTREAM_API_KEY`、`UPSTREAM_MODEL` 后执行 `./bin/lite-api upstream-check`。命令发起一次 JSON 和一次 SSE 文本生成，仅输出状态和时延摘要。Go 客户端对指定中转和 `gpt-5.6-luna` 的 JSON/SSE 已实测成功；其他平台当前由协议模拟测试覆盖，不能据此宣称所有原厂模型均已联调。
 
 管理员可通过 `/api/v1/admin/accounts/upstream-billing-probe/settings` 的 GET/PUT 配置倍率探测，默认 `{"enabled":true,"interval_minutes":30}`，间隔接受 5–1440 分钟。账号默认不参与；PUT `/api/v1/admin/accounts/{id}/upstream-billing-probe` 接受 `{"enabled":true}`，POST 同路径立即探测，POST `/api/v1/admin/accounts/upstream-billing-probe/batch` 接受最多 20 个 `account_ids`，去重并分别返回结果。全局开关只控制定时执行，手动探测不受它限制。单实例每分钟扫描到期账号，每轮最多 20 个、最多四个并发，同账号禁止重叠。

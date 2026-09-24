@@ -169,6 +169,19 @@ func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount,
 
 // Shared by HTTP and WebSocket handshakes, including proxy and DNS pinning.
 func (a *App) upstreamTransport(ctx context.Context, account *upstreamAccount, req *http.Request) (*http.Transport, error) {
+	var proxy *url.URL
+	if account.ProxyID != nil {
+		var err error
+		proxy, err = a.resolveProxy(ctx, *account.ProxyID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return a.transportViaProxy(ctx, req, proxy)
+}
+
+// A nil proxy explicitly means direct, never the process proxy environment.
+func (a *App) transportViaProxy(ctx context.Context, req *http.Request, proxy *url.URL) (*http.Transport, error) {
 	addr, err := a.resolveUpstream(ctx, req.URL.Hostname())
 	if err != nil {
 		return nil, err
@@ -192,35 +205,29 @@ func (a *App) upstreamTransport(ctx context.Context, account *upstreamAccount, r
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: hostname}
 	tr.ResponseHeaderTimeout = 30 * time.Second
 	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	if account.ProxyID != nil {
-		proxy, err := a.resolveProxy(ctx, *account.ProxyID)
-		if err != nil {
-			return nil, err
+	if proxy != nil {
+		tr.Proxy = http.ProxyURL(proxy)
+		if req.URL.Scheme == "http" && (proxy.Scheme == "http" || proxy.Scheme == "https") {
+			// Pin the absolute proxy target too; Request.Host would otherwise
+			// cause the proxy to resolve the hostname again after validation.
+			req.URL.Opaque = "//" + req.URL.Host + req.URL.EscapedPath()
 		}
-		if proxy != nil {
-			tr.Proxy = http.ProxyURL(proxy)
-			if req.URL.Scheme == "http" && (proxy.Scheme == "http" || proxy.Scheme == "https") {
-				// Pin the absolute proxy target too; Request.Host would otherwise
-				// cause the proxy to resolve the hostname again after validation.
-				req.URL.Opaque = "//" + req.URL.Host + req.URL.EscapedPath()
+		if proxy.Scheme == "https" {
+			proxyAddr, err := a.resolveUpstream(ctx, proxy.Hostname())
+			if err != nil {
+				return nil, err
 			}
-			if proxy.Scheme == "https" {
-				proxyAddr, err := a.resolveUpstream(ctx, proxy.Hostname())
+			tr.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(proxyAddr.String(), proxy.Port()))
 				if err != nil {
 					return nil, err
 				}
-				tr.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-					conn, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, net.JoinHostPort(proxyAddr.String(), proxy.Port()))
-					if err != nil {
-						return nil, err
-					}
-					secure := tls.Client(conn, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: proxy.Hostname()})
-					if err = secure.HandshakeContext(ctx); err != nil {
-						conn.Close()
-						return nil, err
-					}
-					return secure, nil
+				secure := tls.Client(conn, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: proxy.Hostname()})
+				if err = secure.HandshakeContext(ctx); err != nil {
+					conn.Close()
+					return nil, err
 				}
+				return secure, nil
 			}
 		}
 	}
@@ -372,6 +379,10 @@ func (a *App) resolveProxy(ctx context.Context, id int64) (*url.URL, error) {
 	if err != nil || p == nil {
 		return nil, err
 	}
+	return a.proxyURL(ctx, p)
+}
+
+func (a *App) proxyURL(ctx context.Context, p *proxyTarget) (*url.URL, error) {
 	if p.Protocol != "http" && p.Protocol != "https" && p.Protocol != "socks5" && p.Protocol != "socks5h" {
 		return nil, bad("unsupported proxy protocol")
 	}

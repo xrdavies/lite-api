@@ -1,10 +1,8 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -208,7 +206,8 @@ func (a *App) getProxy(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return reply(w, raw)
+	items := a.attachProxyChecks(r.Context(), []json.RawMessage{raw})
+	return reply(w, items[0])
 }
 func (a *App) listProxies(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
@@ -236,6 +235,7 @@ func (a *App) listProxies(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	items = a.attachProxyChecks(r.Context(), items)
 	if all {
 		return reply(w, items)
 	}
@@ -294,6 +294,7 @@ func (a *App) proxyAccounts(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) proxyRoutes() {
 	a.route("POST /api/v1/admin/proxies/{id}/test", "admin", a.testProxy)
+	a.route("POST /api/v1/admin/proxies/{id}/quality-check", "admin", a.checkProxyQuality)
 	a.route("GET /api/v1/admin/proxies", "admin", a.listProxies)
 	a.route("GET /api/v1/admin/proxies/all", "admin", a.listProxies)
 	a.route("POST /api/v1/admin/proxies", "admin", a.saveProxy)
@@ -301,32 +302,4 @@ func (a *App) proxyRoutes() {
 	a.route("PUT /api/v1/admin/proxies/{id}", "admin", a.saveProxy)
 	a.route("DELETE /api/v1/admin/proxies/{id}", "admin", a.deleteProxy)
 	a.route("GET /api/v1/admin/proxies/{id}/accounts", "admin", a.proxyAccounts)
-}
-
-func (a *App) testProxy(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathID(r)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	started := time.Now()
-	u := &upstreamAccount{Platform: "openai", ProxyID: &id, Credentials: map[string]json.RawMessage{"base_url": json.RawMessage(`"https://www.cloudflare.com"`)}}
-	response, err := a.upstreamRequest(ctx, u, http.MethodGet, "/cdn-cgi/trace", nil)
-	if err != nil {
-		return reply(w, map[string]any{"success": false, "latency_ms": time.Since(started).Milliseconds(), "error": "proxy connectivity test failed"})
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8193))
-	if err != nil || len(body) > 8192 || response.StatusCode != 200 {
-		return reply(w, map[string]any{"success": false, "error": "proxy test endpoint returned an invalid response"})
-	}
-	result := map[string]any{"success": true, "latency_ms": time.Since(started).Milliseconds()}
-	for _, line := range strings.Split(string(body), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if ok && (key == "ip" || key == "loc" || key == "colo") {
-			result[key] = value
-		}
-	}
-	return reply(w, result)
 }

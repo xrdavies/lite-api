@@ -16,6 +16,14 @@ type proxyTarget struct {
 	Username, Password           sql.NullString
 	Expires                      *time.Time
 	Backup                       *int64
+	UpdatedAt                    time.Time
+}
+
+func loadProxyTarget(ctx context.Context, q queryer, id int64) (*proxyTarget, error) {
+	p := &proxyTarget{ID: id}
+	err := q.QueryRowContext(ctx, `SELECT protocol,host,port,username,password,status,expires_at,fallback_mode,backup_proxy_id,updated_at
+ FROM proxies WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&p.Protocol, &p.Host, &p.Port, &p.Username, &p.Password, &p.Status, &p.Expires, &p.Mode, &p.Backup, &p.UpdatedAt)
+	return p, err
 }
 
 // Configuration, HTTP and WebSocket callers use the same fallback traversal.
@@ -27,9 +35,7 @@ func resolveProxyTarget(ctx context.Context, q queryer, id int64, at time.Time) 
 		if seen[id] {
 			return nil, bad("proxy fallback cycle")
 		}
-		p := &proxyTarget{ID: id}
-		err := q.QueryRowContext(ctx, `SELECT protocol,host,port,username,password,status,expires_at,fallback_mode,backup_proxy_id
- FROM proxies WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&p.Protocol, &p.Host, &p.Port, &p.Username, &p.Password, &p.Status, &p.Expires, &p.Mode, &p.Backup)
+		p, err := loadProxyTarget(ctx, q, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, bad("proxy is unavailable")
 		}
