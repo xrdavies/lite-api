@@ -50,6 +50,7 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-deployment.py
 - SQL 故障下消费不提交，Redis 保留待结算凭据；同时保留运行中的 Seedance 任务。
 - 对应用、Redis、PostgreSQL 执行 SIGKILL，原卷恢复后用上一提交镜像结算；检查会话、价格快照、余额/Key/用量及上游调用次数。
 - 回退后再次升级，不重复生成、扣费或管理员充值，成功请求仍能幂等重放。
+- 重新升级后创建 programmatic 后台任务，修改价格并制造 SQL 故障，再次强杀应用/Redis/PostgreSQL；由当前版本恢复原价一次结算，核对 Key 隔离、程序结果、幂等重放和无声明续接。该任务不交给不认识 programmatic 标记的旧版本。
 
 此脚本补充 `scripts/test-integration.py` 的 Docker/race 业务回归，不能代替真实供应商协议验证、对象存储故障测试或全量容量测试。
 

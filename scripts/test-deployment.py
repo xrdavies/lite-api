@@ -30,9 +30,10 @@ env.update(POSTGRES_PASSWORD=secrets.token_hex(24), JWT_SECRET=secrets.token_hex
            ADMIN_EMAIL="admin@example.test", ADMIN_PASSWORD=secrets.token_hex(16),
            LITE_API_IMAGE=images[0], LITE_API_VERSION="deployment-current")
 provider_key = secrets.token_hex(24)
-calls = {"text": 0, "video": 0}
+calls = {"text": 0, "video": 0, "program": 0}
 calls_lock = threading.Lock()
 video_ready = threading.Event()
+program_ready = threading.Event()
 secrets_seen = [env[k] for k in ("POSTGRES_PASSWORD", "JWT_SECRET", "ADMIN_PASSWORD")] + [provider_key]
 
 
@@ -60,6 +61,19 @@ class Provider(BaseHTTPRequestHandler):
                 calls["video"] += 1
             raw = b'{"id":"native_video"}'
             content_type = "application/json"
+        elif self.path == "/v1/responses":
+            assert body["model"] == "deploy-program"
+            with calls_lock:
+                calls["program"] += 1
+            if body.get("background"):
+                assert body["tools"] == [{"type": "programmatic_tool_calling"}]
+                result = {"id": "resp_deploy_program", "object": "response", "status": "queued"}
+            else:
+                assert body["previous_response_id"] == "resp_deploy_program" and "tools" not in body
+                result = {"id": "resp_deploy_continued", "object": "response", "model": "deploy-program",
+                          "status": "completed", "output": [], "usage": {"input_tokens": 2, "output_tokens": 3}}
+            raw = json.dumps(result).encode()
+            content_type = "application/json"
         else:
             assert self.path == "/v1/chat/completions" and body["model"] == "deploy-text"
             with calls_lock:
@@ -82,12 +96,19 @@ class Provider(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
-        assert self.path == "/api/v3/contents/generations/tasks/native_video"
         assert self.headers.get("Authorization") == "Bearer " + provider_key
-        result = {"id": "native_video", "status": "running", "model": "deploy-video"}
-        if video_ready.is_set():
-            result.update(status="succeeded", content={"video_url": "https://example.test/video.mp4"},
-                          usage={"completion_tokens": 11, "total_tokens": 11})
+        if self.path == "/v1/responses/resp_deploy_program":
+            result = {"id": "resp_deploy_program", "object": "response", "status": "in_progress", "model": "deploy-program"}
+            if program_ready.is_set():
+                result.update(status="completed", usage={"input_tokens": 2, "output_tokens": 3}, output=[
+                    {"type": "program", "id": "prog_deploy", "call_id": "pc_deploy", "code": "return 42;", "fingerprint": "deploy-replay"},
+                    {"type": "program_output", "id": "po_deploy", "call_id": "pc_deploy", "result": "42", "status": "completed"}])
+        else:
+            assert self.path == "/api/v3/contents/generations/tasks/native_video"
+            result = {"id": "native_video", "status": "running", "model": "deploy-video"}
+            if video_ready.is_set():
+                result.update(status="succeeded", content={"video_url": "https://example.test/video.mp4"},
+                              usage={"completion_tokens": 11, "total_tokens": 11})
         raw = json.dumps(result).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -280,6 +301,61 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert api("GET", "/api/v1/admin/system/version", admin)["version"] == "deployment-current"
         assert int(sql("SELECT count(*) FROM usage_logs")) == count_before + 2
         assert request(base, "POST", "/chat/completions", key, body, "deploy-json")[1] == first and calls == before_recovery
+        # New execution metadata must recover on a version that understands it.
+        # Exercise this only after rollback/re-upgrade; never give the old image
+        # a programmatic session whose safeguards it cannot recognize.
+        pgid = api("POST", "/api/v1/admin/groups", admin, {"name": "Program recovery", "platform": "openai", "rate_multiplier": 2,
+                    "model_pricing": [{"platform": "openai", "models": ["deploy-program"], "input_price": "0.001", "output_price": "0.002", "cache_read_price": "0", "cache_write_price": "0"}]})["id"]
+        api("POST", "/api/v1/admin/accounts", admin, {"name": "Program provider", "platform": "openai", "type": "apikey", "group_ids": [pgid],
+            "credentials": {"api_key": provider_key, "base_url": upstream, "api_protocol": "responses"}})
+        pkey_obj = api("POST", "/api/v1/keys", token, {"name": "Program recovery", "group_id": pgid, "quota": 100})
+        pkey, pkid = pkey_obj["key"], pkey_obj["id"]
+        secrets_seen.append(pkey)
+        program = {"model": "deploy-program", "input": "calculate", "tools": [{"type": "programmatic_tool_calling"}], "store": True, "background": True}
+        status, raw, _ = request(base, "POST", "/responses", pkey, program, "deploy-program")
+        if status != 200:
+            error = raw.decode(errors="replace")
+            for value in secrets_seen:
+                error = error.replace(value, "[redacted]")
+            raise AssertionError(f"program submission HTTP {status}: {error}")
+        assert json.loads(raw)["id"] == "resp_deploy_program"
+        api("PUT", f"/api/v1/admin/groups/{pgid}", admin, {"rate_multiplier": 9})
+        sql("ALTER TABLE usage_logs ADD CONSTRAINT program_failure CHECK (false) NOT VALID;")
+        program_ready.set()
+        status, raw, _ = request(base, "GET", "/responses/resp_deploy_program", pkey)
+        assert status in (409, 503) and b'"status":"completed"' not in raw
+        assert redis("SCARD", "gateway:background:pending") == "1"
+        before_program = dict(calls)
+        kill("app")
+        kill("redis")
+        kill("postgres")
+        dc("up", "-d", "--wait", "postgres", "redis")
+        assert redis("SCARD", "gateway:background:pending") == "1"
+        sql("ALTER TABLE usage_logs DROP CONSTRAINT program_failure;")
+        dc("up", "-d", "--no-build", "--force-recreate", "app")
+        ready()
+        eventually(lambda: redis("SCARD", "gateway:background:pending") == "0", "program settlement recovery")
+        assert calls == before_program, "program recovery repeated creation"
+        for _ in range(2):
+            status, raw, _ = request(base, "GET", "/responses/resp_deploy_program", pkey)
+            result = json.loads(raw)
+            assert status == 200 and result["status"] == "completed"
+            assert result["output"][0]["fingerprint"] == "deploy-replay" and result["output"][1]["result"] == "42"
+        assert request(base, "GET", "/responses/resp_deploy_program", key)[0] == 404
+        count, cost, used = sql(f"SELECT (SELECT count(*) FROM usage_logs WHERE api_key_id={pkid}),(SELECT sum(actual_cost) FROM usage_logs WHERE api_key_id={pkid}),quota_used FROM api_keys WHERE id={pkid}").split("|")
+        assert count == "1" and Decimal(cost) == Decimal("0.016") and Decimal(used) == Decimal(cost)
+        assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal("0.016")
+        status, _, headers = request(base, "POST", "/v1/responses", pkey, program, "deploy-program")
+        assert status == 200 and headers.get("Idempotency-Replayed") == "true" and calls == before_program
+        continued = {"model": "deploy-program", "input": "continue", "previous_response_id": "resp_deploy_program"}
+        assert request(base, "POST", "/responses", key, continued)[0] == 404
+        status, raw, _ = request(base, "POST", "/responses", pkey, continued)
+        assert status == 200 and json.loads(raw)["id"] == "resp_deploy_continued"
+        assert calls["program"] == before_program["program"] + 1
+        cost = sql(f"SELECT sum(actual_cost) FROM usage_logs WHERE api_key_id={pkid}")
+        assert Decimal(cost) == Decimal("0.016") + Decimal("0.072")
+        assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal(cost)
+        print("Programmatic task: SIGKILL recovery, original price, one settlement, replay and scoped continuation verified", flush=True)
         logs = dc("logs", "--no-color", "app").stdout
         assert not any(secret in logs for secret in secrets_seen), "secret in application logs"
         print("PASS: isolated release, crash recovery, rollback and upgrade; no paid upstream calls", flush=True)
