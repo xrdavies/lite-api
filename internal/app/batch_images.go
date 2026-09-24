@@ -290,6 +290,7 @@ func (a *App) submitBatchImage(w http.ResponseWriter, r *http.Request, g *gatewa
 		return &apiError{429, "user concurrency exhausted"}
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	if err = a.gatewayRPM(r.Context(), g); err != nil {
 		return err
 	}

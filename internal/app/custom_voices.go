@@ -290,6 +290,7 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	if voiceID != "" {
 		voice, err = a.loadCustomVoice(ctx, g, voiceID)
 		if err != nil {

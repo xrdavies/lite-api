@@ -144,7 +144,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	expect(404, "POST", "/api/v1/admin/api-keys", admin, map[string]any{"user_id": uid, "name": "not allowed"})
 	expect(400, "POST", "/api/v1/keys", userToken, map[string]any{"name": "bad", "ip_blacklist": []string{"not-an-ip"}})
 	expect(400, "POST", "/api/v1/keys", userToken, map[string]any{"name": "bad", "quota": -1})
-	if _, err = db.ExecContext(ctx, "UPDATE api_keys SET quota_used=3.12345678,usage_5h=1 WHERE id=$1", kid); err != nil {
+	if _, err = db.ExecContext(ctx, "UPDATE api_keys SET quota_used=3.12345678,usage_5h=1,window_5h_start=now() WHERE id=$1", kid); err != nil {
 		t.Fatal(err)
 	}
 	updated := must("PUT", kpath, userToken, map[string]any{"name": "edited", "quota": 20})

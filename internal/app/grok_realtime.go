@@ -175,6 +175,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	snapshot := g.Group
 	in := textRequest{Protocol: "realtime", Model: model, Stream: true}
 	binding, err := a.voiceLibraryBinding(ctx, g)

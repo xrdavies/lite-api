@@ -173,5 +173,6 @@ func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *ga
 		return &apiError{429, "user concurrency limit reached"}
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	return a.readResponseResource(w, r, u, id, query)
 }

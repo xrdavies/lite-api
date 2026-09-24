@@ -109,6 +109,7 @@ func (a *App) keyBilling(w http.ResponseWriter, r *http.Request) {
 			return &apiError{429, "user concurrency limit reached"}
 		}
 		defer a.releaseSlot("user", g.UserID)
+		defer a.trackKeySlot(g.Key.ID)()
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		var group, resolved json.Number

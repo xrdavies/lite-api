@@ -494,6 +494,7 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 		return
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	if protocol == "videos" && !g.Group.AllowImage {
 		fail(denied())
 		return
@@ -705,6 +706,7 @@ func (a *App) videoLookup(w http.ResponseWriter, r *http.Request, g *gatewayIden
 		return &apiError{429, "user concurrency limit reached"}
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	if err = a.refreshVideoTask(r.Context(), t); err != nil {
 		return err
 	}

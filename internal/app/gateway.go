@@ -772,6 +772,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	groupSnapshot := g.Group
 	routingGroup := g.dispatchGroup()
 	g.Group.Platform = routingGroup.Platform

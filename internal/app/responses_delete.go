@@ -47,6 +47,7 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request, g *
 		return &apiError{429, "user concurrency limit reached"}
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	var deletion responseDeletion
 	raw, err := a.Redis.Get(ctx, key).Bytes()
 	stored := err == nil

@@ -386,6 +386,7 @@ func (a *App) gatewayUsage(w http.ResponseWriter, r *http.Request) {
 			return &apiError{429, "user concurrency limit reached"}
 		}
 		defer a.releaseSlot("user", g.UserID)
+		defer a.trackKeySlot(g.Key.ID)()
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		// One statement gives balance, windows and raw usage the same snapshot.

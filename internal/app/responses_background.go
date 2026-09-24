@@ -443,6 +443,7 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.releaseSlot("user", g.UserID)
+	defer a.trackKeySlot(g.Key.ID)()
 	if !stream && r.Method == "GET" || t.Stage == "settling" {
 		if err = a.refreshBackgroundResponse(ctx, t); err != nil {
 			fail(err)

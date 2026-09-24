@@ -152,6 +152,29 @@ func testKeyManagement(t *testing.T, a *App, admin string) {
 			t.Fatal("invalid key list filter accepted", w.Code)
 		}
 	}
+	// Effective windows are a projection; queries and unrelated edits must not
+	// reset the stored counters, including a stale counter without a start time.
+	exec(`UPDATE api_keys SET usage_5h=1.12345678,window_5h_start=now(),
+ usage_1d=2,window_1d_start=now()-interval '25 hours',usage_7d=3,window_7d_start=NULL WHERE id=$1`, kid)
+	for _, v := range []map[string]any{
+		manage("GET", keyPath, token, nil),
+		manage("PUT", keyPath, token, map[string]string{"name": "window-view"}),
+		manage("GET", "/api/v1/keys?search=window-view", token, nil)["items"].([]any)[0].(map[string]any),
+		manage("GET", fmt.Sprintf("/api/v1/admin/users/%d/api-keys?search=window-view", uid), admin, nil)["items"].([]any)[0].(map[string]any),
+	} {
+		if v["usage_5h"] != 1.12345678 || v["usage_1d"] != float64(0) || v["usage_7d"] != float64(0) || v["reset_5h_at"] == nil || v["reset_1d_at"] != nil || v["reset_7d_at"] != nil || v["current_concurrency"] != float64(0) || v["last_used_ip"] != nil {
+			t.Fatal("invalid effective key window projection")
+		}
+		start, e1 := time.Parse(time.RFC3339Nano, v["window_5h_start"].(string))
+		reset, e2 := time.Parse(time.RFC3339Nano, v["reset_5h_at"].(string))
+		if e1 != nil || e2 != nil || reset.Sub(start) != 5*time.Hour {
+			t.Fatal("incorrect window reset time", e1, e2)
+		}
+	}
+	var stale bool
+	if err := a.DB.QueryRow("SELECT usage_1d=2 AND usage_7d=3 FROM api_keys WHERE id=$1", kid).Scan(&stale); err != nil || !stale {
+		t.Fatal("key projection changed stored usage", err)
+	}
 	// Expiry changes only recover expired keys, preserving manual disables,
 	// exhausted quotas, explicit status choices and concurrent consumption fields.
 	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)

@@ -33,7 +33,9 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户通过 `POST /api/v1/keys` 创建自己的 Key，可携带 `Idempotency-Key`。同一操作内该标识保留 24 小时，相同用户和请求重放首次结果（包括原 Key、ID、到期时间），不同用户或请求返回 409；不要跨用户复用标识。创建和重放记录在一个数据库事务中提交，写入失败全部回滚；重放不会重新启用已删除的 Key。省略幂等键时每次创建独立 Key。重放同时返回 `Idempotency-Replayed: true` 和 `X-Idempotency-Replayed: true`。
 
-`GET /api/v1/keys` 支持名称或 Key 的 `search`（最多 100 字节，按字面子串匹配）、`status`、`group_id` 筛选；`group_id=0` 只查询未分组 Key。`sort_by` 支持 id/name/status/created_at/expires_at/last_used_at，默认 created_at；`sort_order=asc|desc` 默认 desc，相同值以 ID 排序，筛选和排序在分页前执行。管理员按用户或分组查询使用同一查询逻辑，查询参数不能扩大路径限定范围。修改或清除过期时间会将 `expired` Key 恢复为 active（新时间须在未来），人工 inactive 和 quota_exhausted 不因此恢复；显式 status 优先，额度和窗口计数只在显式 reset 时清零。
+`GET /api/v1/keys` 支持名称或 Key 的 `search`（最多 100 字节，按字面子串匹配）、`status`、`group_id` 筛选；`group_id=0` 只查询未分组 Key。`sort_by` 支持 id/name/status/created_at/expires_at/last_used_at/current_concurrency，默认 created_at；`sort_order=asc|desc` 默认 desc，相同值以 ID 排序，筛选和排序在分页前执行。管理员按用户或分组查询使用同一查询逻辑，查询参数不能扩大路径限定范围。修改或清除过期时间会将 `expired` Key 恢复为 active（新时间须在未来），人工 inactive 和 quota_exhausted 不因此恢复；显式 status 优先，额度和窗口计数只在显式 reset 时清零。
+
+Key 列表和详情返回 `current_concurrency`、`last_used_ip` 及有效窗口用量。并发是当前单实例中已取得用户槽位、尚未完成的请求数，包含等待账号槽位的请求；尚在等待用户槽位、空闲 WebSocket 和供应商后台执行中的任务不计入。查询及按并发排序使用同一快照，结束/失败/取消后释放；进程重启从零开始。`last_used_ip` 来自该 Key 最近一条含 IP 的已记录用量。过期或未初始化窗口的 `usage_5h/1d/7d` 返回 0，只有有效窗口返回对应 `reset_5h_at/1d_at/7d_at`；查询不改写数据库累计值。
 
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。
 

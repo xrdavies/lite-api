@@ -148,6 +148,17 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	k := must("POST", "/api/v1/keys", user, map[string]any{"name": "Queue", "group_id": gid, "quota": 100})
 	key, kid := k["key"].(string), id(k)
 	kp := fmt.Sprintf("/api/v1/keys/%d", kid)
+	idle := must("POST", "/api/v1/keys", user, map[string]any{"name": "idle", "group_id": gid})
+	checkKey := func(count int, used bool) {
+		t.Helper()
+		v := must("GET", kp, user, nil)
+		if v["current_concurrency"] != float64(count) {
+			t.Fatal("key concurrency differs from admitted requests", v["current_concurrency"], count)
+		}
+		if used && v["last_used_ip"] != "192.0.2.99" || !used && v["last_used_ip"] != nil {
+			t.Fatal("key last used IP does not match settled usage", v["last_used_ip"])
+		}
+	}
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
@@ -199,6 +210,7 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 		}
 	}
 	done := begin("user", uid)
+	checkKey(0, false) // Queued before user admission; no active Key slot yet.
 	users := must("GET", "/api/v1/admin/ops/user-concurrency", admin, nil)["user"].(map[string]any)
 	load := users[fmt.Sprint(uid)].(map[string]any)
 	if load["current_in_use"] != float64(1) || load["waiting_in_queue"] != float64(1) || load["load_percentage"] != float64(100) || load["user_email"] != "queue@example.test" {
@@ -207,8 +219,28 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	// Pricing is captured only once the user's concurrency is admitted.
 	must("PUT", gp, admin, map[string]any{"model_pricing": price("0.003")})
 	checkCost(finish(done, "user", uid, 200), "0.0400000000")
+	checkKey(0, true)
 	must("PUT", gp, admin, map[string]any{"model_pricing": price("0.001")})
 	done = begin("account", aid)
+	checkKey(1, true) // Waiting for the account still holds an admitted user slot.
+	for _, query := range []struct {
+		order string
+		page  int
+		want  int64
+	}{{"desc", 1, kid}, {"desc", 2, id(idle)}, {"asc", 1, id(idle)}} {
+		v := must("GET", fmt.Sprintf("/api/v1/keys?sort_by=current_concurrency&sort_order=%s&page_size=1&page=%d", query.order, query.page), user, nil)
+		items := v["items"].([]any)
+		if v["total"] != float64(2) || len(items) != 1 || id(items[0].(map[string]any)) != query.want {
+			t.Fatal("concurrency sorting applied after pagination")
+		}
+	}
+	for _, path := range []string{fmt.Sprintf("/api/v1/admin/users/%d/api-keys", uid), fmt.Sprintf("/api/v1/admin/groups/%d/api-keys", gid)} {
+		v := must("GET", path+"?sort_by=current_concurrency&page_size=1", admin, nil)
+		row := v["items"].([]any)[0].(map[string]any)
+		if id(row) != kid || row["current_concurrency"] != float64(1) {
+			t.Fatal("admin Key list lost current concurrency")
+		}
+	}
 	stats := must("GET", "/api/v1/admin/ops/concurrency?group_id="+fmt.Sprint(gid), admin, nil)
 	load = stats["account"].(map[string]any)[fmt.Sprint(aid)].(map[string]any)
 	if load["current_in_use"] != float64(1) || load["waiting_in_queue"] != float64(1) || load["account_id"] != float64(aid) || load["group_id"] != float64(gid) {
@@ -225,6 +257,7 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 		}
 	}
 	checkCost(finish(done, "account", aid, 200), "0.0200000000")
+	checkKey(0, true)
 	for _, path := range []string{"/api/v1/admin/ops/concurrency", "/api/v1/admin/ops/user-concurrency"} {
 		if w := call("GET", path, user, nil); w.Code != 403 {
 			t.Fatal("user can access queue diagnostics", path, w.Code)
@@ -459,4 +492,5 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	if active != 0 || waiting != 0 || queued != 0 {
 		t.Fatal("queue cleanup", active, waiting, queued)
 	}
+	checkKey(0, true)
 }

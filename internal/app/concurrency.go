@@ -17,6 +17,18 @@ type accountBusy struct{ ID int64 }
 
 func (e *accountBusy) Error() string { return "upstream accounts are busy" }
 
+// Track admitted requests, including waits for an upstream slot. This is an
+// observation, not an additional Key limit; idle sockets and queued users do not count.
+func (a *App) trackKeySlot(id int64) func() {
+	a.gatewayMu.Lock()
+	if a.gatewayActive == nil {
+		a.gatewayActive = map[string]int{}
+	}
+	a.gatewayActive[fmt.Sprintf("key:%d", id)]++
+	a.gatewayMu.Unlock()
+	return func() { a.releaseSlot("key", id) }
+}
+
 func (a *App) wakeGatewayLocked() {
 	if a.gatewayWake != nil {
 		close(a.gatewayWake)
