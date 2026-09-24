@@ -119,6 +119,7 @@ func TestRequestFileGrants(t *testing.T) {
 		{"responses", `{"input":[{"type":"function_call_output","call_id":"c","output":[{"type":"input_file","file_id":"file_team"}]}]}`},
 		{"responses", `{"input":[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"file_team"}}]}`},
 		{"responses", `{"input":"calculate","tools":[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]}`},
+		{"responses", `{"input":"calculate","tools":[{"type":"shell","environment":{"type":"container_auto","file_ids":["file_team"]}}]}`},
 		{"responses", `{"input":"draw","tools":[{"type":"image_generation","input_image_mask":{"file_id":"file_team"}}]}`},
 		{"responses", `{"input":[{"type":"additional_tools","tools":[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]}]}`},
 		{"responses", `{"prompt":{"id":"pmpt_team","variables":{"doc":{"type":"input_file","file_id":"file_team"}}}}`},

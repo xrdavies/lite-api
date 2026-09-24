@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "files", "uploads"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code", "shell", "files", "uploads"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -400,6 +400,13 @@ func testHostedToolSearch(t *testing.T, a *App, admin string) {
 // server tool discovery and client-owned execution tools.
 func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	t.Helper()
+	containerTool := kind == "code" || kind == "shell"
+	reference := func(id string) json.RawMessage {
+		if kind == "shell" {
+			return json.RawMessage(fmt.Sprintf(`[{"type":"shell","environment":{"type":"container_reference","container_id":%q}}]`, id))
+		}
+		return json.RawMessage(fmt.Sprintf(`[{"type":"code_interpreter","container":%q}]`, id))
+	}
 	defer pauseTestWorkers(a)()
 	ctx := context.Background()
 	email := "native-tools-" + kind + "@example.test"
@@ -423,10 +430,15 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		declaration, output, history, marker, toolMarker = nativeMCPTools, nativeMCPCalls, nativeMCPHistory, `"type":"mcp_approval_request"`, `"require_approval":"always"`
 		ip = "192.0.2.185:1234"
 	}
-	if kind == "code" {
+	if containerTool {
 		declaration, output, history, marker, toolMarker = nativeCodeTools, nativeCodeCalls, nativeCodeCalls, `"type":"code_interpreter_call"`, `"memory_limit":"4g"`
 		ip = "192.0.2.186:1234"
 	}
+	if kind == "shell" {
+		declaration, output, history, marker, toolMarker = nativeHostedShellTools, nativeHostedShellCalls, nativeHostedShellCalls, `"type":"shell_call"`, `"type":"container_auto"`
+		ip = "192.0.2.188:1234"
+	}
+
 	if kind == "files" || kind == "uploads" {
 		declaration, output, history, marker, toolMarker = nativeFileTools, nativeFileCalls, nativeFileCalls, `"type":"file_search_call"`, `"vector_store_ids":["vs_team"]`
 		ip = "192.0.2.187:1234"
@@ -520,7 +532,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		if kind == "uploads" && n > 1 {
 			response = strings.ReplaceAll(response, `"msg_uploaded"`, fmt.Sprintf(`"msg_uploaded_%d"`, n))
 		}
-		if kind == "code" && conn != nil {
+		if containerTool && conn != nil {
 			response = strings.ReplaceAll(strings.ReplaceAll(response, "ci_team", "ci_socket"), "cntr_team", "cntr_socket")
 		}
 		if textOnly.Load() {
@@ -560,9 +572,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
 				t.Error(err)
 			}
-			if kind == "code" || kind == "files" || kind == "uploads" {
+			if containerTool || kind == "files" || kind == "uploads" {
 				_, next, err := conn.Read(r.Context())
-				if err != nil || kind == "code" && !bytes.Contains(next, []byte(`"container":"cntr_socket"`)) || !bytes.Contains(next, []byte(`"store":false`)) {
+				if err != nil || containerTool && !bytes.Contains(next, []byte("cntr_socket")) || !bytes.Contains(next, []byte(`"store":false`)) {
 					t.Error("socket container continuation", err, string(next))
 					return
 				}
@@ -637,10 +649,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if w = call("POST", "/responses", other, body, ""); w.Code != 404 || calls.Load() != 1 {
 		t.Fatal("foreign search continuation", w.Code)
 	}
-	if kind == "code" {
+	if containerTool {
 		for _, request := range []map[string]any{
-			{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_team"}]`)},
-			{"model": "tool-model", "input": "calculate", "previous_response_id": first.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_foreign"}]`)},
+			{"model": "tool-model", "input": "calculate", "tools": reference("cntr_team")},
+			{"model": "tool-model", "input": "calculate", "previous_response_id": first.ID, "tools": reference("cntr_foreign")},
 		} {
 			if got := call("POST", "/responses", key, request, ""); got.Code != 404 || calls.Load() != 1 {
 				t.Fatal("unowned container dispatched", got.Code, got.Body.String())
@@ -725,7 +737,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	body["type"] = "response.create"
-	if kind == "code" || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" {
 		body["store"] = false
 	}
 	raw, _ := json.Marshal(body)
@@ -742,10 +754,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("MCP headers exposed over WS")
 	}
 	contextExtra := 0
-	if kind == "code" || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" {
 		var event struct{ Response struct{ ID string } }
 		_ = json.Unmarshal(raw, &event)
-		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_socket"}]`)}
+		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": reference("cntr_socket")}
 		if kind == "files" || kind == "uploads" {
 			delete(request, "tools")
 		}
@@ -770,7 +782,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	delete(body, "type")
 	check(3 + contextExtra)
 	body["background"], body["store"] = true, true
-	if kind == "code" || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" {
 		body["previous_response_id"] = first.ID
 		delete(body, "tools")
 		textOnly.Store(true) // Plain replies must retain inherited resource grants.
@@ -813,7 +825,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 	}
 	check(4 + contextExtra)
-	if kind == "code" {
+	if containerTool {
 		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
 		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
 			t.Fatal("code ownership lost across background recovery", binding, err)
@@ -849,7 +861,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("search wallet/key drift", err)
 	}
 	delete(body, "background")
-	if kind == "code" || kind == "files" || kind == "uploads" {
+	if containerTool || kind == "files" || kind == "uploads" {
 		delete(body, "previous_response_id")
 		body["tools"] = json.RawMessage(declaration)
 		textOnly.Store(false)
@@ -873,8 +885,8 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
 		t.Fatal("composite hosted search", w.Code, w.Body.String())
 	}
-	if kind == "code" {
-		request := map[string]any{"model": "tool-model", "previous_response_id": accepted.ID, "input": "reuse", "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_team"}]`)}
+	if containerTool {
+		request := map[string]any{"model": "tool-model", "previous_response_id": accepted.ID, "input": "reuse", "tools": reference("cntr_team")}
 		textOnly.Store(true)
 		got := call("POST", "/responses", key, request, "")
 		textOnly.Store(false)
@@ -1016,6 +1028,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if kind == "uploads" {
 		requests := []map[string]any{
 			{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(`[{"type":"code_interpreter","container":{"type":"auto","file_ids":["file_team"]}}]`)},
+			{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(`[{"type":"shell","environment":{"type":"container_auto","file_ids":["file_team"]}}]`)},
 			{"model": "tool-model", "input": json.RawMessage(`[{"type":"custom_tool_call_output","call_id":"c","output":[{"type":"input_file","file_id":"file_team"}]}]`)},
 			{"model": "tool-model", "input": json.RawMessage(`[{"type":"computer_call_output","call_id":"c","output":{"type":"computer_screenshot","file_id":"file_team"}}]`)},
 			{"model": "tool-model", "prompt": json.RawMessage(`{"id":"pmpt_team","variables":{"doc":{"type":"input_file","file_id":"file_team"}}}`)},

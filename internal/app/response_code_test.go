@@ -9,6 +9,66 @@ import (
 
 const nativeCodeTools = `[{"type":"code_interpreter","container":{"type":"auto","memory_limit":"4g","network_policy":{"type":"disabled"}}}]`
 const nativeCodeCalls = `[{"type":"code_interpreter_call","id":"ci_team","container_id":"cntr_team","status":"completed","code":"print(2+2)","outputs":[{"type":"logs","logs":"4"}]}]`
+const nativeHostedShellTools = `[{"type":"shell","environment":{"type":"container_auto","memory_limit":"4g","network_policy":{"type":"disabled"}}}]`
+const nativeHostedShellCalls = `[{"type":"shell_call","id":"sc_team","call_id":"call_shell","environment":{"type":"container_reference","container_id":"cntr_team"},"action":{"commands":["printf 4"],"timeout_ms":1000,"max_output_length":2000},"status":"completed"},{"type":"shell_call_output","id":"sco_team","call_id":"call_shell","output":[{"stdout":"4","stderr":"","outcome":{"type":"exit","exit_code":0}}],"status":"completed"}]`
+
+func TestResponseHostedShell(t *testing.T) {
+	for _, raw := range []string{
+		`{"tools":` + nativeHostedShellTools + `}`,
+		`{"input":[{"type":"additional_tools","tools":` + nativeHostedShellTools + `}]}`,
+		`{"tools":[{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_team"}}]}`,
+		`{"input":` + nativeHostedShellCalls + `}`,
+	} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &body)
+		body["model"] = json.RawMessage(`"model"`)
+		if body["input"] == nil {
+			body["input"] = json.RawMessage(`"calculate"`)
+		}
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", body)
+		if err != nil || !in.NativeCode || in.HostedSearch {
+			t.Fatal("hosted shell admission", in, err)
+		}
+		if len(in.ContainerReferences) > 0 && (validateResponseContainers(in, nil) == nil || validateResponseContainers(in, &responseBinding{Containers: []string{"cntr_team"}}) != nil) {
+			t.Fatal("shell container ownership bypass")
+		}
+		if _, err := responsesToChatRequest(body, nil); err == nil {
+			t.Fatal("hosted shell converted to Chat")
+		}
+		if _, _, err := responsesToAnthropicRequest(body, nil); err == nil {
+			t.Fatal("hosted shell converted to Messages")
+		}
+	}
+	observation := textObservation{Protocol: "responses"}
+	if err := observation.observe([]byte(`{"id":"resp_shell","object":"response","status":"completed","output":` + nativeHostedShellCalls + `,` + responseUsage + `}`)); err != nil || !slices.Equal(observation.ResponseContainers, []string{"cntr_team"}) {
+		t.Fatal("hosted shell container lost", observation, err)
+	}
+	for _, tool := range []string{
+		`{"type":"shell","environment":{"type":"container_auto"},"allowed_callers":["programmatic"]}`,
+		`{"type":"shell","environment":{"type":"container_auto","file_ids":[42]}}`,
+		`{"type":"shell","environment":{"type":"container_auto","network_policy":{"type":"allowlist","allowed_domains":["example.test"]}}}`,
+		`{"type":"shell","environment":{"type":"container_reference","container_id":"cntr_team","file_ids":["foreign"]}}`,
+	} {
+		var value map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(tool), &value)
+		if _, _, err := responseShellTool(value); err == nil {
+			t.Fatal("invalid hosted shell option admitted", tool)
+		}
+	}
+	for _, id := range []string{"", "../foreign"} {
+		item := map[string]json.RawMessage{
+			"type": json.RawMessage(`"shell_call"`), "environment": json.RawMessage(`{"type":"container_reference","container_id":"cntr_team"}`),
+			"call_id": json.RawMessage(`"call_shell"`), "action": json.RawMessage(`{"commands":["ls"]}`),
+		}
+		item["id"], _ = json.Marshal(id)
+		if _, _, err := responseShellItem(item); err == nil {
+			t.Fatal("hosted shell history without owned item reference admitted")
+		}
+		if _, err := responseContainerIDs([]map[string]json.RawMessage{item}); err == nil {
+			t.Fatal("invalid hosted shell output authorized a container")
+		}
+	}
+}
 
 func TestResponseCode(t *testing.T) {
 	parse := func(raw string) (textRequest, map[string]json.RawMessage, error) {

@@ -5,8 +5,8 @@ import (
 	"slices"
 )
 
-// Containers execute at the Responses provider, never in this process. Existing
-// IDs require owned response context; uploaded file lifecycle is separate.
+// Code Interpreter and hosted Shell containers execute at the provider, never
+// in this process. Both use the same owned response context and file grants.
 func responseCodeTool(tool map[string]json.RawMessage) (string, error) {
 	for field, raw := range tool {
 		switch field {
@@ -30,29 +30,92 @@ func responseCodeTool(tool map[string]json.RawMessage) (string, error) {
 	if json.Unmarshal(tool["container"], &container) != nil || credentialString(container, "type") != "auto" {
 		return "", bad("code interpreter requires an auto container or an owned container ID")
 	}
+	return "", validateResponseAutoContainer(container)
+}
+
+func validateResponseAutoContainer(container map[string]json.RawMessage) error {
 	for field, raw := range container {
 		switch field {
 		case "type":
 		case "memory_limit":
 			size := credentialString(container, field)
 			if string(raw) != "null" && size != "1g" && size != "4g" && size != "16g" && size != "64g" {
-				return "", bad("invalid code interpreter memory limit")
+				return bad("invalid container memory limit")
 			}
 		case "file_ids":
 			var files []string
 			if string(raw) != "null" && (json.Unmarshal(raw, &files) != nil || len(files) > 100) {
-				return "", bad("invalid code interpreter file list")
+				return bad("invalid container file list")
 			}
 		case "network_policy":
 			var policy map[string]json.RawMessage
 			if json.Unmarshal(raw, &policy) != nil || len(policy) != 1 || credentialString(policy, "type") != "disabled" {
-				return "", bad("code interpreter network policy must be disabled")
+				return bad("container network policy must be disabled")
 			}
 		default:
-			return "", bad("unsupported code interpreter container option")
+			return bad("unsupported container option")
 		}
 	}
-	return "", nil
+	return nil
+}
+
+func responseShellTool(tool map[string]json.RawMessage) (string, bool, error) {
+	for field, raw := range tool {
+		switch field {
+		case "type", "environment":
+		case "allowed_callers":
+			var callers []string
+			if string(raw) != "null" && (json.Unmarshal(raw, &callers) != nil || len(callers) != 1 || callers[0] != "direct") {
+				return "", false, bad("shell requires direct invocation")
+			}
+		default:
+			return "", false, bad("unsupported shell option")
+		}
+	}
+	var env map[string]json.RawMessage
+	if json.Unmarshal(tool["environment"], &env) != nil || env == nil {
+		return "", false, bad("shell requires an explicit environment")
+	}
+	switch credentialString(env, "type") {
+	case "local":
+		return "", false, validateLocalEnvironment(tool["environment"])
+	case "container_auto":
+		return "", true, validateResponseAutoContainer(env)
+	case "container_reference":
+		id, err := responseShellContainer(tool["environment"])
+		return id, true, err
+	default:
+		return "", false, bad("unsupported shell environment")
+	}
+}
+
+func responseShellContainer(raw json.RawMessage) (string, error) {
+	var env map[string]json.RawMessage
+	if json.Unmarshal(raw, &env) != nil || len(env) != 2 || credentialString(env, "type") != "container_reference" || !validResponseID(credentialString(env, "container_id")) {
+		return "", bad("shell requires a valid container reference")
+	}
+	return credentialString(env, "container_id"), nil
+}
+
+func hostedShellItem(item map[string]json.RawMessage) bool {
+	if credentialString(item, "type") != "shell_call" {
+		return false
+	}
+	var env map[string]json.RawMessage
+	_ = json.Unmarshal(item["environment"], &env)
+	return credentialString(env, "type") == "container_reference"
+}
+
+func responseShellItem(item map[string]json.RawMessage) (string, string, error) {
+	id := credentialString(item, "id")
+	if !validResponseID(id) {
+		return "", "", bad("hosted shell history requires an owned item ID")
+	}
+	container, err := responseShellContainer(item["environment"])
+	if err == nil {
+		err = validateResponseLocalItem(item)
+	}
+	return id, container, err
 }
 
 func responseCodeItem(item map[string]json.RawMessage) (string, string, error) {
@@ -138,12 +201,18 @@ func responseContainerIDs(items []map[string]json.RawMessage) ([]string, error) 
 	var ids []string
 	seen := map[string]bool{}
 	for _, item := range items {
-		if credentialString(item, "type") != "code_interpreter_call" {
+		if credentialString(item, "type") != "code_interpreter_call" && !hostedShellItem(item) {
 			continue
 		}
-		_, id, err := responseCodeItem(item)
+		var id string
+		var err error
+		if hostedShellItem(item) {
+			_, id, err = responseShellItem(item)
+		} else {
+			_, id, err = responseCodeItem(item)
+		}
 		if err != nil {
-			return nil, &apiError{502, "invalid upstream code interpreter output"}
+			return nil, &apiError{502, "invalid upstream container tool output"}
 		}
 		if !seen[id] {
 			ids = append(ids, id)

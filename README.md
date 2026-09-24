@@ -211,7 +211,7 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 OpenAI 类型的原生 Responses 账号支持客户端执行的 `apply_patch`、`local_shell` 和 `shell`，后者必须显式配置 `environment.type="local"`。命令、补丁、环境变量、工作目录、本地技能说明和执行结果按原生协议传递；网关不运行命令、不修改文件或加载技能路径。客户端通过 `apply_patch_call_output`、`shell_call_output` 的 `call_id` 或旧 `local_shell_call_output.id` 返回结果。协议见 [Apply Patch](https://developers.openai.com/api/docs/guides/tools-apply-patch)、[Local shell](https://developers.openai.com/api/docs/guides/tools-local-shell) 和 [Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
 
-这些工具支持 HTTP JSON/SSE、WebSocket、后台响应和指向 OpenAI 的 composite 路由，复用模型 token 计费、当前 Key 续接和故障恢复；不转换为 Chat/Messages/Gemini 函数。`allowed_callers` 仅允许 direct；托管容器、programmatic 调用和通过工具发现注入这些专用工具当前拒绝。输入限 4 MiB；本地 skills 最多 128 项，客户端自行执行和控制权限。原生流可在扣费前返回工具增量或调用项，客户端须等 `response.completed` / `response.incomplete` 后执行；终态等待结算，失败不发布成功标记。当前为本地协议及数据库验证，真实供应商能力取决于具体模型和账号。
+这些工具支持 HTTP JSON/SSE、WebSocket、后台响应和指向 OpenAI 的 composite 路由，复用模型 token 计费、当前 Key 续接和故障恢复；不转换为 Chat/Messages/Gemini 函数。`allowed_callers` 仅允许 direct；托管 Shell 容器见下文，programmatic 调用和通过工具发现注入这些专用工具当前拒绝。输入限 4 MiB；本地 skills 最多 128 项，客户端自行执行和控制权限。原生流可在扣费前返回工具增量或调用项，客户端须等 `response.completed` / `response.incomplete` 后执行；终态等待结算，失败不发布成功标记。当前为本地协议及数据库验证，真实供应商能力取决于具体模型和账号。
 
 同一原生链路支持 `{"type":"computer"}` 和旧版 `computer_use_preview`（需提供正数 display_width/display_height 及 windows/mac/linux/ubuntu/browser 环境）。`computer_call` 的单个 `action` 或批量 `actions`、`pending_safety_checks` 原样返回，客户端提交 `computer_call_output` 截图和自行确认的 `acknowledged_safety_checks`；网关不生成确认、不操作浏览器或桌面。截图接受 HTTP(S) URL、PNG/JPEG/GIF/WebP base64 data URL 或管理员授权的上游 file_id，可带 detail=auto/low/high/original；不读取本地路径或拉取截图。协议依据 [OpenAI Computer use](https://developers.openai.com/api/docs/guides/tools-computer-use)。
 
@@ -230,6 +230,10 @@ Code Interpreter 支持 OpenAI 原生 Responses 的 `{"type":"code_interpreter",
 显式 `container` ID 必须来自当前 Key/分组拥有的 `previous_response_id` 或输出条目引用；完整代码调用历史同样校验条目及容器归属，并固定原账号、协议、地址和凭证。后续纯文本响应继续保存已有容器关联，后台任务恢复保留该关联；WebSocket 的 `store=false` 关联仅在原连接内可用。容器每个响应上下文最多 1024 个，实际存活时间由上游决定；本地归属记录不延长上游容器寿命。未知或他人容器拒绝，凭证轮换不改投其他账号，HTTP 拒绝后不自动重试代码执行。
 
 内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理、网络 allowlist/domain secrets 和 programmatic 调用仍待对应实现，当前明确拒绝。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
+
+托管 Shell 使用 OpenAI 原生 Responses 的 `{"type":"shell","environment":{"type":"container_auto"}}`，执行发生在上游容器。支持 `memory_limit=1g|4g|16g|64g`、已授权的 `file_ids`，以及省略网络策略或显式 `network_policy={"type":"disabled"}`；网络 allowlist/domain secrets、托管 skills 和 programmatic 分支仍待补齐。已有容器使用 `environment={"type":"container_reference","container_id":"cntr_..."}`，必须来自当前 Key/分组拥有的响应或条目关联；来源轮换、未知容器和跨 Key 历史均拒绝。字段依据 [OpenAI Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
+
+`container_auto`、`container_reference` 和原 `local` 三种环境显式区分；网关不执行命令、不创建本地容器。托管 `shell_call` 的环境、命令及配对 `shell_call_output` 原样转发；JSON/SSE、WS、后台响应及 composite 复用原生链路，HTTP 拒绝后不换号重试。容器和已用文件的归属随纯文本续接、后台恢复继续保留；`store=false` 的 WS 关联仅在原连接有效。内部账务采用模型用量和原价快照，不新增容器费用价卡；供应商容器寿命及单独费用仍由上游决定。容器管理/文件下载和真实托管 Shell 上游联调尚待继续。
 
 管理员可通过账号创建/更新中的 `extra.response_files` 授权已上传的上游文件，例如 `{"extra":{"response_files":{"12":["file_team"]}}}`。沿用向量库的分组列表、数量上限和整体替换语义，但独立授权；授权绑定当前上游地址、协议和 Key。支持 OpenAI 账号的原生 Responses、原生 Chat 及 Chat→Responses 文件输入；跨平台和 Responses→Chat/Messages/Gemini 转换不会携带这些 ID。上游文件由管理员上传、维护和删除，网关不新增文件管理接口；文件格式、大小和模型适用性由上游校验，原生 Chat 文件输入仅支持 PDF。文件引用协议见 [OpenAI 文件输入](https://developers.openai.com/api/docs/guides/pdf-files)。
 

@@ -14,8 +14,8 @@ func responseLocalItem(kind string) bool {
 	return false
 }
 
-// Only client execution is admitted here. Hosted containers have separate
-// resource ownership and pricing; an omitted shell environment is ambiguous.
+// Local skills are client paths. Hosted resource references are validated by
+// responseShellTool instead; the request must identify its execution environment.
 func validateLocalEnvironment(raw json.RawMessage) error {
 	var env map[string]json.RawMessage
 	if json.Unmarshal(raw, &env) != nil || credentialString(env, "type") != "local" {
@@ -51,9 +51,8 @@ func validateResponseLocalTool(tool map[string]json.RawMessage) error {
 		return validateComputerTool(tool)
 	}
 	if kind == "shell" {
-		if err := validateLocalEnvironment(tool["environment"]); err != nil {
-			return err
-		}
+		_, _, err := responseShellTool(tool)
+		return err
 	}
 	for field, raw := range tool {
 		switch field {
@@ -81,7 +80,8 @@ func validateResponseLocalTool(tool map[string]json.RawMessage) error {
 }
 
 // Commands and paths are client data, never opened or executed by the gateway.
-// Validate the envelope and reject hosted resource references before forwarding.
+// Validate the envelope. Hosted shell references also require owned response
+// context, checked by the shared container admission before forwarding.
 func validateResponseLocalItem(item map[string]json.RawMessage) error {
 	kind := credentialString(item, "type")
 	identity := "call_id"
@@ -110,7 +110,13 @@ func validateResponseLocalItem(item map[string]json.RawMessage) error {
 		if kind != "shell_call" {
 			return bad("unexpected client tool environment")
 		}
-		if err := validateLocalEnvironment(raw); err != nil {
+		var err error
+		if hostedShellItem(item) {
+			_, err = responseShellContainer(raw)
+		} else {
+			err = validateLocalEnvironment(raw)
+		}
+		if err != nil {
 			return err
 		}
 	}

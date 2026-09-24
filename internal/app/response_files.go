@@ -144,11 +144,15 @@ func requestFileIDs(body map[string]json.RawMessage, tools []map[string]json.Raw
 		}
 	}
 	for _, tool := range tools {
-		if credentialString(tool, "type") == "code_interpreter" {
+		if kind := credentialString(tool, "type"); kind == "code_interpreter" || kind == "shell" {
+			field := "container"
+			if kind == "shell" {
+				field = "environment"
+			}
 			var container struct {
 				Files []json.RawMessage `json:"file_ids"`
 			}
-			if json.Unmarshal(tool["container"], &container) == nil {
+			if json.Unmarshal(tool[field], &container) == nil {
 				for _, raw := range container.Files {
 					if err := add(raw); err != nil {
 						return nil, err

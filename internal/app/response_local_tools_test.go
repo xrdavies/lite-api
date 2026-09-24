@@ -45,8 +45,8 @@ func TestResponseLocalTools(t *testing.T) {
 	}
 	for _, tool := range []string{
 		`{"type":"shell"}`, `{"type":"shell","environment":null}`,
-		`{"type":"shell","environment":{"type":"container_auto"}}`,
-		`{"type":"shell","environment":{"type":"container_reference","container_id":"foreign"}}`,
+		`{"type":"shell","environment":{"type":"container_auto","memory_limit":"2g"}}`,
+		`{"type":"shell","environment":{"type":"container_reference","container_id":"../foreign"}}`,
 		`{"type":"shell","environment":{"type":"local","file_ids":["foreign"]}}`,
 		`{"type":"shell","environment":{"type":"local","skills":null}}`,
 		`{"type":"shell","environment":{"type":"local","skills":[{"name":"n","path":"p"}]}}`,

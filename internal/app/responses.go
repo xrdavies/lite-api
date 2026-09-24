@@ -92,8 +92,14 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					in.ItemReferences = append(in.ItemReferences, id)
 					in.NativeFileSearch = true
 				}
-				if kind == "code_interpreter_call" {
-					id, container, err := responseCodeItem(item)
+				if kind == "code_interpreter_call" || hostedShellItem(item) {
+					var id, container string
+					var err error
+					if hostedShellItem(item) {
+						id, container, err = responseShellItem(item)
+					} else {
+						id, container, err = responseCodeItem(item)
+					}
 					if err != nil {
 						return in, err
 					}
@@ -185,6 +191,22 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if credentialString(tool, "type") == "shell" {
+			container, hosted, err := responseShellTool(tool)
+			if err != nil {
+				return in, err
+			}
+			if container != "" {
+				if len(in.ContainerReferences) >= 1024 {
+					return in, bad("too many container references")
+				}
+				in.ContainerReferences = append(in.ContainerReferences, container)
+			}
+			// Reuse the existing persisted hosted-code guard for both runtimes.
+			in.NativeCode = in.NativeCode || hosted
+			in.NativeClientTools = in.NativeClientTools || !hosted
+			continue
+		}
 		if credentialString(tool, "type") == "file_search" {
 			ids, err := responseFileSearch(tool)
 			if err != nil {
