@@ -289,6 +289,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAdminKey(t, a, admin, otherToken)
 	testGroupModelCandidates(t, a, admin, otherToken)
 	testGatewayUsage(t, a, admin, otherToken)
+	testStreamTimeout(t, a, admin, otherToken)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

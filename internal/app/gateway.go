@@ -581,11 +581,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
-	timeout := 5 * time.Minute
-	if imageExecution(r.Context()) != nil {
-		timeout = 30 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 	r = r.WithContext(ctx)
 	var err error
@@ -625,6 +621,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if err != nil {
 		fail(err)
 		return
+	}
+	if in.Stream {
+		_ = controller.SetWriteDeadline(started.Add(31 * time.Minute))
+	} else if imageExecution(ctx) == nil {
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, started.Add(5*time.Minute))
+		defer stop()
+		r = r.WithContext(ctx)
 	}
 	if audioIn != nil && audioIn.Model != "" {
 		in.Model = audioIn.Model
@@ -1150,7 +1154,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if turn := socketTurn(ctx); turn != nil {
 			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
 		} else {
-			resp, err = a.upstreamRequestHeaders(ctx, selected.Account, "POST", path, upstreamBody, wireIn.Headers)
+			upstreamCtx, upstreamCancel := context.WithCancel(ctx)
+			defer upstreamCancel()
+			resp, err = a.upstreamRequestHeaders(upstreamCtx, selected.Account, "POST", path, upstreamBody, wireIn.Headers)
+			if err == nil && stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				idle := a.streamIdle
+				if wireIn.ImageGeneration {
+					idle = a.imageStreamIdle
+				}
+				resp.Body = &idleStreamBody{ReadCloser: resp.Body, ctx: upstreamCtx, cancel: upstreamCancel, idle: idle}
+			}
 		}
 		if err != nil {
 			selected.Release()
@@ -1494,7 +1507,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			done = true
 		}
 		if forwardErr == nil {
-			if scanner.Err() != nil {
+			if errors.Is(scanner.Err(), errStreamIdle) && ctx.Err() == nil {
+				forwardErr = &apiError{504, "upstream stream data interval timed out"}
+				a.markStreamTimeout(ctx, selected.Account, model)
+			} else if scanner.Err() != nil {
 				forwardErr = &apiError{502, "upstream stream interrupted"}
 			} else if !done {
 				forwardErr = &apiError{502, "upstream stream ended without completion"}

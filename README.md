@@ -77,6 +77,10 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 管理 API 限流默认为 `{"enabled":true,"user_rpm":240,"heavy_rpm":60,"exempt_admin":true,"public_ip_rpm":300}`。RPM 接受 0–100000，0 不限制该档；认证接口按用户计数，本人 usage 和 Key 每日用量同时计入重查询档。公开设置与模型广场共用 IP 桶，私网/回环来源跳过该档；只使用连接来源地址，不信任客户端转发头。每个桶从首个请求起计 60 秒，超限返回 429 和 `Retry-After`。写入后下一请求生效，普通配置读取缓存 60 秒；读配置失败保留最近有效值，限流 Redis 错误放行，身份认证和登录保护仍独立执行。管理 API 限流与客户端模型调用 RPM 互不混用。
 
+`GET/PUT /api/v1/admin/settings/stream-timeout` 配置流停顿后的账号处置，默认 `{"enabled":false,"action":"temp_unsched","temp_unsched_minutes":5,"threshold_count":3,"threshold_window_minutes":10}`。`action` 接受 `temp_unsched`、`error`、`none`，时间范围 1–60 分钟、阈值 1–10 次；PUT 提交完整对象。启用后，单账号在从首次超时起的固定窗口内累计到阈值时临时停调或标记错误；`none` 和禁用不累计。策略每次超时从数据库读取。管理员改账号、恢复或轮换凭证后重新累计，旧请求不能覆盖新状态；临时停调不会缩短已有更长的窗口，也不重置消费数据。配置读取失败不修改账号；Redis 不可用时按一次已确认超时判断，不虚构多次失败。
+
+超时检测独立于上述处置开关：`GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT` 默认 180 秒（允许 30–300），`GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT` 默认 900 秒（允许 60–1800），0 关闭对应间隔检测。适用于 Chat、Messages、Responses、Gemini SSE 及适用转换，Responses WebSocket 每轮采用文本间隔；Gemini 原生/转换图片流采用图片间隔。等待响应头仍受 30 秒传输限制；拿到成功响应头后，读取上游字节的等待超过间隔才算流超时。写入慢客户端的时间、客户端取消、正常 EOF、协议错误和请求总时限不计为账号流超时。SSE 与 Responses WS 单轮上限 30 分钟，其他同步请求仍为 5 分钟。超时返回 504，已开始的流发送错误事件，不发成功终止事件；已观察到的用量仍结算，不自动重发已接受的请求。Grok 双向语音会话继续使用自己的空闲策略。
+
 ## 渠道与定价
 
 `GET /api/v1/admin/groups/{id}/model-allowlist-candidates` 为管理员配置模型白名单提供 `models` 候选数组。`id=0` 用于建组前查询；可选 `platform` 覆盖平台，省略时取分组平台，无分组时默认 anthropic。候选来自当前固定参考价目录中的具体模型，以及本组可调度 API Key 账号的请求侧映射名（含通配符）；composite 合并保留平台，结果排序去重。不受当前白名单裁剪、不返回映射目标或凭证，也不会调用上游。候选不是实际可用性声明；真实目录与能力应通过模型发现/健康测试确认。

@@ -29,6 +29,7 @@ import (
 type Config struct {
 	DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs, PricingFile string
 	BalanceCheckEnabled, BalanceThreshold, BalanceCheckIntervalMinutes              string
+	StreamDataIntervalTimeout, ImageStreamDataIntervalTimeout                       string
 }
 
 func ConfigFromEnv() Config {
@@ -39,9 +40,11 @@ func ConfigFromEnv() Config {
 	return Config{
 		DatabaseURL: os.Getenv("DATABASE_URL"), RedisURL: os.Getenv("REDIS_URL"), ListenAddr: addr,
 		JWTSecret: os.Getenv("JWT_SECRET"), UpstreamPrivateCIDRs: os.Getenv("UPSTREAM_PRIVATE_CIDRS"), PricingFile: os.Getenv("PRICING_FILE"),
-		BalanceCheckEnabled:         os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_ENABLED"),
-		BalanceThreshold:            os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_THRESHOLD"),
-		BalanceCheckIntervalMinutes: os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_INTERVAL_MINUTES"),
+		BalanceCheckEnabled:            os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_ENABLED"),
+		BalanceThreshold:               os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_THRESHOLD"),
+		BalanceCheckIntervalMinutes:    os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_INTERVAL_MINUTES"),
+		StreamDataIntervalTimeout:      os.Getenv("GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT"),
+		ImageStreamDataIntervalTimeout: os.Getenv("GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT"),
 	}
 }
 
@@ -80,6 +83,8 @@ type App struct {
 	panelMu           sync.Mutex
 	panelCache        *panelRateSettings
 	panelExpires      time.Time
+	streamIdle        time.Duration
+	imageStreamIdle   time.Duration
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -101,6 +106,10 @@ func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
 }
 
 func New(ctx context.Context, cfg Config) (*App, error) {
+	streamIdle, imageStreamIdle, err := parseStreamIntervals(cfg)
+	if err != nil {
+		return nil, err
+	}
 	balancePolicy, err := parseBalancePolicy(cfg)
 	if err != nil {
 		return nil, err
@@ -146,6 +155,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return fail(errors.New("Redis connection failed"))
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
+	a.streamIdle, a.imageStreamIdle = streamIdle, imageStreamIdle
 	a.balancePolicy = balancePolicy
 	a.priceFile = cfg.PricingFile
 	a.prices.Store(pricing.prices.Load())

@@ -284,9 +284,10 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 	}
 	// A disconnected downstream still owes for tokens already generated. Drain
 	// for at most 15 seconds to capture terminal usage, then close the upstream.
-	readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Minute)
 	stop := context.AfterFunc(ctx, func() { time.AfterFunc(15*time.Second, readCancel) })
-	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &socketEventBody{ctx: readCtx, conn: s.upstream, cleanup: func() { stop(); readCancel() }}}, nil
+	bodyReader := &socketEventBody{ctx: readCtx, conn: s.upstream, cleanup: func() { stop(); readCancel() }}
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &idleStreamBody{ReadCloser: bodyReader, ctx: ctx, cancel: readCancel, idle: a.streamIdle}}, nil
 }
 
 // Shared native transport policy for Responses and voice WebSocket handshakes.
