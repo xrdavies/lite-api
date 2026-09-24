@@ -111,6 +111,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	userToken := tokens["access_token"].(string)
 	refresh := tokens["refresh_token"].(string)
 	otherToken := login("another@example.test", "correct-password")["access_token"].(string)
+	testKeyManagement(t, a, admin)
 	group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Private team", "platform": "openai", "is_exclusive": true})
 	gid := int64(group["id"].(float64))
 	expect(403, "POST", "/api/v1/keys", userToken, map[string]any{"name": "unauthorized group", "group_id": gid})

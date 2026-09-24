@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -111,9 +112,18 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	uid := current(r).ID
+	tx, err := a.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	finish, replayed, err := writeIdempotency(w, r, tx, "user.api_keys.create", fmt.Sprintf("user:%d", uid), in)
+	if err != nil || replayed {
+		return err
+	}
 	var gid any
 	if in.GroupID != nil && *in.GroupID != 0 {
-		if err := a.groupAccess(r.Context(), a.DB, uid, *in.GroupID); err != nil {
+		if err := a.groupAccess(r.Context(), tx, uid, *in.GroupID); err != nil {
 			return err
 		}
 		gid = *in.GroupID
@@ -149,12 +159,20 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) error {
 		status = *in.Status
 	}
 	var id int64
-	err := a.DB.QueryRowContext(r.Context(), `INSERT INTO api_keys(user_id,key,name,group_id,status,ip_whitelist,ip_blacklist,quota,rate_limit_5h,rate_limit_1d,rate_limit_7d,expires_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12) RETURNING id`, uid, key, *in.Name, gid, status, whitelist, blacklist, values[0], values[1], values[2], values[3], expires).Scan(&id)
+	err = tx.QueryRowContext(r.Context(), `INSERT INTO api_keys(user_id,key,name,group_id,status,ip_whitelist,ip_blacklist,quota,rate_limit_5h,rate_limit_1d,rate_limit_7d,expires_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12) RETURNING id`, uid, key, *in.Name, gid, status, whitelist, blacklist, values[0], values[1], values[2], values[3], expires).Scan(&id)
 	if err != nil {
 		return err
 	}
-	data, err := keyJSON(r.Context(), a.DB, id)
+	data, err := keyJSON(r.Context(), tx, id)
 	if err != nil {
+		return err
+	}
+	if finish != nil {
+		if err = finish(data); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	return reply(w, data)
@@ -175,14 +193,44 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) keysFor(w http.ResponseWriter, r *http.Request, uid, gid int64) error {
 	page, size := pagination(r)
-	search := "%" + r.URL.Query().Get("search") + "%"
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	if len(search) > 100 {
+		return bad("search is too long")
+	}
+	search = "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(search) + "%"
 	status := r.URL.Query().Get("status")
-	where := ` WHERE deleted_at IS NULL AND ($1::bigint=0 OR user_id=$1) AND ($2::bigint=0 OR group_id=$2) AND name ILIKE $3 AND ($4='' OR status=$4)`
+	var group any
+	if raw := r.URL.Query().Get("group_id"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 0 {
+			return bad("invalid group_id")
+		}
+		group = id
+	}
+	field := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	switch field {
+	case "":
+		field = "created_at"
+	case "id", "name", "status", "created_at", "expires_at", "last_used_at":
+	default:
+		field = "id"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
+	order := field + direction
+	if field != "id" {
+		order += ",id" + direction
+	}
+	where := ` WHERE deleted_at IS NULL AND ($1::bigint=0 OR user_id=$1) AND ($2::bigint=0 OR group_id=$2)
+ AND (name ILIKE $3 OR key ILIKE $3) AND ($4='' OR status=$4)
+ AND ($5::bigint IS NULL OR group_id=$5 OR ($5=0 AND group_id IS NULL))`
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM api_keys"+where, uid, gid, search, status).Scan(&total); err != nil {
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM api_keys"+where, uid, gid, search, status, group).Scan(&total); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(k)-'deleted_at' FROM api_keys k"+where+" ORDER BY id DESC LIMIT $5 OFFSET $6", uid, gid, search, status, size, (page-1)*size)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(k)-'deleted_at' FROM api_keys k"+where+" ORDER BY "+order+" LIMIT $6 OFFSET $7", uid, gid, search, status, group, size, (page-1)*size)
 	if err != nil {
 		return err
 	}
@@ -250,13 +298,28 @@ func (a *App) updateKey(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.ResetQuota {
 		sets = append(sets, "quota_used=0")
-		if in.Status == nil {
-			sets = append(sets, "status=CASE WHEN status='quota_exhausted' THEN 'active' ELSE status END")
-		}
 	}
-	if in.Quota != nil && !in.ResetQuota && in.Status == nil {
-		args = append(args, in.Quota.String())
-		sets = append(sets, fmt.Sprintf("status=CASE WHEN status='quota_exhausted' AND ($%d::numeric=0 OR $%d::numeric>quota_used) THEN 'active' ELSE status END", len(args), len(args)))
+	if in.Status == nil {
+		// SQL evaluates all assignments against the current row. Combine status
+		// recovery once, without overwriting concurrent quota increments.
+		var recover []string
+		if in.ResetQuota {
+			recover = append(recover, "status='quota_exhausted'")
+		} else if in.Quota != nil {
+			args = append(args, in.Quota.String())
+			recover = append(recover, fmt.Sprintf("(status='quota_exhausted' AND ($%d::numeric=0 OR $%d::numeric>quota_used))", len(args), len(args)))
+		}
+		if in.ExpiresAt != nil {
+			if *in.ExpiresAt == "" {
+				recover = append(recover, "status='expired'")
+			} else {
+				args = append(args, *in.ExpiresAt)
+				recover = append(recover, fmt.Sprintf("(status='expired' AND $%d::timestamptz>now())", len(args)))
+			}
+		}
+		if len(recover) > 0 {
+			sets = append(sets, "status=CASE WHEN "+strings.Join(recover, " OR ")+" THEN 'active' ELSE status END")
+		}
 	}
 	if in.ResetRateLimit {
 		sets = append(sets, resetKeyWindows)

@@ -31,6 +31,10 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户/管理 API 使用 `{code,message,data}` 响应格式。登录为 `POST /api/v1/auth/login`（`email`、`password`）；其他管理请求使用返回的 Bearer access token。access token 有效期 15 分钟，会话最多 30 天；refresh token 每次刷新后失效。客户端 API Key 不能用作管理面登录凭证。管理员余额调整可通过 `Idempotency-Key` 防止重复提交，金额计算在 PostgreSQL NUMERIC 中完成。
 
+用户通过 `POST /api/v1/keys` 创建自己的 Key，可携带 `Idempotency-Key`。同一操作内该标识保留 24 小时，相同用户和请求重放首次结果（包括原 Key、ID、到期时间），不同用户或请求返回 409；不要跨用户复用标识。创建和重放记录在一个数据库事务中提交，写入失败全部回滚；重放不会重新启用已删除的 Key。省略幂等键时每次创建独立 Key。重放同时返回 `Idempotency-Replayed: true` 和 `X-Idempotency-Replayed: true`。
+
+`GET /api/v1/keys` 支持名称或 Key 的 `search`（最多 100 字节，按字面子串匹配）、`status`、`group_id` 筛选；`group_id=0` 只查询未分组 Key。`sort_by` 支持 id/name/status/created_at/expires_at/last_used_at，默认 created_at；`sort_order=asc|desc` 默认 desc，相同值以 ID 排序，筛选和排序在分页前执行。管理员按用户或分组查询使用同一查询逻辑，查询参数不能扩大路径限定范围。修改或清除过期时间会将 `expired` Key 恢复为 active（新时间须在未来），人工 inactive 和 quota_exhausted 不因此恢复；显式 status 优先，额度和窗口计数只在显式 reset 时清零。
+
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
