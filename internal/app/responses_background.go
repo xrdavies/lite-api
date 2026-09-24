@@ -224,8 +224,8 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 	if err != nil && !failed {
 		return err
 	}
-	if t.Selection.Account.Platform == "grok" {
-		meter := grokHostedSearchMeter{}
+	if t.Selection.Account.Platform == "grok" || t.Selection.Account.Platform == "openai" {
+		meter := hostedSearchMeter{OpenAI: t.Selection.Account.Platform == "openai"}
 		if err = meter.observe(raw); err != nil {
 			return err
 		}

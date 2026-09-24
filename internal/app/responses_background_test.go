@@ -40,16 +40,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	t.Helper()
 	// Stop workers during deterministic failure injection. The final section
 	// verifies autonomous reconciliation; the deferred start restores all workers.
-	a.workerCancel()
-	<-a.workerDone
-	<-a.imageWorkerDone
-	<-a.batchWorkerDone
-	<-a.videoWorkerDone
-	<-a.responseWorkerDone
-	<-a.balanceWorkerDone
-	<-a.billingWorkerDone
-	<-a.proxyWorkerDone
-	defer a.startWorkers()
+	defer pauseTestWorkers(a)()
 	call := func(method, path, key string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))

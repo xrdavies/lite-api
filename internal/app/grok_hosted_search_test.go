@@ -30,7 +30,7 @@ func TestGrokHostedSearch(t *testing.T) {
 			t.Fatal("invalid tool accepted", raw)
 		}
 	}
-	m := &grokHostedSearchMeter{}
+	m := &hostedSearchMeter{}
 	observe := func(raw string, want int64) {
 		t.Helper()
 		if err := m.observe([]byte(raw)); err != nil || m.count() != want {
@@ -49,11 +49,11 @@ func TestGrokHostedSearch(t *testing.T) {
 	observe(`{"status":"incomplete","usage":{"server_side_tool_usage_details":{"web_search_calls":4,"x_search_calls":2}}}`, 6)
 	observe(`{"status":"completed","usage":{"server_side_tool_usage_details":{"web_search_calls":0,"x_search_calls":1}}}`, 6)
 	// A bridge may supply IDs only in the final response; do not charge it twice.
-	m = &grokHostedSearchMeter{}
+	m = &hostedSearchMeter{}
 	observe(`{"type":"response.output_item.done","item":{"type":"x_search_call"}}`, 1)
 	observe(`{"status":"completed","output":[{"type":"x_search_call","id":"final"}]}`, 1)
 	for _, count := range []string{`-1`, `1.5`, `null`, `"2"`, `10001`, `9223372036854775808`} {
-		m = &grokHostedSearchMeter{}
+		m = &hostedSearchMeter{}
 		if m.observe([]byte(`{"status":"completed","usage":{"server_side_tool_usage_details":{"web_search_calls":`+count+`}}}`)) == nil {
 			t.Fatal("invalid upstream count accepted", count)
 		}
@@ -64,7 +64,7 @@ func TestGrokHostedSearch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = addGrokSearchCost(&cost, gatewayGroup{SearchPrice: price, Rate: "0.3333"}, 3); err != nil {
+		if err = addHostedSearchCost(&cost, gatewayGroup{SearchPrice: price, Rate: "0.3333"}, 3); err != nil {
 			t.Fatal(err)
 		}
 		value := "5"
@@ -82,13 +82,18 @@ func TestGrokHostedSearch(t *testing.T) {
 	}
 }
 
-func testGrokHostedSearch(t *testing.T, a *App, admin string) {
+func testHostedSearch(t *testing.T, a *App, admin, platform string) {
 	t.Helper()
+	defer pauseTestWorkers(a)()
 	ctx := context.Background()
 	must := func(method, path, token string, body any) map[string]any {
 		t.Helper()
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.174:1234"
+		if platform == "openai" {
+			r.RemoteAddr = "192.0.2.175:1234"
+		}
 		r.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		a.Handler().ServeHTTP(w, r)
@@ -102,19 +107,31 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
 		return out.Data
 	}
 	id := func(v map[string]any) int64 { return int64(v["id"].(float64)) }
-	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "hosted-search@example.test", "password": "hosted-search-password", "balance": 100}))
-	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "hosted-search@example.test", "password": "hosted-search-password"})["access_token"].(string)
-	prices := []any{map[string]any{"platform": "grok", "models": []string{"team-search"}, "input_price": "0.001", "output_price": "0.002", "cache_read_price": "0", "cache_write_price": "0"}}
-	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Hosted search", "platform": "grok", "rate_multiplier": 2, "search_price_per_1k": 10, "model_pricing": prices}))
+	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": platform + "-hosted-search@example.test", "password": "hosted-search-password", "balance": 100}))
+	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": platform + "-hosted-search@example.test", "password": "hosted-search-password"})["access_token"].(string)
+	prices := []any{map[string]any{"platform": platform, "models": []string{"team-search"}, "input_price": "0.001", "output_price": "0.002", "cache_read_price": "0", "cache_write_price": "0"}}
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": platform + " hosted search", "platform": platform, "rate_multiplier": 2, "search_price_per_1k": 10, "model_pricing": prices}))
 	gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
-	k := must("POST", "/api/v1/keys", user, map[string]any{"name": "Hosted search", "group_id": gid, "quota": 100, "rate_limit_5h": 100})
+	k := must("POST", "/api/v1/keys", user, map[string]any{"name": platform + " hosted search", "group_id": gid, "quota": 100, "rate_limit_5h": 100})
 	key, kid := k["key"].(string), id(k)
 	var calls atomic.Int64
 	var mode atomic.Int32
 	var change atomic.Bool
 	const web = `{"type":"web_search_call","id":"web_1","status":"completed","action":{"sources":[{"url":"https://example.test/"}]}}`
-	const x = `{"type":"x_search_call","id":"x_1","status":"completed"}`
+	x := `{"type":"x_search_call","id":"x_1","status":"completed"}`
+	if platform == "openai" {
+		x = `{"type":"web_search_call","id":"web_2","status":"completed"}`
+	}
+	var backgroundResult atomic.Value
+	var forwardedTools atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.Header.Get("Upgrade") == "" {
+			if r.Header.Get("Authorization") != "Bearer hosted-secret" {
+				t.Error("background credential isolation")
+			}
+			fmt.Fprint(w, backgroundResult.Load().(string))
+			return
+		}
 		n := calls.Add(1)
 		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer hosted-secret" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Api-Key") != "" {
 			t.Error("hosted search upstream isolation")
@@ -141,6 +158,7 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
 		if credentialString(body, "model") != "native-search" {
 			t.Error("model mapping", string(body["model"]))
 		}
+		forwardedTools.Store(string(body["tools"]))
 		if change.Swap(false) {
 			if _, err := a.DB.Exec("UPDATE groups SET search_price_per_1k=99 WHERE id=$1", gid); err != nil {
 				t.Error(err)
@@ -158,10 +176,19 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
 		} else if mode.Load() == 2 {
 			output = `[]`
 			details = `,"server_side_tool_usage_details":{"web_search_calls":2,"x_search_calls":1}`
+			if platform == "openai" {
+				output = "[" + web + "," + x + `,{"type":"web_search_call","id":"web_3","status":"completed"}]`
+				details = ""
+			}
 		} else if mode.Load() == 4 {
 			status = "failed"
 		}
 		response := fmt.Sprintf(`{"id":"resp_hosted_%d","object":"response","model":"native-search","status":%q,"output":%s,"usage":{"input_tokens":2,"output_tokens":3%s}}`, n, status, output, details)
+		if string(body["background"]) == "true" {
+			backgroundResult.Store(response)
+			fmt.Fprintf(w, `{"id":"resp_hosted_%d","object":"response","status":"queued"}`, n)
+			return
+		}
 		if string(body["stream"]) != "true" && conn == nil {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, response)
@@ -190,9 +217,13 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
 		}
 	}))
 	defer up.Close()
-	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search", "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"quota_limit": 100}, "credentials": map[string]any{"api_key": "hosted-secret", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"team-search": "native-search"}}}))
+	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": platform + " hosted search", "platform": platform, "type": "apikey", "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"quota_limit": 100}, "credentials": map[string]any{"api_key": "hosted-secret", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"team-search": "native-search"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	body := map[string]any{"model": "team-search", "input": "search the web and X", "store": false, "tools": []any{map[string]any{"type": "web_search", "allowed_domains": []string{"example.test"}}, map[string]any{"type": "x_search", "from_date": "2026-09-01"}}}
+	if platform == "openai" {
+		body["tools"] = []any{map[string]any{"type": "web_search", "filters": map[string]any{"allowed_domains": []string{"example.test"}}, "user_location": map[string]string{"type": "approximate", "country": "GB"}, "external_web_access": false, "return_token_budget": "default"}}
+		body["tool_choice"] = map[string]string{"type": "web_search"}
+	}
 	call := func(path, token, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest("POST", path, bytes.NewReader(raw))
@@ -218,6 +249,10 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
 	w := call("/v1/responses", key, "hosted-json")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "https://example.test/") {
 		t.Fatal("hosted JSON", w.Code, w.Body.String())
+	}
+	wantTools, _ := json.Marshal(body["tools"])
+	if forwardedTools.Load() != string(wantTools) {
+		t.Fatal("hosted search options changed upstream")
 	}
 	checkCost("0.028", "0.056", 1)
 	for _, path := range []string{"/responses", "/backend-api/codex/responses"} {
@@ -328,7 +363,66 @@ func testGrokHostedSearch(t *testing.T, a *App, admin string) {
  CROSS JOIN (SELECT sum(actual_cost) cost,sum(total_cost) total FROM usage_logs WHERE api_key_id=$1)s WHERE k.id=$1`, kid, aid).Scan(&consistent); err != nil || !consistent {
 		t.Fatal("hosted balances inconsistent", err)
 	}
+	// Background lookup uses the creation-time search price and durable receipt.
+	body["background"], body["store"] = true, true
+	w = call("/responses", key, "hosted-background")
+	var accepted struct{ ID string }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &accepted) != nil || accepted.ID == "" {
+		t.Fatal("hosted background", w.Code, w.Body.String())
+	}
+	identity := &gatewayIdentity{Key: gatewayKey{ID: kid, GroupID: gid}}
+	taskID, err := a.Redis.Get(ctx, backgroundIndex(identity, accepted.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := a.loadBackgroundResponse(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must("PUT", gp, admin, map[string]any{"search_price_per_1k": 99})
+	fresh = &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
+	for range 2 {
+		if err = fresh.refreshBackgroundResponse(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkCost("0.028", "0.056", 10)
+	delete(body, "background")
+	body["store"] = false
+	must("PUT", gp, admin, map[string]any{"search_price_per_1k": 10})
+	// Composite admission uses the resolved platform, retaining native tool options.
+	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": platform + " composite search", "platform": "composite", "model_pricing": prices, "rate_multiplier": 2, "search_price_per_1k": 10}))
+	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})
+	must("POST", fmt.Sprintf("/api/v1/admin/groups/%d/composite-routes", cgid), admin, map[string]any{"public_model": "team-search", "match_type": "exact", "target_platform": platform, "upstream_model": "team-search", "endpoint": "responses", "enabled": true})
+	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite search", "group_id": cgid})["key"].(string)
+	if w = call("/responses", ckey, "composite-search"); w.Code != 200 {
+		t.Fatal("composite hosted search", w.Code, w.Body.String())
+	}
+	if err = a.DB.QueryRow("SELECT count(*)=1 AND sum(actual_cost)=0.056 FROM usage_logs WHERE group_id=$1", cgid).Scan(&consistent); err != nil || !consistent {
+		t.Fatal("composite hosted search billing", err)
+	}
+
 	before = calls.Load()
+	invalidTool := map[string]any{"type": "web_search_preview", "filters": map[string]any{}}
+	if platform == "openai" {
+		invalidTool = map[string]any{"type": "x_search"}
+	}
+	for _, extra := range []bool{false, true} {
+		body["tools"] = []any{invalidTool}
+		if extra {
+			delete(body, "tools")
+			body["input"] = []any{map[string]any{"type": "additional_tools", "tools": []any{invalidTool}}}
+		}
+		if w = call("/responses", key, ""); w.Code != 400 || calls.Load() != before {
+			t.Fatal("wrong-platform hosted tool dispatched", w.Code)
+		}
+	}
+	body["tools"], body["input"] = originalTools, "search the web"
+	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "chat_completions"}})
+	if w = call("/responses", key, ""); w.Code != 503 || calls.Load() != before {
+		t.Fatal("hosted search converted to Chat", w.Code)
+	}
+	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "responses"}})
 	for _, path := range []string{"/v1/responses/input_tokens", "/responses/compact"} {
 		if w = call(path, key, ""); w.Code != 400 {
 			t.Fatal("hosted non-generation accepted", path, w.Code)

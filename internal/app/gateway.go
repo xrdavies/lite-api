@@ -425,7 +425,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
 		if in.HostedSearch {
-			matches = u.Platform == "grok" && u.protocol() == "responses"
+			matches = (u.Platform == "grok" || u.Platform == "openai") && u.protocol() == "responses"
 		}
 		if !matches {
 			continue
@@ -786,9 +786,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("this endpoint requires a Grok group"))
 		return
 	}
-	if in.HostedSearch && g.Group.Platform != "grok" {
-		fail(bad("hosted web_search and x_search require a Grok target"))
-		return
+	if in.HostedSearch {
+		if err = validateHostedSearchTools(request, g.Group.Platform); err != nil {
+			fail(err)
+			return
+		}
 	}
 	if protocol == "images" && !g.Group.AllowImage {
 		fail(denied())
@@ -1281,8 +1283,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	firstToken := int64(0)
 	observe := observation.observe
-	if wireIn.Protocol == "responses" && selected.Account.Platform == "grok" && selected.Search == "" && !in.CountOnly {
-		meter := &grokHostedSearchMeter{}
+	if wireIn.Protocol == "responses" && (selected.Account.Platform == "grok" || selected.Account.Platform == "openai") && selected.Search == "" && !in.CountOnly {
+		meter := &hostedSearchMeter{OpenAI: selected.Account.Platform == "openai"}
 		observe = func(raw []byte) error {
 			observeErr := observation.observe(raw)
 			meterErr := meter.observe(raw)

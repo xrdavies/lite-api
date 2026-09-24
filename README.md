@@ -197,7 +197,7 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 删除前持久保存意图，立即阻断该响应的读取、取消、续接和已知输出条目引用，包括 WebSocket 本地关联。上游结果不明确时保留无期限记录，重复 DELETE 向原来源核实；有效成功回执或上游 404 确认后，清除后台结果与响应关联，拒绝标记保留 30 天，重复 DELETE 直接返回成功。延迟写入不能恢复已删除关联或后台任务。此操作不清除创建请求的独立幂等响应缓存，仍按原 24 小时规则重放；已知 ID 的新续接被拒绝。在途请求不强制终止。普通 `store=false` 或协议转换响应不提供原生删除，后台临时结果可在本地归属有效期内删除。当前通过本地协议及 Docker 数据库验证，真实供应商删除联调仍待完成。
 
-`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、OpenAI 内置搜索/图片等托管工具仍待对应隔离和计费实现，当前明确拒绝；Grok 托管搜索按后文单独支持。
+`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、内置图片、文件搜索和代码执行等其他托管工具仍待对应隔离和计费实现，当前明确拒绝；OpenAI/Grok 托管网页搜索见下文。
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。
 
@@ -220,6 +220,14 @@ alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token u
 `POST /v1/web_search`、`/v1/x_search` 及根路径别名提供 Grok 独立搜索，仅限 Grok 分组。请求接受 `query`（空缺时使用字符串 `input`），`max_results` 默认为 5、最多 20；X 搜索另接受 `allowed_x_handles`、`excluded_x_handles`、`from_date`、`to_date` 和图片/视频理解开关。使用固定默认模型 `grok-4.6`，经渠道/账号映射后调用 `/v1/responses` 的原生搜索工具；客户端 `model`、`tools` 和 `store` 不控制上游请求。账号可配置 Chat 或 Responses 协议，搜索不建立文本会话粘性。返回 `query/results/provider/max_results`，只收录上游搜索来源或引用标注中的 HTTP(S) URL；模型文本仅可补充已引用 URL 的标题与摘要。
 
 Grok 独立搜索每次成功按 `search_price_per_1k / 1000` 乘用户专属/分组倍率结算，不叠加响应中的 token 用量。管理员在分组创建/更新中配置该字段：默认 5 USD/千次，0 免费，负数清除，省略/null 保留；默认值同样是固定兼容规则。消费模型分别为 `grok-web-search`、`grok-x-search`，实际请求/上游/响应模型另行记录。权限、模型许可、渠道限制、额度、排队、RPM、幂等及失败结算恢复共用网关；web/X 幂等相互独立，同类根路径别名共享重放。上游 401/402/403/429/5xx 最多尝试四个不同账号，网络结果不明不重发。当前由本地协议服务和真实数据库测试验证，尚无 Grok 原厂搜索实测。
+
+原生 Responses 另支持 OpenAI `web_search`、`web_search_2025_08_26`、`web_search_preview`、`web_search_preview_2025_03_11` 和 Grok `web_search/x_search` 工具。仅选择相应平台的 Responses API Key 账号，不转换成 Chat；composite 按解析出的平台验证。JSON、SSE、WebSocket 与后台模式共用网关权限、原来源关联和持久账务。
+
+OpenAI 接受 search_context_size、近似 user_location，以及正式工具的 filters.allowed_domains/blocked_domains（各最多 100）、external_web_access 和 return_token_budget=default|unlimited；域名不带协议或路径，国际域名使用 ASCII 编码。预览工具不接受这些新选项。Grok 保持其独立的域名/X 用户和日期选项，两平台不能混用参数；additional_tools 同样校验。协议参见 [OpenAI 网页搜索](https://developers.openai.com/api/docs/guides/tools-web-search)。可用模型和具体选项最终取决于配置的原厂或中转。
+
+托管搜索按实际完成的 web_search_call/x_search_call 计数，事件与最终 output 去重；客户端同名函数不算搜索。OpenAI 仅使用原生 web_search_call，Grok 另接受其 server_side_tool_usage_details 累计计数。费用为原模型 token 费用加 `调用数 × search_price_per_1k / 1000`，沿用该字段固定默认值 5 USD/千次和用户倍率；这是兼容计费基线，不是原厂实时报价，管理员应按内部计费政策配置。`web_search_price_per_call` 仍只用于 alpha 独立搜索。搜索费用进入 total_cost/actual_cost 及账号费用，不伪装为 token；原 schema 无单独搜索次数列。
+
+断流已知搜索消费仍结算，不以缺少 token usage 宣称完整成功；后台结果按原价快照一次结算，重复查询或恢复不再次调用或扣费。共享 HTTP/WS 模拟、Docker PostgreSQL/Redis 验证覆盖两平台和 composite 的调用、参数保留、拒绝错误平台/转换、流式去重、免费搜索、SQL 故障及重启恢复；尚未使用真实 OpenAI/Grok 搜索凭证联调。
 
 管理员通过 `/api/v1/admin/settings/web-search-emulation` 的 GET/PUT 管理搜索模拟，`/test` 接受 `query`，`/reset-usage` 接受 `provider_type=brave|tavily`。配置包含 `enabled` 和 `providers`；每个提供方保留 `type`、`api_key`、`quota_limit`、`subscribed_at`、`proxy_id`、`expires_at`。PUT 替换配置，空 Key 保留同类型旧值，移除提供方可删除凭证；响应仅返回 `api_key_configured`，不会返回 Key。`quota_used` 为只读，未知字段拒绝，修改有管理审计。配置沿用原 settings 键，无新表。
 

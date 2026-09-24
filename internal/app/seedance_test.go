@@ -62,6 +62,7 @@ func TestSeedanceContracts(t *testing.T) {
 
 func testSeedance(t *testing.T, a *App, admin string) {
 	t.Helper()
+	defer pauseTestWorkers(a)()
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))

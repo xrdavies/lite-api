@@ -52,12 +52,13 @@ func validateGrokHostedSearch(tool map[string]json.RawMessage) error {
 // Item completion events and the terminal output repeat the same calls. Stable
 // IDs deduplicate events; cumulative output/usage replace smaller event counts.
 // Only native calls are billable: a client function named web_search is not one.
-type grokHostedSearchMeter struct {
+type hostedSearchMeter struct {
+	OpenAI              bool
 	seen                map[string]bool
 	done, output, usage [2]int64
 }
 
-func (m *grokHostedSearchMeter) count() int64 {
+func (m *hostedSearchMeter) count() int64 {
 	var total int64
 	for i := range m.done {
 		total += max(m.done[i], m.output[i], m.usage[i])
@@ -65,7 +66,7 @@ func (m *grokHostedSearchMeter) count() int64 {
 	return total
 }
 
-func (m *grokHostedSearchMeter) observe(raw []byte) error {
+func (m *hostedSearchMeter) observe(raw []byte) error {
 	var event struct {
 		Type, Status   string
 		Item, Response json.RawMessage
@@ -113,6 +114,9 @@ func (m *grokHostedSearchMeter) observe(raw []byte) error {
 		switch item.Type {
 		case "web_search_call":
 		case "x_search_call":
+			if m.OpenAI {
+				return invalid()
+			}
 			i = 1
 		default:
 			continue
@@ -146,7 +150,7 @@ func (m *grokHostedSearchMeter) observe(raw []byte) error {
 		} else {
 			m.output[i] = max(m.output[i], counts[i])
 		}
-		if raw := event.Usage.Details[name]; raw != nil {
+		if raw := event.Usage.Details[name]; raw != nil && !m.OpenAI {
 			var calls int64
 			if json.Unmarshal(raw, &calls) != nil || string(raw) == "null" || calls < 0 || calls > 10000 {
 				return invalid()
@@ -160,7 +164,7 @@ func (m *grokHostedSearchMeter) observe(raw []byte) error {
 	return nil
 }
 
-func addGrokSearchCost(cost *priceCost, group gatewayGroup, calls int64) error {
+func addHostedSearchCost(cost *priceCost, group gatewayGroup, calls int64) error {
 	if calls < 0 || calls > 10000 {
 		return bad("invalid search call count")
 	}

@@ -129,10 +129,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
-		if grokSearchProtocol(credentialString(tool, "type")) {
-			if err := validateGrokHostedSearch(tool); err != nil {
-				return in, err
-			}
+		if hostedSearchTool(credentialString(tool, "type")) {
 			in.HostedSearch = true
 			continue
 		}

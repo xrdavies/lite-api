@@ -73,10 +73,10 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 		return nil, err
 	}
 	if u.SearchCalls > 0 {
-		if s.Account.Platform != "grok" || s.Search != "" {
+		if s.Account.Platform != "grok" && s.Account.Platform != "openai" || s.Search != "" {
 			return nil, bad("unexpected hosted search usage")
 		}
-		if err = addGrokSearchCost(&cost, g.Group, u.SearchCalls); err != nil {
+		if err = addHostedSearchCost(&cost, g.Group, u.SearchCalls); err != nil {
 			return nil, err
 		}
 	}

@@ -14,6 +14,16 @@ import (
 	"github.com/xrdavies/lite-api/schema"
 )
 
+// Isolate manual recovery/failure injection from autonomous worker scans.
+// Worker lifecycle tests still start their own runner explicitly.
+func pauseTestWorkers(a *App) func() {
+	a.workerCancel()
+	for _, done := range []chan struct{}{a.workerDone, a.imageWorkerDone, a.batchWorkerDone, a.videoWorkerDone, a.responseWorkerDone, a.balanceWorkerDone, a.billingWorkerDone, a.proxyWorkerDone} {
+		<-done
+	}
+	return a.startWorkers
+}
+
 func TestIdentityKeysAndBalance(t *testing.T) {
 	databaseURL, redisURL := os.Getenv("TEST_DATABASE_URL"), os.Getenv("TEST_REDIS_URL")
 	if databaseURL == "" || redisURL == "" {
@@ -301,7 +311,8 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testTLSProfiles(t, a, admin, otherToken)
 	testWebSearch(t, a, admin, otherToken)
 	testGeminiQuotaPolicy(t, a, admin, otherToken)
-	testGrokHostedSearch(t, a, admin)
+	testHostedSearch(t, a, admin, "grok")
+	testHostedSearch(t, a, admin, "openai")
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)
