@@ -128,6 +128,9 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 	}
 	if protocol == "gemini" {
 		model, action, ok := strings.Cut(r.PathValue("action"), ":")
+		if !ok {
+			model, action, ok = strings.Cut(r.PathValue("action"), "/")
+		}
 		if !ok || !validNativeModel(model) {
 			return in, bad("invalid Gemini model action")
 		}

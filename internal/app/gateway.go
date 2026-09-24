@@ -541,7 +541,7 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/messages/count_tokens", "/messages/count_tokens"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
 	}
-	a.mux.HandleFunc("POST /v1beta/models/{action}", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "gemini") })
+	a.mux.HandleFunc("POST /v1beta/models/{action...}", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "gemini") })
 	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })
 	}

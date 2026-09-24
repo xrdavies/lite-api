@@ -195,7 +195,11 @@ func testNativeGateway(t *testing.T, a *App, admin string) {
 			}
 			idem := fmt.Sprintf("native-%v", stream)
 			before := calls.Load()
-			w := call(path, key, header, body, idem)
+			requestPath := path
+			if protocol == "gemini" {
+				requestPath = strings.Replace(path, "client-model:", "client-model/", 1)
+			}
+			w := call(requestPath, key, header, body, idem)
 			if w.Code != 200 || strings.Contains(w.Body.String(), `"error"`) || strings.Contains(w.Body.String(), "[DONE]") || !strings.Contains(w.Body.String(), "signed-value") && protocol == "gemini" {
 				t.Fatalf("%s stream=%v: %d %s", protocol, stream, w.Code, w.Body.String())
 			}
@@ -245,6 +249,32 @@ func testNativeGateway(t *testing.T, a *App, admin string) {
 			}
 		}
 		if protocol == "gemini" {
+			before := calls.Load()
+			alias := strings.Replace(countPath, "client-model:", "client-model/", 1)
+			replay := call(alias, key, header, body, "count")
+			if replay.Code != 200 || replay.Body.String() != w.Body.String() || replay.Header().Get("Idempotency-Replayed") != "true" || calls.Load() != before {
+				t.Fatal("Gemini count alias replay", replay.Code, replay.Body.String())
+			}
+			if fresh := call(alias, key, header, body, "count-alias"); fresh.Code != 200 || fresh.Body.String() != w.Body.String() || calls.Load() != before+1 {
+				t.Fatal("Gemini count alias dispatch", fresh.Code, fresh.Body.String())
+			}
+			before = calls.Load()
+			for _, credential := range []string{"", user} {
+				if w := call(alias, credential, header, body, ""); w.Code != 401 {
+					t.Fatal("Gemini alias authentication", w.Code)
+				}
+			}
+			if w := call("/v1beta/models/not-allowed/generateContent", key, header, body, ""); w.Code != 403 {
+				t.Fatal("Gemini alias model allowlist", w.Code)
+			}
+			for _, suffix := range []string{"client-model/delete", "client-model/generateContent/extra", "client-model/countTokens:generateContent", "client-model%2Fother/generateContent", "%2e%2e/generateContent"} {
+				if w := call("/v1beta/models/"+suffix, key, header, body, ""); w.Code != 400 && w.Code != 404 {
+					t.Fatal("invalid Gemini alias accepted", suffix, w.Code)
+				}
+			}
+			if calls.Load() != before {
+				t.Fatal("rejected Gemini alias dispatched upstream")
+			}
 			nested := map[string]any{"generateContentRequest": map[string]any{"model": "models/client-model", "contents": body["contents"]}}
 			w = call(countPath+"?key="+key, "", "X-Goog-Api-Key", nested, "")
 			if w.Code != 200 {

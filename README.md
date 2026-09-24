@@ -237,7 +237,7 @@ Messages 也可直接接入 Gemini 原生账号，保留系统/图文/PDF、函�
 
 Gemini 带签名的原生 part 使用现有 AES-GCM 封装，通过 thinking/text/tool_use 块的 `signature` 返回；客户端须原样保留该扩展字段。续接校验内容、工具身份、客户端 Key/组、原账号和来源，不能将签名移到修改后的内容上；原始函数 ID 与结果 ID 配对。导入的无签名工具历史使用兼容标记，其他厂商思考密文不转发。token 计数将完整内容、系统与工具定义放入 `generateContentRequest` 调用上游 [countTokens](https://ai.google.dev/api/tokens)，返回 `input_tokens`，不扣费；上游失败或无效计数不会用本地估算伪装成功。已通过本地协议及数据库验证，真实 Gemini Key 联调仍未覆盖。
 
-Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（SSE）和 `:countTokens`，模型映射同时应用于 URL 与嵌套 token 计数请求。输出 token 包含思考 token，缓存 token 从普通输入中拆分；原生流保持 Gemini 事件形态，不添加 Chat 的 `[DONE]`。当前原生端点支持文本生成及其多模态输入，媒体生成输出和协议转换继续开发。
+Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（SSE）和 `:countTokens`，也兼容 `{model}/generateContent`、`{model}/streamGenerateContent`、`{model}/countTokens`。两种写法共用鉴权、模型白名单、幂等记录和账务，上游统一使用冒号形式；未知操作和额外路径片段拒绝。模型映射同时应用于 URL 与嵌套 token 计数请求。输出 token 包含思考 token，缓存 token 从普通输入中拆分；原生流保持 Gemini 事件形态，不添加 Chat 的 `[DONE]`。原生图片及协议转换的具体支持范围见相应说明。
 
 `GET /v1/models`、`/models` 及其 `/{model}` 返回当前 Key 分组可见的模型，应用渠道/账号映射和客户端白名单。`/v1beta/models` 及详情返回 Gemini 原生格式，支持 `pageSize`/`pageToken`；上游模型目录按账号及配置版本缓存一分钟，支持上游分页。目录不产生消费，零余额仍可查询，禁用或到期的身份不可查询；ETag 命中也先验证权限。中转没有模型目录接口时可配置账号模型映射，通配映射需有具体目录或白名单模型才能枚举。
 
