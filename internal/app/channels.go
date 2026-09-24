@@ -96,8 +96,16 @@ func (in *channelInput) validate(create bool) error {
 		return bad("features is too long")
 	}
 	// Runtime feature switches are accepted only when their execution path exists.
-	if len(in.FeaturesConfig) > 0 {
-		return bad("channel feature switches are not yet supported")
+	for name, raw := range in.FeaturesConfig {
+		var platforms map[string]bool
+		if name != webSearchFeature || json.Unmarshal(raw, &platforms) != nil || platforms == nil {
+			return bad("unsupported channel feature configuration")
+		}
+		for platform := range platforms {
+			if platform != "anthropic" {
+				return bad("search emulation requires an Anthropic target")
+			}
+		}
 	}
 	if in.StatsRules != nil {
 		if len(*in.StatsRules) > 100 {
@@ -226,6 +234,11 @@ func (a *App) saveChannel(w http.ResponseWriter, r *http.Request) error {
 	if in.Mapping != nil {
 		b, _ := json.Marshal(in.Mapping)
 		add("model_mapping", string(b))
+	}
+	if len(in.FeaturesConfig) > 0 {
+		b, _ := json.Marshal(in.FeaturesConfig)
+		args = append(args, string(b))
+		sets = append(sets, fmt.Sprintf("features_config=COALESCE(features_config,'{}'::jsonb) || $%d::jsonb", len(args)))
 	}
 
 	if _, err = tx.ExecContext(r.Context(), "UPDATE channels SET "+strings.Join(sets, ",")+" WHERE id=$1", args...); err != nil {

@@ -119,6 +119,11 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case webSearchFeature:
+			var mode string
+			if string(value) != "true" && string(value) != "false" && (json.Unmarshal(value, &mode) != nil || mode != "default" && mode != "enabled" && mode != "disabled") {
+				return bad("invalid web_search_emulation mode")
+			}
 		case billingEnabledKey, billingSyncKey:
 			var enabled bool
 			if string(value) == "null" || json.Unmarshal(value, &enabled) != nil {
@@ -200,6 +205,9 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 		return bad("credentials.api_key is required")
 	}
 	u := &upstreamAccount{Platform: *in.Platform, Credentials: in.Credentials}
+	if u.Platform != "anthropic" && in.Extra[webSearchFeature] != nil {
+		return bad("web_search_emulation requires an Anthropic account")
+	}
 	if u.Platform != "gemini" && in.Credentials["tier_id"] != nil {
 		return bad("tier_id requires a Gemini account")
 	}
@@ -292,6 +300,9 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.Platform != nil && *in.Platform != u.Platform {
 		return bad("account platform is immutable")
+	}
+	if u.Platform != "anthropic" && in.Extra[webSearchFeature] != nil {
+		return bad("web_search_emulation requires an Anthropic account")
 	}
 	if u.Platform != "gemini" && in.Credentials["tier_id"] != nil {
 		return bad("tier_id requires a Gemini account")

@@ -189,6 +189,16 @@ alpha 搜索成功一次计一笔 `per_request` 用量，不要求上游 token u
 
 Grok 独立搜索每次成功按 `search_price_per_1k / 1000` 乘用户专属/分组倍率结算，不叠加响应中的 token 用量。管理员在分组创建/更新中配置该字段：默认 5 USD/千次，0 免费，负数清除，省略/null 保留；默认值同样是固定兼容规则。消费模型分别为 `grok-web-search`、`grok-x-search`，实际请求/上游/响应模型另行记录。权限、模型许可、渠道限制、额度、排队、RPM、幂等及失败结算恢复共用网关；web/X 幂等相互独立，同类根路径别名共享重放。上游 401/402/403/429/5xx 最多尝试四个不同账号，网络结果不明不重发。当前由本地协议服务和真实数据库测试验证，尚无 Grok 原厂搜索实测。
 
+管理员通过 `/api/v1/admin/settings/web-search-emulation` 的 GET/PUT 管理搜索模拟，`/test` 接受 `query`，`/reset-usage` 接受 `provider_type=brave|tavily`。配置包含 `enabled` 和 `providers`；每个提供方保留 `type`、`api_key`、`quota_limit`、`subscribed_at`、`proxy_id`、`expires_at`。PUT 替换配置，空 Key 保留同类型旧值，移除提供方可删除凭证；响应仅返回 `api_key_configured`，不会返回 Key。`quota_used` 为只读，未知字段拒绝，修改有管理审计。配置沿用原 settings 键，无新表。
+
+模拟仅用于 Anthropic API Key 目标的 Messages 请求：恰好一个 web_search/google_search 工具，最后一条用户消息包含文本。全局开关必须开启；账号 `extra.web_search_emulation` 支持 enabled/disabled/default，default 继承渠道 `features_config.web_search_emulation.anthropic`，历史 true 为 enabled、false 为 default。账号 disabled 优先；关闭或不匹配时走通常网关。复合和 fallback 按解析出的 Anthropic 目标执行，渠道配置取原 Key 分组；其他平台、count_tokens、混合工具、Chat/Responses 转换和健康测试不启用此模拟。
+
+搜索只发送查询词，最多取五条结果，返回 Messages 的 server_tool_use、web_search_tool_result 和文本列表，支持 JSON/SSE。客户端 Key、模型 Key、Cookie 和其他对话内容不发给搜索商。协议采用 [Brave Web Search](https://api.search.brave.com/app/documentation/web-search) 和 [Tavily Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)。搜索地址固定；账号代理优先于提供方代理，复用 DNS/私网/TLS 检查和明确回退，重定向不跟随，正文最多 2 MiB。单提供方 20 秒、整个搜索最多 63 秒，管理测试最多 15 秒；失败可尝试另一搜索商，不切换到 LLM，也不改变模型账号健康。
+
+`quota_limit` 为 null/0 时不限额且不累计本地计数；正数时 Redis 原子预占，成功保留、失败回滚，剩余额度加随机权重决定尝试顺序，无额度限制的提供方排在其后。配置了 `subscribed_at` 时在 UTC 月度对应日零点重置，月末钳位；无日期时从首次预占起 32 天过期。这里按实际月界过期，不额外延后一天。重置/过期后旧失败请求不会扣减新周期，Redis 错误拒绝有限额派发；配置改变不自动清空当前计数。已到期提供方不可用。手动测试绕过本地计数、仍可能产生搜索商费用，并可在全局关闭时测试；被引用的代理不能删除。当前未添加搜索代理独立的五分钟故障缓存，请求会重新验证代理可用性。
+
+搜索模拟仍执行余额、Key/平台额度、模型与渠道限制、并发、RPM、幂等及事务结算。响应 token 是文本长度估算，账务记录模型 token 为零；显式按次价格仍收费，token 价格下费用为零。搜索失败不记成功用量；结束事件在结算后发送，JSON 幂等重放不重新搜索。管理测试不计用户费用。仅使用本地协议服务和真实 PostgreSQL/Redis 验证，尚未使用真实 Brave/Tavily 凭证联调。
+
 `POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 及 `/messages/count_tokens` 别名支持原生 Anthropic 计数及 Gemini 转换计数；别名共用鉴权、模型限制和幂等记录，不写消费账务。按量兼容平台可使用 `credentials.api_protocol=anthropic`。原生转发时版本和 beta 协议头受长度限制后传递，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
 
 Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；`count_tokens` 仍要求原生计数账号。

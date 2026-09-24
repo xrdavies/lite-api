@@ -232,6 +232,7 @@ func (g *gatewayGroup) routingAccounts(model, platform string) []int64 {
 }
 
 type gatewaySelection struct {
+	Features                                   map[string]json.RawMessage
 	Audio                                      string
 	Search                                     string
 	Account                                    *upstreamAccount
@@ -275,6 +276,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			return nil, err
 		}
 		var config struct {
+			Features map[string]json.RawMessage   `json:"features_config"`
 			Pricing  []modelPrice                 `json:"model_pricing"`
 			Mapping  map[string]map[string]string `json:"model_mapping"`
 			Source   string                       `json:"billing_model_source"`
@@ -286,6 +288,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			return nil, err
 		}
 		s.ChannelID = &channelID
+		s.Features = config.Features
 		s.Pricing = config.Pricing
 		s.ApplyStats = config.Apply
 		s.Restrict = config.Restrict
@@ -840,6 +843,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	excluded := map[int64]bool{}
 	catalog := a.prices.Load()
 	var resp *http.Response
+	var emulation *webSearchConfig
 	var upstreamStarted time.Time
 	var lastRejection *passthroughError
 	var lastRejectedAccount *gatewaySelection
@@ -913,6 +917,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				fail(err)
 				return
 			}
+		}
+		emulation, err = a.searchEmulation(ctx, in, selected, request)
+		if err != nil {
+			selected.Release()
+			fail(err)
+			return
 		}
 		path, pathErr := in.upstreamPath(selected.UpstreamModel)
 		if pathErr != nil {
@@ -1126,7 +1136,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				label = wireIn.ImageSize
 			}
 			if priceErr == nil {
-				_, priceErr = calculatePrice(preflight, wireIn.preflightUsage(), rate, tier, wireIn.Effort, label, started, g.Group.LongContext)
+				usage := wireIn.preflightUsage()
+				if emulation != nil {
+					usage = priceUsage{}
+				}
+				_, priceErr = calculatePrice(preflight, usage, rate, tier, wireIn.Effort, label, started, g.Group.LongContext)
 			}
 			if priceErr != nil {
 				selected.Release()
@@ -1157,7 +1171,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 		upstreamStarted = time.Now()
-		if turn := socketTurn(ctx); turn != nil {
+		if emulation != nil {
+			var result *webSearchResponse
+			result, err = a.runWebSearch(ctx, *emulation, webSearchQuery(request), selected.Account.ProxyID, false)
+			if err == nil {
+				resp = webSearchMessages(result, model, stream)
+			}
+		} else if turn := socketTurn(ctx); turn != nil {
 			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
 		} else {
 			upstreamCtx, upstreamCancel := context.WithCancel(ctx)
@@ -1575,6 +1595,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 		}
 	}
+	if emulation != nil {
+		// The search provider consumes its own quota; estimated display tokens
+		// must not enter model billing. Explicit per-request pricing still applies.
+		observation.Usage, observation.HasUsage = priceUsage{}, true
+	}
 	if in.CountOnly {
 		// Token counts check eligibility but do not create consumption.
 	} else if turn := socketTurn(ctx); turn != nil && turn.warmup && !observation.HasUsage {
@@ -1599,6 +1624,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			receipt.NativeCompaction = in.NativeCompaction
 			receipt.Upstream, _ = wireIn.upstreamPath(selected.UpstreamModel)
 			receipt.Upstream, _, _ = strings.Cut(receipt.Upstream, "?")
+			if emulation != nil {
+				receipt.Upstream = "/web-search-emulation"
+			}
 			billingCtx, billingCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			err = a.saveReceipt(billingCtx, receipt)
 			billingCancel()

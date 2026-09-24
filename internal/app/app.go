@@ -385,6 +385,7 @@ func (a *App) routes() {
 		return reply(w, map[string]string{"status": "ok"})
 	})
 	a.settingsRoutes()
+	a.webSearchRoutes()
 	a.runtimeSettingsRoutes()
 	a.errorRuleRoutes()
 	a.tlsProfileRoutes()

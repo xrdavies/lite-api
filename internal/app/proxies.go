@@ -261,6 +261,15 @@ func (a *App) deleteProxy(w http.ResponseWriter, r *http.Request) error {
 	if used {
 		return conflict("proxy is referenced by an account or fallback")
 	}
+	cfg, err := loadWebSearch(r.Context(), tx)
+	if err != nil {
+		return err
+	}
+	for _, provider := range cfg.Providers {
+		if provider.ProxyID != nil && *provider.ProxyID == id {
+			return conflict("proxy is referenced by a search provider")
+		}
+	}
 	result, err := tx.ExecContext(r.Context(), "UPDATE proxies SET deleted_at=now(),status='inactive',updated_at=now() WHERE id=$1 AND deleted_at IS NULL", id)
 	if err != nil {
 		return err
