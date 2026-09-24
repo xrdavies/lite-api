@@ -89,6 +89,14 @@ func testRuntimeSettings(t *testing.T, a *App, admin, ordinary string) {
 		}
 	}
 	const root = "/api/v1/admin/settings/"
+	// These products have no runtime or writable switch in the internal gateway.
+	for _, name := range []string{"risk_control_enabled", "prompt_audit_enabled", "compliance_enabled"} {
+		expect(400, "PUT", "/api/v1/admin/settings", admin, map[string]any{name: true})
+		var count int
+		if err := a.DB.QueryRow("SELECT count(*) FROM settings WHERE key=$1", name).Scan(&count); err != nil || count != 0 {
+			t.Fatal("unsupported governance setting persisted", name, count, err)
+		}
+	}
 	defer func() {
 		a.panelMu.Lock()
 		defer a.panelMu.Unlock()
