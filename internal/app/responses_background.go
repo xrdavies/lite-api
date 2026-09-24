@@ -26,6 +26,7 @@ type backgroundResponse struct {
 	Effort, Tier    string
 	RequestedEffort *string
 	Items           []string
+	MCPTool         bool `json:",omitempty"`
 }
 
 func backgroundKey(id string) string { return "gateway:background:task:" + id }
@@ -120,6 +121,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 		return true, &apiError{429, "background response capacity reached"}
 	}
 	t := &backgroundResponse{videoTask: videoTask{ID: id, Target: responseTarget(s.Account), Stage: "submitting", Identity: *g, Selection: *s, Requested: in.Model, Payload: payload, IP: clientIP(r), UserAgent: truncate(r.UserAgent(), 512), Inbound: r.URL.Path, Created: started}, Store: in.Store, Stream: in.Stream, Effort: effort, Tier: in.Tier, RequestedEffort: requestedEffort}
+	t.MCPTool = in.NativeMCP
 	account := *s.Account
 	account.Credentials = nil
 	account.Extra = map[string]json.RawMessage{}
@@ -208,6 +210,17 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 			return err
 		}
 	}
+	// Acceptance remains recoverable even if the returned content cannot be
+	// sanitized. The initial checkpoint contains only identity, never tool headers.
+	clean, err := sanitizeResponseMCP(raw)
+	if err != nil {
+		return err
+	}
+	if string(clean) != string(raw) {
+		raw = clean
+		result = nil
+		_ = json.Unmarshal(raw, &result)
+	}
 	if status == "queued" || status == "in_progress" {
 		// Partial output is available over the native stream; polling publishes the
 		// final output only after settlement. No cumulative usage is billed twice.
@@ -219,7 +232,7 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 		return a.saveBackgroundResponse(persist, t)
 	}
 	observation := textObservation{Protocol: "responses", Tier: t.Tier}
-	err := observation.observe(raw)
+	err = observation.observe(raw)
 	failed := status == "failed" || status == "cancelled"
 	if err != nil && !failed {
 		return err
@@ -277,7 +290,7 @@ func (a *App) settleBackgroundResponse(ctx context.Context, t *backgroundRespons
 	var result struct{ Status string }
 	_ = json.Unmarshal(t.Result, &result)
 	if t.Store && (result.Status == "completed" || result.Status == "incomplete") {
-		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil}
+		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool}
 		if err := a.storeResponseBinding(ctx, &t.Identity, t.UpstreamID, binding); err != nil {
 			return err
 		}
@@ -297,6 +310,9 @@ func (a *App) backgroundSource(ctx context.Context, t *backgroundResponse) (*ups
 	return u, nil
 }
 func (a *App) refreshBackgroundResponse(ctx context.Context, t *backgroundResponse) error {
+	if t.MCPTool {
+		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+	}
 	if t.Stage == "terminal" {
 		return nil
 	}
@@ -393,6 +409,10 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 	if t.UpstreamID != id || t.Identity.UserID != g.UserID || t.Identity.Key.ID != g.Key.ID || t.Identity.Key.GroupID != g.Key.GroupID {
 		fail(missing())
 		return
+	}
+	if t.MCPTool {
+		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+		r = r.WithContext(ctx)
 	}
 	if stream && !t.Stream {
 		fail(bad("background streaming requires stream=true at creation"))
@@ -555,6 +575,10 @@ func (a *App) streamBackgroundResponse(w http.ResponseWriter, r *http.Request, t
 			return &apiError{502, "background event missing response identity"}
 		}
 		raw, _ = json.Marshal(event)
+		raw, err := sanitizeResponseMCP(raw)
+		if err != nil {
+			return err
+		}
 		if _, err := w.Write(append(append([]byte("event: "+kind+"\ndata: "), raw...), '\n', '\n')); err != nil {
 			return err
 		}

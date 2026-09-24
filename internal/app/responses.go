@@ -81,6 +81,23 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				if responseMCPItem(kind) {
+					ref, err := validateResponseMCPItem(item)
+					if err != nil {
+						return in, err
+					}
+					if len(in.ItemReferences) >= 1024 {
+						return in, bad("too many MCP item references")
+					}
+					in.ItemReferences = append(in.ItemReferences, ref)
+					if kind == "mcp_call" && item["approval_request_id"] != nil && string(item["approval_request_id"]) != "null" {
+						if len(in.ItemReferences) >= 1024 {
+							return in, bad("too many MCP item references")
+						}
+						in.ItemReferences = append(in.ItemReferences, credentialString(item, "approval_request_id"))
+					}
+					in.NativeMCP = true
+				}
 				if responseLocalItem(kind) {
 					if err := validateResponseLocalItem(item); err != nil {
 						return in, err
@@ -145,6 +162,13 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if credentialString(tool, "type") == "mcp" {
+			if err := validateResponseMCPTool(tool); err != nil {
+				return in, err
+			}
+			in.NativeMCP = true
+			continue
+		}
 		if responseLocalTool(credentialString(tool, "type")) {
 			if err := validateResponseLocalTool(tool); err != nil {
 				return in, err
@@ -177,7 +201,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil) && (in.Action != "" || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeMCP) && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	if in.ResponseImage != nil {
@@ -355,6 +379,7 @@ type responseBinding struct {
 	AccountID int64
 	Target    string
 	ImageTool bool     `json:",omitempty"`
+	MCPTool   bool     `json:",omitempty"`
 	History   string   `json:",omitempty"`
 	Items     []string `json:",omitempty"`
 }
@@ -398,7 +423,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -487,7 +512,8 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 			return nil, bad("response items must share the previous response upstream source")
 		}
 		imageTool := source.ImageTool || binding != nil && binding.ImageTool
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool}
+		mcpTool := source.MCPTool || binding != nil && binding.MCPTool
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool}
 	}
 	return binding, nil
 }

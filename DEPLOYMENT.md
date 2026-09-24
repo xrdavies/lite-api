@@ -69,6 +69,8 @@ docker compose --env-file .env.deploy -f compose.deploy.yaml exec -T app /lite-a
 
 schema 保持不变不等于所有版本都可任意回退：Redis 中的任务、结算凭据与加密格式也必须兼容。以实际版本组合运行部署验证；有新增任务类型的版本应先完成任务或确认旧版本可恢复它。不要用 `down --volumes` 发布或回退。
 
+启用远程 MCP 后，响应关联与后台任务含 MCP 标记，用于无声明续接的脱敏与禁止重试。回退到不识别该标记的版本前应停止相关调用并完成后台任务，不能让旧版本继续处理仍有效的 MCP 会话；保留当前版本处理这些会话，或等其归属记录到期后再回退。
+
 ## 数据恢复与故障处理
 
 PostgreSQL 卷、Redis 卷和 `JWT_SECRET` 都是持久状态。Redis 使用 AOF `appendfsync always` 和 `noeviction`，包含会话、待结算凭据及加密媒体任务；不能当作可随时清空的缓存。外部备份应同时覆盖两类数据卷、密钥及配置；采用停写冷快照时，先停止应用，再停止数据库和 Redis，使用部署平台对两个卷取快照，之后依次启动依赖与应用。

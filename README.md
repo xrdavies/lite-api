@@ -217,6 +217,12 @@ OpenAI 类型的原生 Responses 账号支持客户端执行的 `apply_patch`、
 
 Computer 声明及完整调用/结果历史均要求 OpenAI 原生 Responses 账号，支持三前缀、JSON/SSE、WebSocket、后台恢复及 composite；历史单独提交也不能绕过平台限制。计费沿用模型 token 用量，不收本地执行或网页搜索附加费；模型与中转是否支持该工具需实际验证。请求仍限 4 MiB，客户端应等待已结算终态再执行动作，并自行落实上游返回的安全检查与操作授权。文件搜索、托管代码执行、MCP 及共享文件生命周期不因 Computer 接入而启用。
 
+远程 MCP 支持 OpenAI 原生 Responses 的 `type=mcp`、`server_label`、HTTPS `server_url` 和调用方提供的 API Key `headers`；可配置 `allowed_tools`、`require_approval`、`defer_loading`、`server_description` 及 direct `allowed_callers`。执行由所选上游完成，网关不建立 MCP 连接、不代入账号 Key 或客户端 Key。保持省略/always/never/按工具过滤的审批策略，不自动批准。接口依据 [OpenAI 远程 MCP 指南](https://developers.openai.com/api/docs/guides/tools-remote-mcp)。OAuth authorization、旧 connector_id、共享 tunnel_id 和 programmatic 调用不在本系统 API Key 接入范围。
+
+`mcp_list_tools`、`mcp_call`、`mcp_approval_request` 原样保留；`mcp_approval_response` 必须提供显式 approve 布尔值和当前 Key/分组已观察的 approval_request_id。完整历史也校验条目归属，固定原账号和凭证来源；未知、跨 Key、来源变更或已删除条目拒绝。HTTP `store=false` 无持久归属，WebSocket 非存储历史仅限原连接；审批客户端应使用 store=true。支持 JSON/SSE/WS、后台与 composite，沿用模型 token 结算，不收网页搜索附加费；远程服务商费用由其自身约定，不作为 token 伪造。发现结果中的 MCP 声明仍拒绝，使用显式 tools/additional_tools 声明。
+
+MCP 请求遇到上游拒绝不自动换号重发，已有幂等记录仍阻止相同请求重复派发；只带 previous_response_id 的续接继承这项保护。原生响应、SSE/WS、后台结果及资源查询会移除回显 MCP 声明中的 headers/authorization 字段，MCP HTTP 错误不透传供应商消息正文，管理员固定错误消息仍可生效。请求认证信息不写入任务或响应关联；需认证时客户端逐轮重新提供 headers。后台 JSON/SSE 先保存安全的任务身份，再清理内容；清理失败仍可轮询恢复，不重新创建。JSON/SSE/WS、跨 Key 审批、后台原价恢复、错误脱敏和不重试均有本地协议测试；真实 MCP 上游尚未联调。
+
 条目元数据与响应关联在 Redis 原子保存 30 天，不保存原生内容；最多 1024 个引用/输出项。HTTP `store=false` 不保存条目，WebSocket `store=false` 仅在原连接最近 1024 个响应内使用；断线后须重发完整内容。来自旧版本且未记录条目 ID 的响应仍可 previous_response 续接，但无法凭空恢复其条目归属。幂等重放不重新派发或计费，token 计数引用只做权限和来源校验。
 
 HTTP Responses 支持 `background=true`，只调度原生 Responses API Key 账号；创建复用模型/额度/路由/价格预检，返回上游 response ID。三个前缀均提供 `GET /responses/{id}` 查询和 `POST /responses/{id}/cancel` 取消，只允许创建时的 Key/分组访问。查询和取消无需剩余余额，但仍检查 Key 状态、IP、RPM、用户与账号并发。凭证/地址/协议变更后暂停轮询，恢复原来源后继续，不换账号或重新生成。

@@ -152,7 +152,7 @@ func mergeResponseDiscoveries(tools, items []map[string]json.RawMessage) ([]map[
 		return key, namespace + "\x00" + responseToolDefinition(tool), nil
 	}
 	for _, tool := range tools {
-		if kind := credentialString(tool, "type"); kind == "tool_search" || hostedSearchTool(kind) || kind == "image_generation" || responseLocalTool(kind) {
+		if kind := credentialString(tool, "type"); kind == "tool_search" || hostedSearchTool(kind) || kind == "image_generation" || responseLocalTool(kind) || kind == "mcp" {
 			continue
 		}
 		ns := ""

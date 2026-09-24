@@ -428,7 +428,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if in.HostedSearch {
 			matches = (u.Platform == "grok" || u.Platform == "openai") && u.protocol() == "responses"
 		}
-		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools {
+		if in.ResponseImage != nil || in.HostedToolSearch || in.NativeClientTools || in.NativeMCP {
 			matches = u.Platform == "openai" && u.protocol() == "responses"
 		}
 		if !matches {
@@ -642,6 +642,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(err)
 		return
 	}
+	if in.NativeMCP {
+		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+		r = r.WithContext(ctx)
+	}
 	if in.Stream {
 		_ = controller.SetWriteDeadline(started.Add(31 * time.Minute))
 	} else if imageExecution(ctx) == nil {
@@ -812,6 +816,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(bad("native client tools require an OpenAI target"))
 		return
 	}
+	if in.NativeMCP && g.Group.Platform != "openai" {
+		fail(bad("MCP requires an OpenAI target"))
+		return
+	}
 	if (protocol == "images" || in.ResponseImage != nil) && !g.Group.AllowImage {
 		fail(denied())
 		return
@@ -840,6 +848,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if err == nil && binding != nil && binding.ImageTool && in.ResponseImage == nil && !in.CountOnly {
 		err = bad("image-capable continuations must declare image_generation again")
+	}
+	if err == nil && binding != nil && binding.MCPTool {
+		in.NativeMCP = true
+		ctx = context.WithValue(ctx, mcpRequestKey{}, true)
+		r = r.WithContext(ctx)
 	}
 	if err != nil {
 		fail(err)
@@ -1295,6 +1308,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
 		}
 		selected.Release()
+		if in.NativeMCP {
+			// A tool may already have acted before the provider returned an error.
+			fail(failure)
+			return
+		}
 		grokRetry := (in.Search != nil || audioIn != nil) && (status == 401 || status == 402 || status == 403 || status >= 500)
 		if !searchEndpointError && !grokRetry && !balanceFailure(selected.Account.Platform, status, failureBody) && status != 429 && status != 502 && status != 503 && status != 504 && status != 529 {
 			fail(failure)
@@ -1378,6 +1396,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 		} else {
 			forwardErr = observe(responseBody)
+			if wireIn.Protocol == "responses" && forwardErr == nil {
+				responseBody, forwardErr = sanitizeResponseMCP(responseBody)
+			}
 			if forwardErr == nil && in.CountOnly && protocol == "anthropic" && wireIn.Protocol == "gemini" {
 				var count struct {
 					Total int64 `json:"totalTokens"`
@@ -1483,6 +1504,22 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 				if firstToken == 0 {
 					firstToken = time.Since(started).Milliseconds()
+				}
+			}
+			if wireIn.Protocol == "responses" && data != "" {
+				clean, err := sanitizeResponseMCP([]byte(data))
+				if err != nil {
+					return err
+				}
+				if string(clean) != data {
+					kept := frame[:0]
+					for _, line := range frame {
+						if !strings.HasPrefix(line, "data:") {
+							kept = append(kept, line)
+						}
+					}
+					frame = append(kept, "data: "+string(clean))
+					data = string(clean)
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
@@ -1769,9 +1806,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if turn := socketTurn(ctx); turn != nil {
 		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
-		if in.ResponseImage != nil {
+		if in.ResponseImage != nil || in.NativeMCP {
 			binding := turn.socket.responses[observation.ResponseID]
-			binding.ImageTool = true
+			binding.ImageTool, binding.MCPTool = in.ResponseImage != nil, in.NativeMCP
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
@@ -1785,7 +1822,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil})
+				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP})
 			}
 		}
 		bindingCancel()

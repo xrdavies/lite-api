@@ -29,6 +29,7 @@ type textRequest struct {
 	HostedSearch                                 bool
 	HostedToolSearch                             bool
 	NativeClientTools                            bool
+	NativeMCP                                    bool
 	ResponseImage                                *responseImageConfig
 }
 

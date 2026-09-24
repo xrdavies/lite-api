@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -96,6 +97,10 @@ func (a *App) readResponseResource(w http.ResponseWriter, r *http.Request, u *up
 	if err = validateResponseResource(raw, id, items); err != nil {
 		return err
 	}
+	raw, err = sanitizeResponseMCP(raw)
+	if err != nil {
+		return err
+	}
 	return rawReply(w, json.RawMessage(raw))
 }
 
@@ -142,6 +147,9 @@ func validateResponseResource(raw []byte, id string, items bool) error {
 
 func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, id string, query url.Values) error {
 	binding, err := a.previousResponse(r.Context(), g, id)
+	if binding != nil && binding.MCPTool {
+		r = r.WithContext(context.WithValue(r.Context(), mcpRequestKey{}, true))
+	}
 	if err != nil {
 		return err
 	}

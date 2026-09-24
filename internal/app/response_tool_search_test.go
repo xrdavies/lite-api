@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -418,6 +418,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			declaration, output, toolMarker = nativeComputerPreview, nativeComputerLegacyCall, `"environment":"browser"`
 			ip = "192.0.2.184:1234"
 		}
+	}
+	if kind == "mcp" {
+		declaration, output, history, marker, toolMarker = nativeMCPTools, nativeMCPCalls, nativeMCPHistory, `"type":"mcp_approval_request"`, `"require_approval":"always"`
+		ip = "192.0.2.185:1234"
 	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
@@ -448,6 +452,8 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	k := must("POST", "/api/v1/keys", user, map[string]any{"name": "search", "group_id": gid, "quota": 100})
 	key, kid := k["key"].(string), id(k)
 	var calls atomic.Int64
+	var reject atomic.Bool
+	var invalidMCPEnvelope atomic.Bool
 	var pending, received atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer hosted-search-provider" || r.Header.Get("Cookie") != "" {
@@ -481,9 +487,34 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 		received.Store(body)
 		n := calls.Add(1)
+		if reject.Load() {
+			w.WriteHeader(503)
+			fmt.Fprint(w, `{"error":{"message":"unavailable client-mcp-secret"}}`)
+			return
+		}
 		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, output, responseUsage)
+		if kind == "mcp" {
+			response = strings.TrimSuffix(response, "}") + `,"tools":` + declaration + `}`
+			if tools := body["tools"]; tools != nil && !strings.Contains(string(tools), "client-mcp-secret") {
+				t.Error("MCP authentication headers not forwarded in body")
+			}
+			if r.Header.Get("X-Api-Key") != "" {
+				t.Error("MCP headers leaked into provider HTTP headers")
+			}
+		}
 		if string(body["background"]) == "true" {
 			pending.Store(response)
+			if invalidMCPEnvelope.Load() {
+				// A valid accepted ID must survive a later credential-cleaning failure.
+				queued := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","status":"queued","tools":%s%s%s}`, n, strings.Repeat("[", 34), declaration, strings.Repeat("]", 34))
+				if string(body["stream"]) == "true" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":%s}\n\n", queued)
+				} else {
+					fmt.Fprint(w, queued)
+				}
+				return
+			}
 			fmt.Fprintf(w, `{"id":"resp_hosted_tool_%d","object":"response","status":"queued"}`, n)
 			return
 		}
@@ -518,6 +549,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), marker) || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["tools"]), toolMarker) {
 		t.Fatal("native hosted search", w.Code, w.Body.String())
 	}
+	if kind == "mcp" && strings.Contains(w.Body.String(), "client-mcp-secret") {
+		t.Fatal("MCP headers exposed in JSON response")
+	}
 	var initial struct{ Output json.RawMessage }
 	if json.Unmarshal(w.Body.Bytes(), &initial) != nil || string(initial.Output) != output {
 		t.Fatal("native tool output changed", string(initial.Output))
@@ -536,12 +570,26 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("foreign search continuation", w.Code)
 	}
 	body["input"], body["stream"] = json.RawMessage(history), true
+	if kind == "mcp" {
+		delete(body, "previous_response_id")
+		if got := call("POST", "/responses", other, body, ""); got.Code != 404 || calls.Load() != 1 {
+			t.Fatal("foreign MCP approval without previous response dispatched", got.Code)
+		}
+		body["input"] = json.RawMessage(`[{"type":"mcp_approval_response","approval_request_id":"mcpr_unknown","approve":true}]`)
+		if got := call("POST", "/responses", key, body, ""); got.Code != 404 || calls.Load() != 1 {
+			t.Fatal("unknown MCP approval dispatched", got.Code)
+		}
+		body["input"] = json.RawMessage(history)
+	}
 	if kind != "search" {
 		delete(body, "tools") // Full native history alone must preserve platform admission.
 	}
 	w = call("POST", "/responses", key, body, "")
-	if !strings.Contains(w.Body.String(), "response.completed") || string(received.Load().(map[string]json.RawMessage)["input"]) != history {
+	if !strings.Contains(w.Body.String(), "response.completed") || responseToolDefinition(map[string]json.RawMessage{"input": received.Load().(map[string]json.RawMessage)["input"]}) != responseToolDefinition(map[string]json.RawMessage{"input": json.RawMessage(history)}) {
 		t.Fatal("hosted history or SSE lost", w.Code, w.Body.String())
+	}
+	if kind == "mcp" && strings.Contains(w.Body.String(), "client-mcp-secret") {
+		t.Fatal("MCP headers exposed in SSE response")
 	}
 	check(2)
 	delete(body, "previous_response_id")
@@ -566,6 +614,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	conn.CloseNow()
 	if err != nil || !bytes.Contains(raw, []byte(`"response.completed"`)) || !bytes.Contains(raw, []byte(marker)) {
 		t.Fatal("hosted search WS", string(raw), err)
+	}
+	if kind == "mcp" && bytes.Contains(raw, []byte("client-mcp-secret")) {
+		t.Fatal("MCP headers exposed over WS")
 	}
 	delete(body, "type")
 	check(3)
@@ -596,7 +647,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	before := calls.Load()
-	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret}
+	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, privateUpstreams: a.privateUpstreams}
 	for range 2 {
 		task, err = fresh.loadBackgroundResponse(ctx, taskID)
 		if err != nil || fresh.refreshBackgroundResponse(ctx, task) != nil {
@@ -604,6 +655,15 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 	}
 	check(4)
+	if kind == "mcp" {
+		if bytes.Contains(task.Result, []byte("client-mcp-secret")) {
+			t.Fatal("MCP header persisted in recovered background result")
+		}
+		got := call("GET", "/responses/"+accepted.ID+"?include=reasoning.encrypted_content", key, nil, "")
+		if got.Code != 200 || strings.Contains(got.Body.String(), "client-mcp-secret") {
+			t.Fatal("MCP resource read redaction", got.Code, got.Body.String())
+		}
+	}
 	if calls.Load() != before {
 		t.Fatal("search recovery dispatched again")
 	}
@@ -620,6 +680,69 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
 	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
 		t.Fatal("composite hosted search", w.Code, w.Body.String())
+	}
+	if kind == "mcp" {
+		for _, stream := range []bool{false, true} {
+			request := map[string]any{"model": "tool-model", "input": "recover accepted MCP", "tools": json.RawMessage(declaration), "background": true, "store": true, "stream": stream}
+			idem := fmt.Sprintf("mcp-sanitization-%t", stream)
+			invalidMCPEnvelope.Store(true)
+			before := calls.Load()
+			got := call("POST", "/responses", key, request, idem)
+			invalidMCPEnvelope.Store(false)
+			if calls.Load() != before+1 || strings.Contains(got.Body.String(), "client-mcp-secret") || !stream && got.Code != 502 || stream && !strings.Contains(got.Body.String(), `"type":"error"`) {
+				t.Fatal("invalid MCP response published", got.Code, got.Body.String())
+			}
+			nativeID := fmt.Sprintf("resp_hosted_tool_%d", before+1)
+			id, err := a.Redis.Get(ctx, backgroundIndex(identity, nativeID)).Result()
+			if err != nil {
+				t.Fatal("accepted MCP identity lost before sanitization", err)
+			}
+			task, err := fresh.loadBackgroundResponse(ctx, id)
+			if err != nil || task.Stage != "pending" || task.UpstreamID != nativeID || !task.MCPTool || bytes.Contains(task.Result, []byte("client-mcp-secret")) {
+				t.Fatal("unsafe or unrecoverable MCP checkpoint", err)
+			}
+			for range 2 {
+				if err := fresh.refreshBackgroundResponse(ctx, task); err != nil {
+					t.Fatal("MCP sanitization recovery", err)
+				}
+			}
+			var count int
+			var cost string
+			if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text FROM usage_logs WHERE request_id=$1", id).Scan(&count, &cost); err != nil || count != 1 || cost != "2.7630000000" || task.Stage != "terminal" {
+				t.Fatal("recovered MCP settlement", count, cost, err)
+			}
+			_ = call("POST", "/responses", key, request, idem)
+			if calls.Load() != before+1 {
+				t.Fatal("MCP recovery repeated generation")
+			}
+		}
+		rule := must("POST", "/api/v1/admin/error-passthrough-rules", admin, map[string]any{"name": "MCP upstream failure", "enabled": true, "error_codes": []int{503}, "keywords": []string{"client-mcp-secret"}, "match_mode": "all", "passthrough_code": true, "passthrough_body": true})
+		defer must("DELETE", "/api/v1/admin/error-passthrough-rules/"+fmt.Sprint(id(rule)), admin, nil)
+		must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second MCP provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}})
+		reject.Store(true)
+		before := calls.Load()
+		got := call("POST", "/responses", key, body, "mcp-ambiguous")
+		if got.Code != 503 || calls.Load() != before+1 || strings.Contains(got.Body.String(), "client-mcp-secret") || !strings.Contains(got.Body.String(), "upstream MCP request rejected") {
+			t.Fatal("MCP retry or secret exposure", got.Code, calls.Load(), got.Body.String())
+		}
+		if replay := call("POST", "/responses", key, body, "mcp-ambiguous"); calls.Load() != before+1 || strings.Contains(replay.Body.String(), "client-mcp-secret") {
+			t.Fatal("MCP failure replayed upstream or leaked header")
+		}
+		must("POST", ap+"/recover-state", admin, map[string]any{})
+		continuation := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
+		got = call("POST", "/responses", key, continuation, "mcp-implicit")
+		if got.Code != 503 || calls.Load() != before+2 || strings.Contains(got.Body.String(), "client-mcp-secret") || !strings.Contains(got.Body.String(), "upstream MCP request rejected") {
+			t.Fatal("implicit MCP continuation lost safeguards", got.Code, got.Body.String())
+		}
+		var leaked bool
+		if err := a.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM idempotency_records WHERE response_body LIKE '%client-mcp-secret%')`).Scan(&leaked); err != nil || leaked {
+			t.Fatal("MCP header persisted in idempotency results", err)
+		}
+		reject.Store(false)
+		// Exclude the extra account from the conversion-rejection checks below.
+		if _, err := a.DB.Exec("UPDATE accounts SET status='disabled' WHERE name='Second MCP provider'"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before = calls.Load()
 	must("PUT", cp+"/composite-routes/"+fmt.Sprint(id(route)), admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "grok", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
