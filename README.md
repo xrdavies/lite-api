@@ -189,6 +189,10 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
 
+三个前缀下的 `GET /responses/{id}` 也支持查询已成功结算、保存了归属的普通原生 HTTP/SSE/WS 响应；`GET /responses/{id}/input_items` 读取输入条目，接受 `after`、`limit=1..100`、`order=asc|desc`。两者支持官方 `include` 或 `include[]` 选项，两种参数形式不可混用，未知/重复标量参数拒绝。接口定义见 [查询响应](https://developers.openai.com/api/reference/resources/responses/methods/retrieve) 和 [输入条目列表](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list)。
+
+资源查询按创建时的 Key/分组归属固定原账号、地址、协议和凭证；不调用模型或重复扣费，零余额及原账号停调仍可读取，失效 Key、撤销分组权限、未知/过期归属拒绝。`store=false` 的普通响应和协议转换产生的本地响应不可查询原生资源。背景任务继续通过原持久恢复流程结算，输入条目及指定 include 的读取等待结算完成；普通资源读取不启用 SSE 恢复，后台流保持已有规则。分页响应上限 100 项/16 MiB；不会将列表返回的条目自动授予 `item_reference` 使用权。供应商已删除或过期的资源返回 404，来源变更返回 409。该读取链已加入本地 HTTP 与 Docker 数据库验证，真实供应商联调仍待完成。
+
 `previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、OpenAI 内置搜索/图片等托管工具仍待对应隔离和计费实现，当前明确拒绝；Grok 托管搜索按后文单独支持。
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。

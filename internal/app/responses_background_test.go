@@ -119,7 +119,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			next = ""
 			stream = string(request["stream"]) == "true"
 		} else {
-			native = strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/responses/"), "/cancel")
+			native = strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/responses/"), "/cancel"), "/input_items")
 			if _, ok := states[native]; !ok {
 				w.WriteHeader(404)
 				return
@@ -132,6 +132,10 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			} else {
 				reads++
 				resumeQuery = r.URL.RawQuery
+			}
+			if strings.HasSuffix(r.URL.Path, "/input_items") {
+				fmt.Fprint(w, `{"object":"list","data":[{"id":"msg_bg_input","type":"message","role":"user","content":[{"type":"input_text","text":"private background input"}]}],"first_id":"msg_bg_input","last_id":"msg_bg_input","has_more":false}`)
+				return
 			}
 		}
 		response := func(status string) map[string]any {
@@ -230,6 +234,12 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if w := call("POST", "/responses/"+first+"/cancel", other, nil, ""); w.Code != 404 {
 		t.Fatal("foreign background cancel", w.Code)
 	}
+	if w := call("GET", "/responses/"+first+"/input_items", other, nil, ""); w.Code != 404 {
+		t.Fatal("foreign background input items", w.Code)
+	}
+	if w := call("GET", "/responses/"+first+"/input_items", key, nil, ""); w.Code != 409 || strings.Contains(w.Body.String(), "private background input") {
+		t.Fatal("pending background input lookup", w.Code)
+	}
 	for _, query := range []string{"?stream=invalid", "?starting_after=0", "?stream=true&starting_after=-1", "?stream=true&stream=false", "?include=unknown", "?stream=%ZZ", "?stream=true;starting_after=0"} {
 		if w := call("GET", "/responses/"+first+query, key, nil, ""); w.Code != 400 {
 			t.Fatal("invalid background query accepted", query, w.Code)
@@ -288,6 +298,9 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if load(first).Stage != "settling" {
 		t.Fatal("missing settlement checkpoint")
 	}
+	if w := call("GET", "/responses/"+first+"/input_items", key, nil, ""); w.Code != 503 || strings.Contains(w.Body.String(), "private background input") {
+		t.Fatal("input lookup bypassed background settlement", w.Code)
+	}
 	exec("ALTER TABLE usage_logs DROP CONSTRAINT test_background_failure")
 	fresh := &App{DB: a.DB, Redis: a.Redis, secret: a.secret, instanceLock: a.instanceLock, privateUpstreams: a.privateUpstreams}
 	for i := 0; i < 2; i++ {
@@ -307,6 +320,15 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 		if w := call("GET", prefix+first, key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private generated text") {
 			t.Fatal("background result alias", w.Code)
 		}
+		if w := call("GET", prefix+first+"/input_items?limit=1&order=asc", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private background input") {
+			t.Fatal("background input items alias", w.Code, w.Body.String())
+		}
+		if w := call("GET", prefix+first+"?include=reasoning.encrypted_content", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private generated text") {
+			t.Fatal("background include query", w.Code, w.Body.String())
+		}
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", task.ID).Scan(&count); err != nil || count != 1 {
+		t.Fatal("background resource read charged twice", count, err)
 	}
 	bound, err := a.previousResponse(t.Context(), g, first)
 	if err != nil || bound.AccountID != aid || len(bound.Items) != 1 {

@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -344,31 +343,19 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 		fail(missing())
 		return
 	}
-	query, err := url.ParseQuery(r.URL.RawQuery)
+	query, err := responseResourceQuery(r)
 	if err != nil {
-		fail(bad("invalid background query parameter"))
+		fail(err)
 		return
 	}
 	stream := query.Get("stream") == "true"
-	for name, values := range query {
-		if len(values) != 1 || name != "stream" && name != "starting_after" || r.Method != "GET" {
-			fail(bad("invalid background query parameter"))
-			return
-		}
-		if name == "stream" && values[0] != "true" && values[0] != "false" {
-			fail(bad("invalid stream"))
-			return
-		}
-		if name == "starting_after" {
-			if n, e := strconv.ParseInt(values[0], 10, 64); e != nil || n < 0 || !stream {
-				fail(bad("invalid starting_after"))
-				return
-			}
-		}
-	}
 	taskID, err := a.Redis.Get(ctx, backgroundIndex(g, id)).Result()
 	if errors.Is(err, redis.Nil) {
-		fail(missing())
+		if r.Method != "GET" {
+			fail(missing())
+		} else if err = a.storedResponseLookup(w, r, g, id, query); err != nil {
+			fail(err)
+		}
 		return
 	}
 	if err != nil {
@@ -409,6 +396,20 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !stream && r.Method == "GET" || r.Method == "POST" && t.Stage == "terminal" {
+		if strings.HasSuffix(r.URL.Path, "/input_items") || query.Has("include") || query.Has("include[]") {
+			if t.Stage != "terminal" {
+				fail(conflict("background response is not settled yet"))
+				return
+			}
+			u, err := a.backgroundSource(ctx, t)
+			if err == nil {
+				err = a.readResponseResource(w, r, u, id, query)
+			}
+			if err != nil {
+				fail(err)
+			}
+			return
+		}
 		_ = rawReply(w, t.Result)
 		return
 	}
