@@ -224,6 +224,26 @@ func testNativeGateway(t *testing.T, a *App, admin string) {
 		if w.Code != 200 {
 			t.Fatal("count endpoint", protocol, w.Code, w.Body.String())
 		}
+		if protocol == "anthropic" {
+			before := calls.Load()
+			alias := call("/messages/count_tokens", key, header, body, "count")
+			if alias.Code != 200 || alias.Body.String() != w.Body.String() || alias.Header().Get("Idempotency-Replayed") != "true" || calls.Load() != before {
+				t.Fatal("count alias replay", alias.Code, alias.Body.String())
+			}
+			alias = call("/messages/count_tokens", key, header, body, "count-alias")
+			if alias.Code != 200 || alias.Body.String() != w.Body.String() || calls.Load() != before+1 {
+				t.Fatal("count alias dispatch", alias.Code, alias.Body.String())
+			}
+			for _, credential := range []string{"", user} {
+				if w := call("/messages/count_tokens", credential, header, body, ""); w.Code != 401 {
+					t.Fatal("count alias authentication", w.Code)
+				}
+			}
+			badModel := map[string]any{"model": "not-allowed", "messages": body["messages"]}
+			if w := call("/messages/count_tokens", key, header, badModel, ""); w.Code != 403 || calls.Load() != before+1 {
+				t.Fatal("count alias model access", w.Code)
+			}
+		}
 		if protocol == "gemini" {
 			nested := map[string]any{"generateContentRequest": map[string]any{"model": "models/client-model", "contents": body["contents"]}}
 			w = call(countPath+"?key="+key, "", "X-Goog-Api-Key", nested, "")

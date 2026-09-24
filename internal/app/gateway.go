@@ -513,6 +513,7 @@ func (a *App) gatewayRoutes() {
 		a.mux.HandleFunc("GET "+path, a.grokRealtime)
 	}
 	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
+	a.mux.HandleFunc("GET /v1/usage", a.gatewayUsage)
 	for _, protocol := range []string{"web_search", "x_search", "tts", "stt"} {
 		for _, prefix := range []string{"/v1/", "/"} {
 			a.mux.HandleFunc("POST "+prefix+protocol, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, protocol) })
@@ -525,7 +526,9 @@ func (a *App) gatewayRoutes() {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "chat_completions") })
 	}
 	a.mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
-	a.mux.HandleFunc("POST /v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
+	for _, path := range []string{"/v1/messages/count_tokens", "/messages/count_tokens"} {
+		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "anthropic") })
+	}
 	a.mux.HandleFunc("POST /v1beta/models/{action}", func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "gemini") })
 	for _, path := range []string{"/v1/embeddings", "/embeddings"} {
 		a.mux.HandleFunc("POST "+path, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "embeddings") })

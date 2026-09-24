@@ -375,9 +375,11 @@ func (a *App) routes() {
 	a.imageTaskRoutes()
 	a.batchImageRoutes()
 	a.videoRoutes()
-	a.route("GET /api/v1/version", "public", func(w http.ResponseWriter, r *http.Request) error {
+	version := func(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, map[string]string{"version": "dev"})
-	})
+	}
+	a.route("GET /api/v1/version", "public", version)
+	a.route("GET /api/v1/admin/system/version", "admin", version)
 	a.authRoutes()
 	a.userRoutes()
 	a.keyRoutes()

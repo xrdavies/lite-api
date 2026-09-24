@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -247,20 +248,9 @@ func (a *App) keyDailyUsage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	days := 30
-	if raw := r.URL.Query().Get("days"); raw != "" {
-		days, err = strconv.Atoi(raw)
-		if err != nil || days < 1 || days > 90 {
-			return bad("days must be between 1 and 90")
-		}
-	}
-	zone := r.URL.Query().Get("timezone")
-	if zone == "" {
-		zone = "Asia/Shanghai"
-	}
-	loc, err := time.LoadLocation(zone)
-	if err != nil || zone == "Local" {
-		return bad("invalid timezone")
+	days, start, end, err := dailyUsageRange(r, time.Now())
+	if err != nil {
+		return err
 	}
 	var owner int64
 	if err = a.DB.QueryRowContext(r.Context(), "SELECT user_id FROM api_keys WHERE id=$1 AND deleted_at IS NULL", id).Scan(&owner); err != nil {
@@ -269,10 +259,7 @@ func (a *App) keyDailyUsage(w http.ResponseWriter, r *http.Request) error {
 	if owner != current(r).ID {
 		return denied()
 	}
-	now := time.Now().In(loc)
-	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-	start, end := day.AddDate(0, 0, 1-days), day.AddDate(0, 0, 1)
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(d) FROM (SELECT to_char(created_at AT TIME ZONE $5,'YYYY-MM-DD') AS date,count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(cache_read_tokens) AS cache_read_tokens,sum(cache_creation_tokens) AS cache_write_tokens,sum(input_tokens::bigint+output_tokens+cache_read_tokens+cache_creation_tokens) AS total_tokens,sum(total_cost) AS cost,sum(actual_cost) AS actual_cost FROM usage_logs WHERE user_id=$1 AND api_key_id=$2 AND created_at >= $3 AND created_at < $4 GROUP BY date ORDER BY date)d`, owner, id, start, end, zone)
+	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(d) FROM (SELECT to_char(created_at AT TIME ZONE $5,'YYYY-MM-DD') AS date,count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(cache_read_tokens) AS cache_read_tokens,sum(cache_creation_tokens) AS cache_write_tokens,sum(input_tokens::bigint+output_tokens+cache_read_tokens+cache_creation_tokens) AS total_tokens,sum(total_cost) AS cost,sum(actual_cost) AS actual_cost FROM usage_logs WHERE user_id=$1 AND api_key_id=$2 AND created_at >= $3 AND created_at < $4 GROUP BY date ORDER BY date)d`, owner, id, start, end, start.Location().String())
 	if err != nil {
 		return err
 	}
@@ -280,7 +267,29 @@ func (a *App) keyDailyUsage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return reply(w, map[string]any{"items": items, "days": days, "start_date": start.Format("2006-01-02"), "end_date": day.Format("2006-01-02")})
+	return reply(w, map[string]any{"items": items, "days": days, "start_date": start.Format("2006-01-02"), "end_date": end.AddDate(0, 0, -1).Format("2006-01-02")})
+}
+
+func dailyUsageRange(r *http.Request, now time.Time) (int, time.Time, time.Time, error) {
+	days := 30
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		var err error
+		days, err = strconv.Atoi(raw)
+		if err != nil || days < 1 || days > 90 {
+			return 0, time.Time{}, time.Time{}, bad("days must be between 1 and 90")
+		}
+	}
+	zone := r.URL.Query().Get("timezone")
+	if zone == "" {
+		zone = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil || zone == "Local" {
+		return 0, time.Time{}, time.Time{}, bad("invalid timezone")
+	}
+	now = now.In(loc)
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return days, day.AddDate(0, 0, 1-days), day.AddDate(0, 0, 1), nil
 }
 
 func (a *App) usageSearch(w http.ResponseWriter, r *http.Request) error {
@@ -330,4 +339,107 @@ func (a *App) gatewayBilling(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(raw)
+}
+
+func (a *App) gatewayUsage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	err := func() error {
+		if err := a.checkInstance(r.Context()); err != nil {
+			return err
+		}
+		g, err := a.gatewayAuth(r, false)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		_, dailyStart, dailyEnd, err := dailyUsageRange(r, now)
+		if err != nil {
+			return err
+		}
+		today, _ := quotaStarts(now)
+		start, end := now.AddDate(0, 0, -30), now
+		for i, name := range []string{"start_date", "end_date"} {
+			if value := r.URL.Query().Get(name); value != "" {
+				date, err := time.ParseInLocation("2006-01-02", value, today.Location())
+				if err != nil {
+					return bad("invalid " + name)
+				}
+				if i == 0 {
+					start = date
+				} else {
+					end = date.AddDate(0, 0, 1)
+				}
+			}
+		}
+		if !start.Before(end) {
+			return bad("start_date must precede the end of end_date")
+		}
+		if err = a.gatewayRPM(r.Context(), g); err != nil {
+			return err
+		}
+		if !a.takeSlot("user", g.UserID, g.Concurrency) {
+			return &apiError{429, "user concurrency limit reached"}
+		}
+		defer a.releaseSlot("user", g.UserID)
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		// One statement gives balance, windows and raw usage the same snapshot.
+		// Monetary sums remain PostgreSQL NUMERIC all the way to the JSON response.
+		raw, err := jsonRow(a.DB.QueryRowContext(ctx, `WITH key_state AS (
+ SELECT k.*,u.balance,(k.quota>0 OR k.rate_limit_5h>0 OR k.rate_limit_1d>0 OR k.rate_limit_7d>0) AS limited
+ FROM api_keys k JOIN users u ON u.id=k.user_id WHERE k.id=$2 AND u.id=$1
+), windows AS (
+ SELECT w.*,CASE WHEN window_start+duration>$3 THEN consumed ELSE 0 END AS used
+ FROM key_state k CROSS JOIN LATERAL (VALUES
+ (1,'5h',k.rate_limit_5h,k.usage_5h,k.window_5h_start,interval '5 hours'),
+ (2,'1d',k.rate_limit_1d,k.usage_1d,k.window_1d_start,interval '24 hours'),
+ (3,'7d',k.rate_limit_7d,k.usage_7d,k.window_7d_start,interval '168 hours')
+ )w(position,name,lim,consumed,window_start,duration) WHERE lim>0
+), scoped AS NOT MATERIALIZED (
+ SELECT *,input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens AS tokens
+ FROM usage_logs WHERE user_id=$1 AND api_key_id=$2
+), summaries AS (
+ SELECT p.name,jsonb_build_object('requests',count(s.id),'input_tokens',COALESCE(sum(input_tokens),0),
+ 'output_tokens',COALESCE(sum(output_tokens),0),'cache_creation_tokens',COALESCE(sum(cache_creation_tokens),0),
+ 'cache_read_tokens',COALESCE(sum(cache_read_tokens),0),'total_tokens',COALESCE(sum(tokens),0),
+ 'cost',COALESCE(sum(total_cost),0),'actual_cost',COALESCE(sum(actual_cost),0)) AS value
+ FROM (VALUES ('total','-infinity'::timestamptz),('today',$4::timestamptz))p(name,start)
+ LEFT JOIN scoped s ON s.created_at>=p.start AND s.created_at<$3 GROUP BY p.name
+), daily AS (
+ SELECT to_char(created_at AT TIME ZONE $9,'YYYY-MM-DD') AS date,count(*) AS requests,
+ sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,sum(cache_read_tokens) AS cache_read_tokens,
+ sum(cache_creation_tokens) AS cache_write_tokens,sum(tokens) AS total_tokens,sum(total_cost) AS cost,sum(actual_cost) AS actual_cost
+ FROM scoped WHERE created_at >= $7 AND created_at < $8 GROUP BY date
+), models AS (
+ SELECT model,count(*) AS requests,sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,
+ sum(cache_creation_tokens) AS cache_creation_tokens,sum(cache_read_tokens) AS cache_read_tokens,
+ sum(tokens) AS total_tokens,sum(total_cost) AS cost,sum(actual_cost) AS actual_cost
+ FROM scoped WHERE created_at >= $5 AND created_at < $6 GROUP BY model
+)
+SELECT CASE WHEN k.limited THEN
+ jsonb_build_object('mode','quota_limited','isValid',true,'status',k.status)
+ || CASE WHEN k.quota>0 THEN jsonb_build_object('quota',jsonb_build_object('limit',k.quota,'used',k.quota_used,
+ 'remaining',GREATEST(0,k.quota-k.quota_used),'unit','USD'),'remaining',GREATEST(0,k.quota-k.quota_used),'unit','USD') ELSE '{}'::jsonb END
+ || CASE WHEN EXISTS(SELECT 1 FROM windows) THEN jsonb_build_object('rate_limits',(
+ SELECT jsonb_agg(jsonb_build_object('window',name,'limit',lim,'used',used,'remaining',GREATEST(0,lim-used),'window_start',window_start)
+ || CASE WHEN window_start+duration>$3 THEN jsonb_build_object('reset_at',window_start+duration) ELSE '{}'::jsonb END ORDER BY position) FROM windows)) ELSE '{}'::jsonb END
+ || CASE WHEN k.expires_at IS NOT NULL THEN jsonb_build_object('expires_at',k.expires_at,
+ 'days_until_expiry',GREATEST(0,floor(extract(epoch FROM(k.expires_at-$3))/86400))) ELSE '{}'::jsonb END
+ ELSE jsonb_build_object('mode','unrestricted','isValid',true,'planName','钱包余额','remaining',k.balance,'unit','USD','balance',k.balance) END
+ || jsonb_build_object('usage',(SELECT jsonb_object_agg(name,value) FROM summaries) || jsonb_build_object(
+ 'average_duration_ms',(SELECT COALESCE(avg(duration_ms),0) FROM scoped WHERE created_at<$3),
+ 'rpm',(SELECT count(*)/5 FROM scoped WHERE created_at >= $3::timestamptz-interval '5 minutes' AND created_at<$3),
+ 'tpm',(SELECT COALESCE(sum(tokens),0)::bigint/5 FROM scoped WHERE created_at >= $3::timestamptz-interval '5 minutes' AND created_at<$3)),
+ 'daily_usage',(SELECT COALESCE(jsonb_agg(to_jsonb(daily) ORDER BY date),'[]'::jsonb) FROM daily),
+ 'model_stats',(SELECT COALESCE(jsonb_agg(to_jsonb(models) ORDER BY total_tokens DESC,model),'[]'::jsonb) FROM models))
+ FROM key_state k`, g.UserID, g.Key.ID, now, today, start, end, dailyStart, dailyEnd, dailyStart.Location().String()))
+		if err != nil {
+			return err
+		}
+		return rawReply(w, raw)
+	}()
+	if err != nil {
+		gatewayError(w, err)
+	}
 }
