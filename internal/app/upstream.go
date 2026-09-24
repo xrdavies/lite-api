@@ -142,7 +142,13 @@ func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount,
 	}
 	key := credentialString(account.Credentials, "api_key")
 	if key != "" {
-		switch account.protocol() {
+		protocol := account.protocol()
+		// Embeddings use Bearer auth independently of the account's text protocol.
+		// Keep its configured origin and proxy; never send a relay key elsewhere.
+		if account.Platform == "openai" && path == "/v1/embeddings" {
+			protocol = "chat_completions"
+		}
+		switch protocol {
 		case "anthropic":
 			req.Header.Set("x-api-key", key)
 			if req.Header.Get("Anthropic-Version") == "" {

@@ -261,7 +261,7 @@ func compositeModelTargets(c *compositeConfig, gid int64, model, platform, proto
 			endpoints = append(endpoints, "chat_completions", "responses")
 		}
 	}
-	if platform == "openai" && (protocol == "responses" || protocol == "chat_completions") {
+	if platform == "openai" {
 		endpoints = append(endpoints, "embeddings")
 	}
 	if native {

@@ -55,8 +55,12 @@ func testEmbeddings(t *testing.T, a *App, admin string) {
 	}
 	var count atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/v1/models" {
+			fmt.Fprint(w, `{"data":[{"id":"upstream-embedding"}]}`)
+			return
+		}
 		count.Add(1)
-		if r.URL.Path != "/v1/embeddings" || r.Header.Get("Authorization") != "Bearer embedding-upstream" {
+		if r.URL.Path != "/v1/embeddings" || r.Header.Get("Authorization") != "Bearer embedding-upstream" || r.Header.Get("X-Api-Key") != "" || r.Header.Get("Anthropic-Version") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("embedding path or upstream credential")
 		}
 		var body struct {
@@ -111,5 +115,48 @@ func testEmbeddings(t *testing.T, a *App, admin string) {
 	body["input"] = "hello"
 	if w := call("/embeddings", otherKey, body, ""); w.Code != 404 || count.Load() != 1 {
 		t.Fatal("embedding platform restriction bypass", w.Code)
+	}
+	// Text protocol does not change the embedding endpoint or its Bearer auth.
+	// Exercise both ordinary and endpoint-specific composite routing.
+	body["input"] = []string{"one", "two"}
+	for _, platform := range []string{"openai", "composite"} {
+		group := manage("/api/v1/admin/groups", admin, map[string]any{"name": "Embedding Messages " + platform, "platform": platform,
+			"model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"client-embedding"}, "input_price": "0.0000001"}}})
+		groupID := int64(group["id"].(float64))
+		if platform == "composite" {
+			w := call(fmt.Sprintf("/api/v1/admin/groups/%d/composite-routes", groupID), admin, map[string]any{
+				"public_model": "client-embedding", "target_platform": "openai", "upstream_model": "client-embedding", "endpoint": "embeddings"}, "")
+			if w.Code != 201 {
+				t.Fatal("embedding composite route", w.Code, w.Body.String())
+			}
+		}
+		account := manage("/api/v1/admin/accounts", admin, map[string]any{"name": "Embedding Messages " + platform, "platform": "openai", "type": "apikey", "group_ids": []int64{groupID},
+			"credentials": map[string]any{"api_key": "embedding-upstream", "base_url": upstream.URL + "/v1", "api_protocol": "anthropic", "openai_capabilities": []string{"embeddings"}, "model_mapping": map[string]string{"client-embedding": "upstream-embedding"}}})
+		accountID := int64(account["id"].(float64))
+		key := manage("/api/v1/keys", token, map[string]any{"name": "Embedding Messages", "group_id": groupID})["key"].(string)
+		before := count.Load()
+		first := call("/v1/embeddings", key, body, "messages-embedding")
+		second := call("/embeddings", key, body, "messages-embedding")
+		if first.Code != 200 || second.Code != 200 || first.Body.String() != second.Body.String() || second.Header().Get("Idempotency-Replayed") != "true" || count.Load() != before+1 {
+			t.Fatal("Messages account embedding", platform, first.Code, first.Body.String(), second.Code)
+		}
+		var gotAccount, gotGroup int64
+		if err := a.DB.QueryRow("SELECT account_id,group_id,actual_cost::text,upstream_endpoint FROM usage_logs WHERE request_id=$1", first.Header().Get("X-Request-ID")).Scan(&gotAccount, &gotGroup, &cost, &endpoint); err != nil || gotAccount != accountID || gotGroup != groupID || cost != "0.0000012000" || endpoint != "/v1/embeddings" {
+			t.Fatal("Messages embedding receipt", gotAccount, gotGroup, cost, endpoint, err)
+		}
+		r := httptest.NewRequest("GET", "/v1/models", nil)
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"id":"client-embedding"`) {
+			t.Fatal("callable embedding absent from catalog", platform, w.Code, w.Body.String())
+		}
+		// Capability restrictions still govern an otherwise compatible account.
+		if _, err := a.DB.Exec(`UPDATE accounts SET credentials=jsonb_set(credentials,'{openai_capabilities}','["chat_completions"]'),updated_at=clock_timestamp() WHERE id=$1`, accountID); err != nil {
+			t.Fatal(err)
+		}
+		if w := call("/embeddings", key, body, ""); w.Code != 503 || count.Load() != before+1 {
+			t.Fatal("embedding capability bypass", platform, w.Code, w.Body.String())
+		}
 	}
 }

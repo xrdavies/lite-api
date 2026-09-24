@@ -243,7 +243,7 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 `GET /backend-api/codex/models` 或列表请求带 `client_version` 时返回客户端模型 manifest。管理员可在 OpenAI 分组配置 `codex_models_manifest_config`，指定 1–10 个组内账号及 `fallback_to_scheduler`；按配置顺序合并指定目录，缺失能力不虚构上下文大小。`POST /api/v1/admin/accounts/{id}/models/sync-upstream` 同步完整能力到账号元数据，不改模型映射或消费计数；部分元数据返回警告，轮换凭证或地址会清除旧能力快照。复合分组目录根据路由和各账号协议合并可见公共模型，不暴露映射目标，跨平台别名冲突不猜测归属；Gemini 原生列表只展示其可用分支。精确路由可直接枚举，前缀路由需要具体上游模型或白名单条目；查询期间路由变更返回 409，避免返回混合配置结果。
 
-`POST /v1/embeddings` 和 `/embeddings` 支持 OpenAI 分组的向量请求，接受单条/批量文本及 token 序列，保留 `dimensions` 和 `encoding_format=float|base64`。仅选择 Chat/Responses 协议的 API Key 账号；上游模型映射、权限、限额和扣费与文本共用。嵌入请求不支持流式，输入 token 按价卡计费，纯文本嵌入无需配置输出价；缺少有效 usage 不能记成零消费成功。输入形式依据 [OpenAI Embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)。
+`POST /v1/embeddings` 和 `/embeddings` 支持 OpenAI 分组及路由到 OpenAI 的 composite 分组，接受单条/批量文本及 token 序列，保留 `dimensions` 和 `encoding_format=float|base64`。OpenAI 类型 API Key 账号可使用 Chat、Responses 或 Anthropic 文本协议；Embedding 始终调用配置根地址下的 `/v1/embeddings` 并使用 Bearer 认证，保留账号代理，不切换到其他供应商地址。显式 `openai_capabilities` 必须允许 `embeddings`；上游仍须实际提供该端点。上游模型映射、权限、限额和扣费与文本共用。嵌入请求不支持流式，输入 token 按价卡计费，纯文本嵌入无需配置输出价；缺少有效 usage 不能记成零消费成功。输入形式依据 [OpenAI Embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)。
 
 网关支持 Bearer、`X-Api-Key` 和 `X-Goog-Api-Key`；Gemini 原生入口还支持兼容的 `key` 查询参数，该参数不会转发到上游。客户端原始鉴权、Cookie 和任意自定义 header 不透传。各 token 计数入口仍检查权限、余额与限额，返回计数而不写消费日志或扣余额。
 

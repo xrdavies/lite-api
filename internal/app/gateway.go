@@ -407,7 +407,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			matches = protocol == "responses" && u.protocol() == "responses"
 		}
 		if protocol == "embeddings" {
-			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
+			matches = u.Platform == "openai"
 		}
 		if protocol == "seedance" {
 			matches = u.supportsSeedance()
