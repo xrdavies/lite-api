@@ -8,6 +8,7 @@ import (
 
 const responseStoresKey = "response_vector_stores"
 const responseFilesKey = "response_files"
+const responseSkillsKey = "response_skills"
 
 // Administrators grant existing provider resources to gateway groups. The grant
 // is tied to the credential source, so rotation cannot authorize another resource
@@ -34,7 +35,7 @@ func parseResponseResourceGrants(raw json.RawMessage) (map[string][]string, erro
 }
 
 func (in *accountInput) bindResponseResourceGrants(u *upstreamAccount) error {
-	for _, key := range []string{responseStoresKey, responseFilesKey} {
+	for _, key := range []string{responseStoresKey, responseFilesKey, responseSkillsKey} {
 		if in.Extra[key] == nil {
 			continue
 		}

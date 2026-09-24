@@ -229,9 +229,11 @@ Code Interpreter 支持 OpenAI 原生 Responses 的 `{"type":"code_interpreter",
 
 显式 `container` ID 必须来自当前 Key/分组拥有的 `previous_response_id` 或输出条目引用；完整代码调用历史同样校验条目及容器归属，并固定原账号、协议、地址和凭证。后续纯文本响应继续保存已有容器关联，后台任务恢复保留该关联；WebSocket 的 `store=false` 关联仅在原连接内可用。容器每个响应上下文最多 1024 个，实际存活时间由上游决定；本地归属记录不延长上游容器寿命。未知或他人容器拒绝，凭证轮换不改投其他账号，HTTP 拒绝后不自动重试代码执行。
 
-内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理和 programmatic 调用仍待对应实现，当前明确拒绝；网络白名单与域名密钥见下文。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
+内部账务沿用模型 token 或显式按次价格，不套用网页搜索费，也不将供应商容器费用伪装为 token；供应商可能单独收取容器费用，当前不提供该费用的独立内部价卡。上传文件 ID 使用下面的分组授权；内联文件或 URL 继续按原生输入提交。容器文件下载/管理和 programmatic 调用仍待对应实现，当前明确拒绝；网络白名单、域名密钥和托管 skills 见下文。未重新声明工具的续接同样校验文件和子路径准入。已覆盖本地协议与数据库恢复验证，真实 Code Interpreter 供应商联调仍待完成。
 
-托管 Shell 使用 OpenAI 原生 Responses 的 `{"type":"shell","environment":{"type":"container_auto"}}`，执行发生在上游容器。支持 `memory_limit=1g|4g|16g|64g`、已授权的 `file_ids`，以及省略网络策略、显式 `network_policy={"type":"disabled"}` 或下述 allowlist 策略；托管 skills 和 programmatic 分支仍待补齐。已有容器使用 `environment={"type":"container_reference","container_id":"cntr_..."}`，必须来自当前 Key/分组拥有的响应或条目关联；来源轮换、未知容器和跨 Key 历史均拒绝。字段依据 [OpenAI Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
+托管 Shell 使用 OpenAI 原生 Responses 的 `{"type":"shell","environment":{"type":"container_auto"}}`，执行发生在上游容器。支持 `memory_limit=1g|4g|16g|64g`、已授权的 `file_ids`、引用/内联 skills，以及省略网络策略、显式 `network_policy={"type":"disabled"}` 或下述 allowlist 策略；programmatic 分支仍待补齐。已有容器使用 `environment={"type":"container_reference","container_id":"cntr_..."}`，必须来自当前 Key/分组拥有的响应或条目关联；来源轮换、未知容器和跨 Key 历史均拒绝。字段依据 [OpenAI Shell](https://developers.openai.com/api/docs/guides/tools-shell)。
+
+管理员可通过账号 `extra.response_skills` 按分组授权已有的上游 skill ID，例如 `{"extra":{"response_skills":{"12":["skill_team"]}}}`。授权绑定上游地址、Responses 协议和 API Key；撤销或来源轮换会阻止新的 Shell 请求及续接。请求中的 `skill_reference` 只允许已授权 ID，`version` 为 `latest` 或正整数；`inline` skill 只校验并透传 base64 ZIP（单个最多 8 MiB），不解包、不落库。Code Interpreter 不接受 skills；网关不提供 skill 上传、版本或删除管理接口。
 
 `container_auto`、`container_reference` 和原 `local` 三种环境显式区分；网关不执行命令、不创建本地容器。托管 `shell_call` 的环境、命令及配对 `shell_call_output` 原样转发；JSON/SSE、WS、后台响应及 composite 复用原生链路，HTTP 拒绝后不换号重试。容器和已用文件的归属随纯文本续接、后台恢复继续保留；`store=false` 的 WS 关联仅在原连接有效。内部账务采用模型用量和原价快照，不新增容器费用价卡；供应商容器寿命及单独费用仍由上游决定。容器管理/文件下载和真实托管 Shell 上游联调尚待继续。
 

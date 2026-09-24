@@ -279,6 +279,10 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	if err != nil {
 		return in, err
 	}
+	in.SkillIDs, err = requestSkillIDs(tools)
+	if err != nil {
+		return in, err
+	}
 	if in.Background && in.NativeCompaction {
 		return in, bad("native compaction cannot run in the background")
 	}
@@ -454,6 +458,7 @@ type responseBinding struct {
 	CodeTool     bool     `json:",omitempty"`
 	Containers   []string `json:",omitempty"`
 	FileIDs      []string `json:",omitempty"`
+	SkillIDs     []string `json:",omitempty"`
 	VectorStores []string `json:",omitempty"`
 	History      string   `json:",omitempty"`
 	Items        []string `json:",omitempty"`
@@ -498,7 +503,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores, FileIDs: binding.FileIDs})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers, VectorStores: binding.VectorStores, FileIDs: binding.FileIDs, SkillIDs: binding.SkillIDs})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -592,7 +597,12 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 		containers := source.Containers
 		stores := source.VectorStores
 		files := source.FileIDs
+		skills := source.SkillIDs
 		if binding != nil {
+			skills, err = mergeResponseResources(binding.SkillIDs, skills)
+			if err != nil {
+				return nil, err
+			}
 			files, err = mergeResponseResources(binding.FileIDs, files)
 			if err != nil {
 				return nil, err
@@ -606,7 +616,7 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 				return nil, err
 			}
 		}
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files}
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files, SkillIDs: skills}
 	}
 	return binding, nil
 }

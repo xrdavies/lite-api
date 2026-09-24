@@ -1,8 +1,11 @@
 package app
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -52,11 +55,97 @@ func validateResponseAutoContainer(container map[string]json.RawMessage) error {
 			if err := validateContainerNetwork(raw); err != nil {
 				return err
 			}
+		case "skills":
+			if credentialString(container, "type") != "container_auto" {
+				return bad("skills require a hosted shell environment")
+			}
+			if _, err := responseSkills(raw); err != nil {
+				return err
+			}
 		default:
 			return bad("unsupported container option")
 		}
 	}
 	return nil
+}
+
+// Inline bundles stay opaque: only the upstream mounts or executes them.
+// Referenced skills use the same source-bound group grants as files and stores.
+func responseSkills(raw json.RawMessage) ([]string, error) {
+	var skills []map[string]json.RawMessage
+	if json.Unmarshal(raw, &skills) != nil || skills == nil || len(skills) > 100 {
+		return nil, bad("skills must contain at most 100 entries")
+	}
+	var ids []string
+	for _, skill := range skills {
+		switch credentialString(skill, "type") {
+		case "skill_reference":
+			id := credentialString(skill, "skill_id")
+			if !validResponseID(id) || len(id) > 64 {
+				return nil, bad("invalid hosted skill ID")
+			}
+			for key := range skill {
+				if key != "type" && key != "skill_id" && key != "version" {
+					return nil, bad("unsupported hosted skill reference option")
+				}
+			}
+			if skill["version"] != nil {
+				version := credentialString(skill, "version")
+				if version != "latest" {
+					n, err := strconv.ParseUint(version, 10, 64)
+					if err != nil || n == 0 || strconv.FormatUint(n, 10) != version {
+						return nil, bad("skill version must be latest or a positive integer string")
+					}
+				}
+			}
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		case "inline":
+			name, description := credentialString(skill, "name"), credentialString(skill, "description")
+			if len(skill) != 4 || strings.TrimSpace(name) == "" || len(name) > 256 || strings.TrimSpace(description) == "" || len(description) > 10000 {
+				return nil, bad("inline skills require name, description and source")
+			}
+			var source map[string]json.RawMessage
+			if json.Unmarshal(skill["source"], &source) != nil || len(source) != 3 || credentialString(source, "type") != "base64" || credentialString(source, "media_type") != "application/zip" {
+				return nil, bad("inline skill source must be a base64 ZIP bundle")
+			}
+			data := credentialString(source, "data")
+			if data == "" || len(data) > base64.StdEncoding.EncodedLen(8<<20) {
+				return nil, bad("inline skill exceeds 8 MiB")
+			}
+			size, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding, strings.NewReader(data)))
+			if err != nil || size == 0 || size > 8<<20 {
+				return nil, bad("invalid inline skill encoding")
+			}
+		default:
+			return nil, bad("unsupported hosted skill type")
+		}
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+func requestSkillIDs(tools []map[string]json.RawMessage) ([]string, error) {
+	var ids []string
+	for _, tool := range tools {
+		if credentialString(tool, "type") != "shell" {
+			continue
+		}
+		var env map[string]json.RawMessage
+		if json.Unmarshal(tool["environment"], &env) != nil || credentialString(env, "type") != "container_auto" || env["skills"] == nil {
+			continue
+		}
+		current, err := responseSkills(env["skills"])
+		if err != nil {
+			return nil, err
+		}
+		ids, err = mergeResponseResources(ids, current)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
 }
 
 func validateContainerNetwork(raw json.RawMessage) error {

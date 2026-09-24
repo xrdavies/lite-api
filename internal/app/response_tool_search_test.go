@@ -436,6 +436,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	}
 	if kind == "shell" {
 		declaration, output, history, marker, toolMarker = nativeHostedShellTools, nativeHostedShellCalls, nativeHostedShellCalls, `"type":"shell_call"`, `"type":"container_auto"`
+		declaration = strings.Replace(declaration, `"memory_limit":"4g"`, `"skills":`+nativeHostedSkills+`,"memory_limit":"4g"`, 1)
 		ip = "192.0.2.188:1234"
 	}
 
@@ -602,6 +603,20 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Hosted search provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	body := map[string]any{"model": "tool-model", "input": "find tools", "tools": json.RawMessage(declaration)}
+	if kind == "shell" {
+		if got := call("POST", "/responses", key, body, ""); got.Code != 503 || calls.Load() != 0 {
+			t.Fatal("ungranted skill dispatched", got.Code)
+		}
+		grants := map[string]any{responseSkillsKey: map[string][]string{fmt.Sprint(gid): {"skill_team"}}}
+		if got := call("PUT", ap, user, map[string]any{"extra": grants}, ""); got.Code != 403 {
+			t.Fatal("user changed skill grants", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"extra": grants})
+		unknown := map[string]any{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(strings.ReplaceAll(declaration, "skill_team", "skill_foreign"))}
+		if got := call("POST", "/responses", key, unknown, ""); got.Code != 503 || calls.Load() != 0 {
+			t.Fatal("unknown skill dispatched", got.Code)
+		}
+	}
 	if kind == "files" || kind == "uploads" {
 		body["include"] = []string{"file_search_call.results"}
 		if kind == "uploads" {
@@ -642,6 +657,12 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	}
 	if containerTool && !bytes.Contains(received.Load().(map[string]json.RawMessage)["tools"], []byte("client-domain-secret")) {
 		t.Fatal("container domain secret not forwarded to provider")
+	}
+	if kind == "shell" {
+		wire := string(received.Load().(map[string]json.RawMessage)["tools"])
+		if !strings.Contains(wire, inlineSkillBundle) || !strings.Contains(wire, `"version":"2"`) {
+			t.Fatal("inline bundle or skill version changed")
+		}
 	}
 	var initial struct{ Output json.RawMessage }
 	if json.Unmarshal(w.Body.Bytes(), &initial) != nil || string(initial.Output) != output {
@@ -815,6 +836,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		// Removing future access must not lose consumption already accepted upstream.
 		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseFilesKey: map[string][]string{}}})
 	}
+	if kind == "shell" {
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseSkillsKey: map[string][]string{}}})
+	}
 	must("PUT", gp, admin, map[string]any{"rate_multiplier": 9})
 	if _, err = a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_hosted_tool_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID"); err != nil {
 		t.Fatal(err)
@@ -840,6 +864,18 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
 		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
 			t.Fatal("code ownership lost across background recovery", binding, err)
+		}
+		if kind == "shell" {
+			if len(task.SkillIDs) != 1 || len(binding.SkillIDs) != 1 || binding.SkillIDs[0] != "skill_team" {
+				t.Fatal("skill authorization lost across background recovery", binding)
+			}
+			for _, previous := range []string{first.ID, accepted.ID} {
+				got := call("POST", "/responses", key, map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": previous}, "")
+				if got.Code != 503 || calls.Load() != before {
+					t.Fatal("revoked skill admitted through implicit continuation", got.Code)
+				}
+			}
+			must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseSkillsKey: map[string][]string{fmt.Sprint(gid): {"skill_team"}}}})
 		}
 	}
 	if kind == "files" || kind == "uploads" {
@@ -886,6 +922,13 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	route := must("POST", cp+"/composite-routes", admin, map[string]any{"public_model": "tool-model", "match_type": "exact", "target_platform": "openai", "upstream_model": "tool-model", "endpoint": "responses", "enabled": true})
 	must("PUT", ap, admin, map[string]any{"group_ids": []int64{gid, cgid}})
 	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
+	if kind == "shell" {
+		before := calls.Load()
+		if got := call("POST", "/responses", ckey, body, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("skill escaped its group", got.Code)
+		}
+		must("PUT", ap, admin, map[string]any{"extra": map[string]any{responseSkillsKey: map[string][]string{fmt.Sprint(gid): {"skill_team"}, fmt.Sprint(cgid): {"skill_team"}}}})
+	}
 	if kind == "files" || kind == "uploads" {
 		before := calls.Load()
 		if got := call("POST", "/responses", ckey, body, ""); got.Code != 503 || calls.Load() != before {
@@ -910,6 +953,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
 			t.Fatal("code context lost across plain HTTP reply", binding, err)
 		}
+		if kind == "shell" && (len(binding.SkillIDs) != 1 || binding.SkillIDs[0] != "skill_team") {
+			t.Fatal("skill grant lost across plain reply")
+		}
 		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
 		before := calls.Load()
 		if got := call("POST", "/responses", key, request, ""); got.Code != 503 || calls.Load() != before {
@@ -917,6 +963,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		}
 		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "hosted-search-provider"}})
 		second := must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second code provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}})
+		if kind == "shell" {
+			must("PUT", "/api/v1/admin/accounts/"+fmt.Sprint(id(second)), admin, map[string]any{"extra": map[string]any{responseSkillsKey: map[string][]string{fmt.Sprint(gid): {"skill_team"}}}})
+		}
 		reject.Store(true)
 		got = call("POST", "/responses", key, body, "code-ambiguous")
 		if got.Code != 502 || calls.Load() != before+1 {

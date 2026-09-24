@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +12,63 @@ const nativeCodeTools = `[{"type":"code_interpreter","container":{"type":"auto",
 const nativeCodeCalls = `[{"type":"code_interpreter_call","id":"ci_team","container_id":"cntr_team","status":"completed","code":"print(2+2)","outputs":[{"type":"logs","logs":"4"}]}]`
 const nativeHostedShellTools = `[{"type":"shell","environment":{"type":"container_auto","memory_limit":"4g","network_policy":{"type":"allowlist","allowed_domains":["example.test"],"domain_secrets":[{"domain":"example.test","name":"API_KEY","value":"client-domain-secret"}]}}}]`
 const nativeHostedShellCalls = `[{"type":"shell_call","id":"sc_team","call_id":"call_shell","environment":{"type":"container_reference","container_id":"cntr_team"},"action":{"commands":["printf 4"],"timeout_ms":1000,"max_output_length":2000},"status":"completed"},{"type":"shell_call_output","id":"sco_team","call_id":"call_shell","output":[{"stdout":"4","stderr":"","outcome":{"type":"exit","exit_code":0}}],"status":"completed"}]`
+const inlineSkillBundle = "UEsDBBQAAAAAAAAAIVy2UAotTQAAAE0AAAAIAAAAU0tJTEwubWQtLS0KbmFtZTogdGVhbQpkZXNjcmlwdGlvbjogVGVhbSBjYWxjdWxhdGlvbi4KLS0tCkNvbXB1dGUgdGhlIHJlcXVlc3RlZCBzdW0uClBLAQIUAxQAAAAAAAAAIVy2UAotTQAAAE0AAAAIAAAAAAAAAAAAAACAAQAAAABTS0lMTC5tZFBLBQYAAAAAAQABADYAAABzAAAAAAA="
+const nativeHostedSkills = `[{"type":"skill_reference","skill_id":"skill_team","version":"2"},{"type":"inline","name":"team","description":"Team calculation.","source":{"type":"base64","media_type":"application/zip","data":"` + inlineSkillBundle + `"}}]`
+
+func TestResponseHostedSkills(t *testing.T) {
+	for _, raw := range []string{nativeHostedSkills, `[]`, `[{"type":"skill_reference","skill_id":"openai-spreadsheets","version":"latest"}]`, `[{"type":"skill_reference","skill_id":"skill_team"}]`} {
+		if _, err := responseSkills(json.RawMessage(raw)); err != nil {
+			t.Fatal("valid hosted skill rejected", err)
+		}
+	}
+	for _, raw := range []string{
+		`null`, `{}`, `[null]`,
+		`[{"type":"skill_reference","skill_id":"../foreign"}]`,
+		`[{"type":"skill_reference","skill_id":"skill_team","version":0}]`,
+		`[{"type":"skill_reference","skill_id":"skill_team","version":"0"}]`,
+		`[{"type":"skill_reference","skill_id":"skill_team","version":"01"}]`,
+		`[{"type":"skill_reference","skill_id":"skill_team","version":null}]`,
+		`[{"type":"skill_reference","skill_id":"skill_team","path":"/tmp"}]`,
+		strings.Replace(nativeHostedSkills, `"description":"Team calculation."`, `"description":null`, 1),
+		strings.Replace(nativeHostedSkills, "application/zip", "text/plain", 1),
+		strings.Replace(nativeHostedSkills, inlineSkillBundle, "%%%", 1),
+		strings.Replace(nativeHostedSkills, inlineSkillBundle, "", 1),
+		strings.Replace(nativeHostedSkills, `"source":`, `"unknown":true,"source":`, 1),
+	} {
+		if _, err := responseSkills(json.RawMessage(raw)); err == nil {
+			t.Fatal("invalid hosted skill admitted", raw)
+		}
+	}
+	declaration := `[{"type":"shell","environment":{"type":"container_auto","skills":` + nativeHostedSkills + `}}]`
+	for _, raw := range []string{`{"tools":` + declaration + `}`, `{"input":[{"type":"additional_tools","tools":` + declaration + `}]}`} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &body)
+		body["model"] = json.RawMessage(`"model"`)
+		if body["input"] == nil {
+			body["input"] = json.RawMessage(`"calculate"`)
+		}
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", body)
+		if err != nil || !in.NativeCode || !slices.Equal(in.SkillIDs, []string{"skill_team"}) {
+			t.Fatal("hosted skill admission or scope", in, err)
+		}
+	}
+	if err := validateResponseAutoContainer(map[string]json.RawMessage{"type": json.RawMessage(`"auto"`), "skills": json.RawMessage(nativeHostedSkills)}); err == nil {
+		t.Fatal("Code Interpreter accepted Shell-only skills")
+	}
+	u := &upstreamAccount{Platform: "openai", Credentials: map[string]json.RawMessage{"api_key": json.RawMessage(`"source"`), "api_protocol": json.RawMessage(`"responses"`)}}
+	in := accountInput{Extra: map[string]json.RawMessage{responseSkillsKey: json.RawMessage(`{"1":["skill_team"]}`)}}
+	if err := in.bindResponseResourceGrants(u); err != nil {
+		t.Fatal(err)
+	}
+	u.Extra = in.Extra
+	if !u.allowsResponseResources(responseSkillsKey, 1, []string{"skill_team"}) || u.allowsResponseResources(responseSkillsKey, 2, []string{"skill_team"}) || u.allowsResponseResources(responseFilesKey, 1, []string{"skill_team"}) {
+		t.Fatal("skill authorization escaped its group or kind")
+	}
+	u.Credentials["api_key"] = json.RawMessage(`"rotated"`)
+	if u.allowsResponseResources(responseSkillsKey, 1, []string{"skill_team"}) {
+		t.Fatal("skill grant followed credential rotation")
+	}
+}
 
 func TestContainerNetworkPolicy(t *testing.T) {
 	for _, raw := range []string{

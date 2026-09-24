@@ -30,6 +30,7 @@ type backgroundResponse struct {
 	CodeTool        bool     `json:",omitempty"`
 	Containers      []string `json:",omitempty"`
 	FileIDs         []string `json:",omitempty"`
+	SkillIDs        []string `json:",omitempty"`
 	VectorStores    []string `json:",omitempty"`
 }
 
@@ -129,6 +130,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 	t.CodeTool = in.NativeCode
 	t.Containers = in.ResponseContainers
 	t.VectorStores, t.FileIDs = in.VectorStores, in.FileIDs
+	t.SkillIDs = in.SkillIDs
 	account := *s.Account
 	account.Credentials = nil
 	account.Extra = map[string]json.RawMessage{}
@@ -302,7 +304,7 @@ func (a *App) settleBackgroundResponse(ctx context.Context, t *backgroundRespons
 	var result struct{ Status string }
 	_ = json.Unmarshal(t.Result, &result)
 	if t.Store && (result.Status == "completed" || result.Status == "incomplete") {
-		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool, CodeTool: t.CodeTool, Containers: t.Containers, VectorStores: t.VectorStores, FileIDs: t.FileIDs}
+		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool, CodeTool: t.CodeTool, Containers: t.Containers, VectorStores: t.VectorStores, FileIDs: t.FileIDs, SkillIDs: t.SkillIDs}
 		if err := a.storeResponseBinding(ctx, &t.Identity, t.UpstreamID, binding); err != nil {
 			return err
 		}

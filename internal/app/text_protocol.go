@@ -34,6 +34,7 @@ type textRequest struct {
 	NativeFileSearch                             bool
 	VectorStores                                 []string
 	FileIDs                                      []string
+	SkillIDs                                     []string
 	ContainerReferences                          []string
 	ResponseContainers                           []string
 	ResponseImage                                *responseImageConfig

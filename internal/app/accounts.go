@@ -119,7 +119,7 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
-		case responseStoresKey, responseFilesKey:
+		case responseStoresKey, responseFilesKey, responseSkillsKey:
 			if _, err := parseResponseResourceGrants(value); err != nil {
 				return err
 			}

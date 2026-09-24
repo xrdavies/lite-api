@@ -440,7 +440,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if !u.allowsOpenAIProtocol(protocol) {
 			continue
 		}
-		if !u.allowsResponseResources(responseStoresKey, g.Key.GroupID, in.VectorStores) || !u.allowsResponseResources(responseFilesKey, g.Key.GroupID, in.FileIDs) {
+		if !u.allowsResponseResources(responseStoresKey, g.Key.GroupID, in.VectorStores) || !u.allowsResponseResources(responseFilesKey, g.Key.GroupID, in.FileIDs) || !u.allowsResponseResources(responseSkillsKey, g.Key.GroupID, in.SkillIDs) {
 			continue
 		}
 		mapped, err := u.mappedModel(s.ChannelModel)
@@ -875,6 +875,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if err == nil && binding != nil {
 		in.FileIDs, err = mergeResponseResources(binding.FileIDs, in.FileIDs)
+		if err == nil {
+			in.SkillIDs, err = mergeResponseResources(binding.SkillIDs, in.SkillIDs)
+		}
 		if err == nil {
 			in.VectorStores, err = mergeResponseResources(binding.VectorStores, in.VectorStores)
 		}
@@ -1852,6 +1855,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			binding.ImageTool, binding.MCPTool = in.ResponseImage != nil, in.NativeMCP
 			binding.CodeTool, binding.Containers = in.NativeCode, observation.ResponseContainers
 			binding.VectorStores, binding.FileIDs = in.VectorStores, in.FileIDs
+			binding.SkillIDs = in.SkillIDs
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
@@ -1865,7 +1869,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers, VectorStores: in.VectorStores, FileIDs: in.FileIDs})
+				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil, MCPTool: in.NativeMCP, CodeTool: in.NativeCode, Containers: observation.ResponseContainers, VectorStores: in.VectorStores, FileIDs: in.FileIDs, SkillIDs: in.SkillIDs})
 			}
 		}
 		bindingCancel()
