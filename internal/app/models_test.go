@@ -6,11 +6,137 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func testGroupModelCandidates(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	manage := func(method, path string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, admin, body)
+		var out struct{ Data map[string]any }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	id := func(v map[string]any) int64 { return int64(v["id"].(float64)) }
+	path := func(gid int64, platform string) string {
+		return fmt.Sprintf("/api/v1/admin/groups/%d/model-allowlist-candidates?platform=%s", gid, platform)
+	}
+	read := func(gid int64, platform string) []string {
+		t.Helper()
+		w := call("GET", path(gid, platform), admin, nil)
+		var out struct{ Data struct{ Models []string } }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Data.Models == nil || !slices.IsSorted(out.Data.Models) {
+			t.Fatalf("invalid candidates: %d %s", w.Code, w.Body.String())
+		}
+		if len(slices.Compact(slices.Clone(out.Data.Models))) != len(out.Data.Models) {
+			t.Fatal("duplicate model candidates")
+		}
+		return out.Data.Models
+	}
+	for _, token := range []string{"", ordinary} {
+		w := call("GET", path(0, ""), token, nil)
+		want := 401
+		if token != "" {
+			want = 403
+		}
+		if w.Code != want {
+			t.Fatal("candidate permission", w.Code, want)
+		}
+	}
+	for _, badPath := range []string{path(-1, ""), path(0, "unknown"), "/api/v1/admin/groups/bad/model-allowlist-candidates"} {
+		if w := call("GET", badPath, admin, nil); w.Code != 400 {
+			t.Fatal("invalid candidates input", w.Code)
+		}
+	}
+	if w := call("GET", path(9223372036854775807, ""), admin, nil); w.Code != 404 {
+		t.Fatal("missing group candidates", w.Code)
+	}
+	if !slices.Equal(read(0, ""), read(0, "anthropic")) {
+		t.Fatal("default platform changed")
+	}
+	for _, platform := range []string{"openai", "anthropic", "gemini", "grok", "kimi", "zhipu", "deepseek", "minimax"} {
+		models := read(0, platform)
+		for _, p := range a.prices.Load().Prices {
+			if p.Platform == platform {
+				for _, m := range p.Models {
+					if concreteModel(m) && !slices.Contains(models, m) {
+						t.Fatal("catalog candidate missing", platform, m)
+					}
+				}
+			}
+		}
+	}
+	compositeDefaults := read(0, "composite")
+	for _, m := range read(0, "gemini") {
+		if !slices.Contains(compositeDefaults, m) {
+			t.Fatal("composite default missing", m)
+		}
+	}
+	gid := id(manage("POST", "/api/v1/admin/groups", map[string]any{"name": "candidate-group", "platform": "openai", "model_allowlist": map[string]any{"enabled": true, "models": []string{"only-one"}}}))
+	other := id(manage("POST", "/api/v1/admin/groups", map[string]any{"name": "candidate-other", "platform": "openai"}))
+	cgid := id(manage("POST", "/api/v1/admin/groups", map[string]any{"name": "candidate-composite", "platform": "composite"}))
+	var probes atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { probes.Add(1); w.WriteHeader(500) }))
+	defer provider.Close()
+	account := func(name, platform string, group int64) int64 {
+		return id(manage("POST", "/api/v1/admin/accounts", map[string]any{"name": name, "platform": platform, "type": "apikey", "group_ids": []int64{group, cgid}, "credentials": map[string]any{"api_key": "candidate-secret", "base_url": provider.URL, "model_mapping": map[string]string{name: "private-target", name + "-*": "private-target", "shared-alias": "private-target"}}}))
+	}
+	aid := account("active-alias", "openai", gid)
+	account("foreign-alias", "openai", other)
+	manage("POST", "/api/v1/admin/accounts", map[string]any{"name": "candidate-gemini", "platform": "gemini", "type": "apikey", "group_ids": []int64{cgid}, "credentials": map[string]any{"api_key": "candidate-secret", "base_url": provider.URL, "model_mapping": map[string]string{"gemini-alias": "private-gemini-target"}}})
+	for _, state := range []string{"inactive", "paused", "expired", "limited", "overloaded", "temporary", "deleted"} {
+		id := account(state+"-alias", "openai", gid)
+		clause := map[string]string{"inactive": "status='inactive'", "paused": "schedulable=false", "expired": "expires_at=now()-interval '1 minute',auto_pause_on_expired=true", "limited": "rate_limit_reset_at=now()+interval '1 minute'", "overloaded": "overload_until=now()+interval '1 minute'", "temporary": "temp_unschedulable_until=now()+interval '1 minute'", "deleted": "deleted_at=now()"}[state]
+		if _, err := a.DB.Exec("UPDATE accounts SET "+clause+" WHERE id=$1", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := read(gid, "")
+	for _, m := range []string{"active-alias", "active-alias-*", "shared-alias"} {
+		if !slices.Contains(models, m) {
+			t.Fatal("request alias omitted", m)
+		}
+	}
+	for _, m := range models {
+		if strings.Contains(m, "private-target") || strings.Contains(m, "candidate-secret") || strings.Contains(m, "foreign-alias") || strings.Contains(m, "gemini-alias") {
+			t.Fatal("candidate leaked foreign/target/secret", m)
+		}
+	}
+	for _, state := range []string{"inactive", "paused", "expired", "limited", "overloaded", "temporary", "deleted"} {
+		if slices.Contains(models, state+"-alias") {
+			t.Fatal("unschedulable alias visible", state)
+		}
+	}
+	if slices.Contains(read(gid, "gemini"), "active-alias") {
+		t.Fatal("platform override ignored")
+	}
+	models = read(cgid, "")
+	if !slices.Contains(models, "active-alias") || !slices.Contains(models, "gemini-alias") {
+		t.Fatal("composite aliases omitted")
+	}
+	manage("PUT", fmt.Sprintf("/api/v1/admin/accounts/%d", aid), map[string]any{"credentials": map[string]any{"model_mapping": map[string]string{"updated-alias": "private-target"}}})
+	if models = read(gid, ""); !slices.Contains(models, "updated-alias") || slices.Contains(models, "active-alias") {
+		t.Fatal("stale candidate mapping")
+	}
+	if probes.Load() != 0 {
+		t.Fatal("allowlist suggestions called upstream", probes.Load())
+	}
+}
 
 func TestModelMetadata(t *testing.T) {
 	m, err := decodeModel(json.RawMessage(`{"slug":"reasoner","reasoning":true,"supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"input_modalities":["text","image"],"context_window":32000,"api_key":"must-drop"}`))

@@ -79,6 +79,8 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 ## 渠道与定价
 
+`GET /api/v1/admin/groups/{id}/model-allowlist-candidates` 为管理员配置模型白名单提供 `models` 候选数组。`id=0` 用于建组前查询；可选 `platform` 覆盖平台，省略时取分组平台，无分组时默认 anthropic。候选来自当前固定参考价目录中的具体模型，以及本组可调度 API Key 账号的请求侧映射名（含通配符）；composite 合并保留平台，结果排序去重。不受当前白名单裁剪、不返回映射目标或凭证，也不会调用上游。候选不是实际可用性声明；真实目录与能力应通过模型发现/健康测试确认。
+
 管理员通过 `/api/v1/admin/channels` 管理渠道、分组关联、模型映射、价格和账号成本规则。一个分组只能属于一个渠道；关联与价格替换在同一事务中完成。价格沿用各字段的十进制精度，token 价格单位为 USD/token，支持科学计数法。`billing_model_source` 可配置 requested、channel_mapped、upstream 或 response_model。Chat Completions 已使用请求开始时的价格快照结算，消费期间修改价格不会回改该次费用。
 
 价格支持 token、per_request、image，缓存读写及 1h 写入价、上下文阶梯、时段/服务等级/推理倍率。上下文阶梯按 `(min_tokens, max_tokens]` 匹配；时段使用显式时区与 `[start_time, end_time)`，结束 `00:00` 表示当天结束。账号成本规则单独保存，不改变用户价格。渠道缺失的文本单价回落到参考价，显式零价仍为免费；单独配置缓存写入价同时覆盖 5m/1h，单独的 1h 价优先。渠道阶梯替代参考阶梯，未配阶梯则继承参考长上下文倍率；渠道自定义价不叠加供应商默认时段策略。`restrict_models=true` 仍要求模型命中渠道价卡，不能通过参考价绕过限制。

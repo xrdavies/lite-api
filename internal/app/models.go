@@ -49,6 +49,87 @@ func concreteModel(id string) bool {
 	return validModelPattern(id) && len(id) <= 100 && !strings.ContainsAny(id, "*\t")
 }
 
+// Editing an allowlist needs suggestions before any upstream is available.
+// Reuse the reference catalog plus request-side account aliases; this is not a
+// discovery probe or a promise that every candidate is currently callable.
+func (a *App) groupModelCandidates(w http.ResponseWriter, r *http.Request) error {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 0 {
+		return bad("invalid group id")
+	}
+	platform := strings.TrimSpace(r.URL.Query().Get("platform"))
+	if id > 0 {
+		var groupPlatform string
+		if err := a.DB.QueryRowContext(r.Context(), "SELECT platform FROM groups WHERE id=$1 AND deleted_at IS NULL", id).Scan(&groupPlatform); err != nil {
+			return err
+		}
+		if platform == "" {
+			platform = groupPlatform
+		}
+	}
+	if platform == "" {
+		platform = "anthropic"
+	}
+	if !supportedPlatform(platform) && platform != "composite" {
+		return bad("unsupported platform")
+	}
+	seen := map[string]bool{}
+	if catalog := a.prices.Load(); catalog != nil {
+		for _, price := range catalog.Prices {
+			if price.Platform == platform || platform == "composite" {
+				for _, model := range price.Models {
+					if concreteModel(model) {
+						seen[model] = true
+					}
+				}
+			}
+		}
+	}
+	if id > 0 {
+		rows, err := a.DB.QueryContext(r.Context(), `SELECT a.platform, a.credentials->'model_mapping'
+ FROM accounts a JOIN account_groups ag ON ag.account_id=a.id
+ WHERE ag.group_id=$1 AND (a.platform=$2 OR $2='composite') AND a.type='apikey'
+ AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable
+ AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now())
+ AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now())
+ AND (a.overload_until IS NULL OR a.overload_until<=now())
+ AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now())`, id, platform)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var accountPlatform string
+			var raw []byte
+			if err := rows.Scan(&accountPlatform, &raw); err != nil {
+				return err
+			}
+			if !supportedPlatform(accountPlatform) {
+				continue
+			}
+			var mapping map[string]string
+			if len(raw) > 0 && json.Unmarshal(raw, &mapping) != nil {
+				return &apiError{503, "invalid account model mapping"}
+			}
+			for model := range mapping {
+				model = strings.TrimSpace(model)
+				if validModelPattern(model) {
+					seen[model] = true
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	models := make([]string, 0, len(seen))
+	for model := range seen {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	return reply(w, map[string]any{"models": models})
+}
+
 func decodeModel(raw json.RawMessage) (discoveredModel, error) {
 	var fields map[string]json.RawMessage
 	var m discoveredModel
