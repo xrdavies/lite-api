@@ -222,7 +222,11 @@ func (a *App) route(pattern, access string, h handler) {
 			}
 			if access != "public" {
 				var err error
-				user, err = a.authenticate(r)
+				if access == "admin" {
+					user, err = a.authenticateAdmin(r)
+				} else {
+					user, err = a.authenticate(r)
+				}
 				if err != nil {
 					return err
 				}
@@ -242,7 +246,7 @@ func (a *App) route(pattern, access string, h handler) {
 		if user != nil && r.Method != "GET" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			_, err = a.DB.ExecContext(ctx, `INSERT INTO audit_logs(actor_user_id,actor_email,actor_role,auth_method,action,method,path,request_id,client_ip,status_code,latency_ms) VALUES($1,$2,$3,'jwt',$4,$5,$6,$7,$8,$9,$10)`, user.ID, user.Email, user.Role, pattern, r.Method, r.URL.Path, requestID, clientIP(r), status, time.Since(started).Milliseconds())
+			_, err = a.DB.ExecContext(ctx, `INSERT INTO audit_logs(actor_user_id,actor_email,actor_role,auth_method,action,method,path,request_id,client_ip,status_code,latency_ms) VALUES($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)`, user.ID, user.Email, user.Role, pattern, r.Method, r.URL.Path, requestID, clientIP(r), status, time.Since(started).Milliseconds(), user.AuthMethod)
 			if err != nil {
 				slog.Error("audit record failed", "request_id", requestID)
 			}
@@ -366,6 +370,7 @@ func (a *App) routes() {
 	})
 	a.settingsRoutes()
 	a.runtimeSettingsRoutes()
+	a.adminKeyRoutes()
 	a.imageStorageRoutes()
 	a.imageTaskRoutes()
 	a.batchImageRoutes()

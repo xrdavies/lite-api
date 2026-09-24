@@ -66,7 +66,9 @@ func testCustomVoices(t *testing.T, a *App, admin string) {
 		r := httptest.NewRequest(method, path, bytes.NewReader(body))
 		r.RemoteAddr = "192.0.2.192:1234"
 		r.Header.Set("Authorization", "Bearer "+token)
-		r.Header.Set("X-Api-Key", token)
+		if !strings.HasPrefix(path, "/api/v1/") {
+			r.Header.Set("X-Api-Key", token)
+		}
 		r.Header.Set("Cookie", "private-cookie")
 		r.Header.Set("Content-Type", ct)
 		r.Header.Set("Idempotency-Key", idem)

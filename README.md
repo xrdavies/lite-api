@@ -67,6 +67,10 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 ## 运行设置
 
+管理 API 支持密码登录产生的 Bearer JWT，以及独立的全局管理员机器凭证。`GET /api/v1/admin/settings/admin-api-key` 返回 `exists/masked_key`；`POST .../admin-api-key/regenerate` 生成 `admin-` 前缀的 32 字节随机 Key，仅本次响应返回完整值；`DELETE .../admin-api-key` 删除凭证。初次生成使用管理员 JWT，此后合法机器凭证也可轮换或删除自身。原 `settings.admin_api_key` 保持原始字符串语义，应与上游凭证一样限制数据库访问；通用设置、状态查询和审计均不返回完整 Key。
+
+机器调用仅在 `/api/v1/admin/...` 管理接口使用 `X-Api-Key`，每次请求读取当前凭证并以 ID 最小的可用管理员记录操作，审计 `auth_method=admin_api_key`；禁用、删除或降权的管理员不会成为操作身份。凭证是全局设置，不属于生成它的个人账户；密码/会话撤销不代替机器 Key 轮换。与 Authorization 同时提供时，X-Api-Key 优先，错误或重复值不会退回 JWT。它不创建登录会话，不能用来调用本人 Key 管理或模型网关，也不会增加管理员代创建、通用编辑或单独删除用户 Key 的能力。轮换/删除提交后，新请求立即失效旧 Key，已经通过鉴权的在途操作可完成。管理限流沿用所解析管理员的策略，余额调整继续使用原幂等和账务事务。
+
 管理员可对 `/api/v1/admin/settings/overload-cooldown`、`/rate-limit-429-cooldown` 和 `/panel-rate-limit`（均使用相同 settings 前缀）执行 GET/PUT。配置保存在原 settings 表，写入有权限校验和审计，不向公开设置返回。PUT 替换整组配置，客户端应提交完整对象。
 
 529 设置为 `{"enabled":true,"cooldown_minutes":10}`，范围 1–120 分钟；收到 529 后暂停该账号调度，并在未输出响应时沿用最多三个不同账号的换号规则。429 设置为 `{"enabled":true,"cooldown_seconds":5}`，范围 1–7200 秒，仅在缺少有效 `Retry-After` 时使用；关闭默认冷却仍尊重有效的上游秒数或 HTTP 日期（最多两小时）。禁用时提交越界时长会归一化为默认值。更新配置不清除已生效的冷却；如需立即恢复，使用原账号恢复接口。502/503/504 保留独立的短暂冷却，账号认证失败和已识别的余额不足继续按各自规则处理。

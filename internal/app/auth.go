@@ -21,8 +21,8 @@ import (
 
 type identityKey struct{}
 type identity struct {
-	ID                                   int64
-	Email, Role, PasswordHash, SessionID string
+	ID                                               int64
+	Email, Role, PasswordHash, SessionID, AuthMethod string
 }
 
 func current(r *http.Request) *identity { return r.Context().Value(identityKey{}).(*identity) }
@@ -122,6 +122,7 @@ func (a *App) authenticate(r *http.Request) (*identity, error) {
 		return nil, err
 	}
 	u.SessionID = c.SessionID
+	u.AuthMethod = "jwt"
 	return u, nil
 }
 func (a *App) tokenReply(sid, refresh string, uid int64) map[string]any {

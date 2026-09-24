@@ -53,7 +53,9 @@ func testResponses(t *testing.T, a *App, admin string) {
 		r.Header.Set("Authorization", "Bearer "+token)
 		r.Header.Set("Idempotency-Key", idem)
 		r.Header.Set("Cookie", "client-cookie")
-		r.Header.Set("X-Api-Key", "client-header-key")
+		if !strings.HasPrefix(path, "/api/v1/") {
+			r.Header.Set("X-Api-Key", "client-header-key")
+		}
 		w := httptest.NewRecorder()
 		a.Handler().ServeHTTP(w, r)
 		return w

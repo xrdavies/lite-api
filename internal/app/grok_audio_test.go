@@ -100,7 +100,9 @@ func testGrokAudio(t *testing.T, a *App, admin string) {
 		r.Header.Set("Content-Type", ct)
 		r.Header.Set("Idempotency-Key", idem)
 		r.Header.Set("Cookie", "private-session")
-		r.Header.Set("X-Api-Key", token)
+		if !strings.HasPrefix(path, "/api/v1/") {
+			r.Header.Set("X-Api-Key", token)
+		}
 		w := httptest.NewRecorder()
 		a.Handler().ServeHTTP(w, r)
 		return w
