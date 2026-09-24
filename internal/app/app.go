@@ -33,6 +33,9 @@ type Config struct {
 	GeminiQuotaPolicy                                                               string
 }
 
+// Version is set at build time for immutable release images.
+var Version = "dev"
+
 func ConfigFromEnv() Config {
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -410,7 +413,7 @@ func (a *App) routes() {
 	a.batchImageRoutes()
 	a.videoRoutes()
 	version := func(w http.ResponseWriter, r *http.Request) error {
-		return reply(w, map[string]string{"version": "dev"})
+		return reply(w, map[string]string{"version": Version})
 	}
 	a.route("GET /api/v1/version", "public", version)
 	a.route("GET /api/v1/admin/system/version", "admin", version)

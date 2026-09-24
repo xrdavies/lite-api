@@ -1,0 +1,56 @@
+name: lite-api
+services:
+  app:
+    image: ${LITE_API_IMAGE:-lite-api:local}
+    build:
+      context: .
+      args:
+        VERSION: ${LITE_API_VERSION:-dev}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://lite_api:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (URL-safe)}@postgres:5432/lite_api?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET (at least 32 bytes)}
+      LISTEN_ADDR: :8080
+      UPSTREAM_PRIVATE_CIDRS: ${UPSTREAM_PRIVATE_CIDRS:-}
+    ports:
+      - "127.0.0.1:${LITE_API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lite_api
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (URL-safe)}
+      POSTGRES_DB: lite_api
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U lite_api -d lite_api"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    command: [redis-server, --appendonly, "yes", --appendfsync, always, --maxmemory-policy, noeviction]
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+volumes:
+  postgres:
+  redis:

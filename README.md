@@ -23,6 +23,8 @@ go build -o bin/lite-api ./cmd/lite-api
 
 `init-db` 只接受空库，`bootstrap` 只接受没有用户的已初始化数据库。`serve` 只检查结构，不执行迁移。初始化后可从运行环境移除 `ADMIN_EMAIL`、`ADMIN_PASSWORD`。数据库与 Redis 端口仅绑定本机，示例数据库密码只用于本地验证；部署时使用独立凭证及 HTTPS 反向代理。
 
+生产或长期单实例部署使用 `compose.deploy.yaml`：先准备 `POSTGRES_PASSWORD` 和至少 32 字节的 `JWT_SECRET`，再执行 `docker compose -f compose.deploy.yaml build`、启动 PostgreSQL/Redis、运行一次 `app init-db` 和 `app bootstrap`，最后启动 `app`。应用容器以只读根文件系统、非 root 用户和 Redis AOF `appendfsync always` 运行；PostgreSQL/Redis 数据卷必须纳入外部备份。发布时设置 `LITE_API_VERSION`，版本接口和镜像构建信息会返回该值。应用停止前会停止新请求并等待后台任务和 WebSocket 在 60 秒内收敛；超过期限由编排器强制终止，未完成任务依靠持久状态在下一次启动恢复。
+
 用户/管理 API 使用 `{code,message,data}` 响应格式。登录为 `POST /api/v1/auth/login`（`email`、`password`）；其他管理请求使用返回的 Bearer access token。access token 有效期 15 分钟，会话最多 30 天；refresh token 每次刷新后失效。客户端 API Key 不能用作管理面登录凭证。管理员余额调整可通过 `Idempotency-Key` 防止重复提交，金额计算在 PostgreSQL NUMERIC 中完成。
 
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。

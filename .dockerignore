@@ -1,0 +1,10 @@
+**
+!go.mod
+!go.sum
+!cmd/**
+!internal/**
+!schema/**
+!LICENSE
+!COPYING
+!NOTICE
+**/*_test.go

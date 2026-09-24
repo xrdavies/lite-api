@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,12 +25,14 @@ func main() {
 }
 func run() error {
 	if len(os.Args) != 2 {
-		return errors.New("usage: lite-api init-db | bootstrap | serve | upstream-check")
+		return errors.New("usage: lite-api init-db | bootstrap | serve | healthcheck | upstream-check")
 	}
 	cfg := app.ConfigFromEnv()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	switch os.Args[1] {
+	case "healthcheck":
+		return healthcheck(cfg.ListenAddr)
 	case "upstream-check":
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer checkCancel()
@@ -89,4 +92,27 @@ func run() error {
 	default:
 		return errors.New("unknown command")
 	}
+}
+
+func healthcheck(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return errors.New("invalid LISTEN_ADDR")
+	}
+	if host == "" || host == "0.0.0.0" {
+		host = "127.0.0.1"
+	} else if host == "::" {
+		host = "::1"
+	}
+	client := &http.Client{Timeout: 4 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/health")
+	if err != nil {
+		return errors.New("healthcheck request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("service is not ready")
+	}
+	return nil
 }
