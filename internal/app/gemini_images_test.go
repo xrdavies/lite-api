@@ -58,7 +58,7 @@ func TestGeminiImageBilling(t *testing.T) {
 	u := priceUsage{ImageCount: 2, ImageSize: "2K", Input: 10, Output: 15, ImageOutput: 10}
 	check := func(want string) {
 		t.Helper()
-		cost, _, _, err := s.geminiImageCost(g, "alias", u, "", "", time.Time{})
+		cost, _, _, err := s.generatedImageCost(g, "alias", u, "", "", time.Time{})
 		if err != nil || cost.Actual != want {
 			t.Fatal("image price precedence", cost, err, want)
 		}
@@ -76,7 +76,7 @@ func TestGeminiImageBilling(t *testing.T) {
 	s.GroupPricing[0] = modelPrice{Platform: "openai", Models: []string{"alias"}, BillingMode: "token", Input: number("0.01"), Output: number("0.02"), ImageOutput: number("0.03")}
 	check("1.0000000000") // Explicit token cards use the shared rate, not the image rate.
 	s.Restrict, s.Pricing = true, nil
-	if _, _, err := s.geminiImagePrice(g, "alias", "2K"); err == nil {
+	if _, _, err := s.generatedImagePrice(g, "alias", "2K"); err == nil {
 		t.Fatal("image prices bypassed channel model restriction")
 	}
 }

@@ -232,6 +232,7 @@ func (g *gatewayGroup) routingAccounts(model, platform string) []int64 {
 }
 
 type gatewaySelection struct {
+	ResponseImage                              *responseImageConfig
 	Features                                   map[string]json.RawMessage
 	Audio                                      string
 	Search                                     string
@@ -254,7 +255,7 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model string, in textRequest, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
 	protocol := in.Protocol
 	routing := g.dispatchGroup()
-	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing}
+	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing, ResponseImage: in.ResponseImage}
 	if audioProtocol(protocol) {
 		s.Audio = protocol
 		s.ChannelModel = protocol
@@ -426,6 +427,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		}
 		if in.HostedSearch {
 			matches = (u.Platform == "grok" || u.Platform == "openai") && u.protocol() == "responses"
+		}
+		if in.ResponseImage != nil {
+			matches = u.Platform == "openai" && u.protocol() == "responses"
 		}
 		if !matches {
 			continue
@@ -691,7 +695,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		fail(&apiError{404, "this endpoint requires an OpenAI or Grok group"})
 		return
 	}
-	if protocol == "images" && !g.Group.AllowImage {
+	if in.ResponseImage != nil && g.Group.Platform != "openai" && g.Group.Platform != "composite" {
+		fail(bad("image_generation requires an OpenAI target"))
+		return
+	}
+	if (protocol == "images" || in.ResponseImage != nil) && !g.Group.AllowImage {
 		fail(denied())
 		return
 	}
@@ -792,7 +800,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 	}
-	if protocol == "images" && !g.Group.AllowImage {
+	if in.ResponseImage != nil && g.Group.Platform != "openai" {
+		fail(bad("image_generation requires an OpenAI target"))
+		return
+	}
+	if (protocol == "images" || in.ResponseImage != nil) && !g.Group.AllowImage {
 		fail(denied())
 		return
 	}
@@ -817,6 +829,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	binding, err := a.previousResponse(ctx, g, in.Previous)
 	if err == nil {
 		binding, err = a.responseItemSource(ctx, g, in.ItemReferences, binding)
+	}
+	if err == nil && binding != nil && binding.ImageTool && in.ResponseImage == nil && !in.CountOnly {
+		err = bad("image-capable continuations must declare image_generation again")
 	}
 	if err != nil {
 		fail(err)
@@ -1159,7 +1174,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			preflight, priceErr := selected.price(billingModel)
 			rate, label := g.Group.Rate, ""
 			if wireIn.Protocol == "gemini" && wireIn.ImageGeneration {
-				preflight, rate, priceErr = selected.geminiImagePrice(g.Group, billingModel, wireIn.ImageSize)
+				preflight, rate, priceErr = selected.generatedImagePrice(g.Group, billingModel, wireIn.ImageSize)
 				label = wireIn.ImageSize
 			}
 			if priceErr == nil {
@@ -1173,6 +1188,23 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				selected.Release()
 				fail(priceErr)
 				return
+			}
+		}
+		if in.ResponseImage != nil {
+			// Check both text-only and actual-image tariffs before dispatch.
+			imageModel := selected.responseImageModel(model, "")
+			for _, size := range []string{"1K", "2K", "4K"} {
+				p, rate, e := selected.generatedImagePrice(g.Group, imageModel, size)
+				if e == nil {
+					u := wireIn.preflightUsage()
+					u.ImageCount, u.Requests, u.ImageOutput, u.Output = 1, 1, 1, 2
+					_, e = calculatePrice(p, u, rate, tier, wireIn.Effort, size, started, g.Group.LongContext)
+				}
+				if e != nil {
+					selected.Release()
+					fail(e)
+					return
+				}
 			}
 		}
 		if _, err = a.admissionWake(); err != nil || ctx.Err() != nil {
@@ -1295,6 +1327,19 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return meterErr
 		}
 	}
+	var imageMeter *responseImageMeter
+	if wireIn.Protocol == "responses" && selected.Account.Platform == "openai" && in.ResponseImage != nil {
+		imageMeter = &responseImageMeter{}
+		previous := observe
+		observe = func(raw []byte) error {
+			err := previous(raw)
+			imageErr := imageMeter.observe(raw)
+			if err != nil {
+				return err
+			}
+			return imageErr
+		}
+	}
 	var responseBody []byte
 	var forwardErr error
 	responseType := "application/json"
@@ -1387,7 +1432,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		w.Header().Set("X-Accel-Buffering", "no")
 		scanner := bufio.NewScanner(resp.Body)
 		frameLimit := 2 << 20
-		if wireIn.Protocol == "gemini" {
+		if wireIn.Protocol == "gemini" || in.ResponseImage != nil {
 			frameLimit = 16 << 20
 		}
 		scanner.Buffer(make([]byte, 4096), frameLimit)
@@ -1643,9 +1688,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 						billingModel = observation.Model
 					}
 				}
-				p, _, priceErr := selected.geminiImagePrice(g.Group, billingModel, wireIn.ImageSize)
+				p, _, priceErr := selected.generatedImagePrice(g.Group, billingModel, wireIn.ImageSize)
 				observation.HasUsage = priceErr == nil && (p.BillingMode == "image" || p.BillingMode == "per_request")
 			}
+		}
+	}
+	knownImageUsage := false
+	if imageMeter != nil {
+		imageMeter.apply(&observation.Usage, in.ResponseImage)
+		if observation.Usage.ImageCount > 0 && !observation.HasUsage {
+			p, _, err := selected.generatedImagePrice(g.Group, selected.responseImageModel(model, observation.Model), observation.Usage.ImageSize)
+			knownImageUsage = err == nil && (p.BillingMode == "image" || p.BillingMode == "per_request")
 		}
 	}
 	if emulation != nil {
@@ -1657,13 +1710,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		// Token counts check eligibility but do not create consumption.
 	} else if turn := socketTurn(ctx); turn != nil && turn.warmup && !observation.HasUsage {
 		// Native generate=false prepares state without model usage.
-	} else if !observation.HasUsage && observation.Usage.SearchCalls == 0 {
+	} else if !observation.HasUsage && observation.Usage.SearchCalls == 0 && !knownImageUsage {
 		if forwardErr == nil {
 			forwardErr = &apiError{502, "upstream usage is missing; billing requires review"}
 		}
 	} else {
 		if !observation.HasUsage && forwardErr == nil {
-			forwardErr = &apiError{502, "upstream token usage is missing; known search usage is billed and tokens require review"}
+			forwardErr = &apiError{502, "upstream token usage is missing; known tool usage is billed and tokens require review"}
 		}
 		payloadHash := digest(string(body))
 		if protocol == "gemini" {
@@ -1708,6 +1761,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if turn := socketTurn(ctx); turn != nil {
 		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
+		if in.ResponseImage != nil {
+			binding := turn.socket.responses[observation.ResponseID]
+			binding.ImageTool = true
+			turn.socket.responses[observation.ResponseID] = binding
+		}
 	}
 	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1719,7 +1777,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID, observation.ResponseItems...)
+				err = a.storeResponseBinding(bindingCtx, g, observation.ResponseID, responseBinding{AccountID: selected.Account.ID, Target: responseTarget(selected.Account), Items: observation.ResponseItems, ImageTool: in.ResponseImage != nil})
 			}
 		}
 		bindingCancel()

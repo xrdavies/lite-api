@@ -164,7 +164,7 @@ func (m *hostedSearchMeter) observe(raw []byte) error {
 	return nil
 }
 
-func addHostedSearchCost(cost *priceCost, group gatewayGroup, calls int64) error {
+func addHostedSearchCost(cost *priceCost, group gatewayGroup, calls int64, baseRate json.Number) error {
 	if calls < 0 || calls > 10000 {
 		return bad("invalid search call count")
 	}
@@ -173,8 +173,9 @@ func addHostedSearchCost(cost *priceCost, group gatewayGroup, calls int64) error
 		return err
 	}
 	total := new(big.Rat).Mul(search.totalValue, big.NewRat(calls, 1))
+	actual := new(big.Rat).Mul(cost.totalValue, rat(baseRate))
+	actual.Add(actual, new(big.Rat).Mul(total, rat(group.Rate)))
 	cost.totalValue.Add(cost.totalValue, total)
-	actual := new(big.Rat).Mul(cost.totalValue, rat(group.Rate))
 	cost.Total, cost.Actual, cost.Debit = cost.totalValue.FloatString(10), actual.FloatString(10), actual.FloatString(8)
 	return nil
 }

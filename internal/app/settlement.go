@@ -49,8 +49,11 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	var cost priceCost
 	var err error
 	rate := g.Group.Rate
-	if (u.ImageCount > 0 || u.ImageRequest) && s.Account.Platform == "gemini" {
-		cost, p.BillingMode, rate, err = s.geminiImageCost(g.Group, model, u, tier, effort, at)
+	if u.ImageCount > 0 && s.ResponseImage != nil && s.Account.Platform == "openai" {
+		model = s.responseImageModel(requested, response)
+		cost, p.BillingMode, rate, err = s.generatedImageCost(g.Group, model, u, tier, effort, at)
+	} else if (u.ImageCount > 0 || u.ImageRequest) && s.Account.Platform == "gemini" {
+		cost, p.BillingMode, rate, err = s.generatedImageCost(g.Group, model, u, tier, effort, at)
 	} else if u.VideoCount > 0 {
 		p.BillingMode = "video"
 		cost, err = s.videoCost(g.Group, model, u, at)
@@ -76,7 +79,7 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 		if s.Account.Platform != "grok" && s.Account.Platform != "openai" || s.Search != "" {
 			return nil, bad("unexpected hosted search usage")
 		}
-		if err = addHostedSearchCost(&cost, g.Group, u.SearchCalls); err != nil {
+		if err = addHostedSearchCost(&cost, g.Group, u.SearchCalls, rate); err != nil {
 			return nil, err
 		}
 	}
@@ -202,6 +205,9 @@ func (r *usageReceipt) fingerprint() string {
 	}
 	if r.Usage.ImageCount > 0 {
 		raw += fmt.Sprintf("|image|%d|%s|%d|%d", r.Usage.ImageCount, r.Usage.ImageSize, r.Usage.ImageInput, r.Usage.ImageOutput)
+	}
+	if r.Usage.ImageOutputSize != "" || r.Usage.ImageSizes != [3]int64{} {
+		raw += fmt.Sprintf("|image-output|%s|%v", r.Usage.ImageOutputSize, r.Usage.ImageSizes)
 	}
 	if r.Usage.SearchCalls > 0 {
 		raw += fmt.Sprintf("|search|%d", r.Usage.SearchCalls)
@@ -345,8 +351,8 @@ func (a *App) applyReceipt(ctx context.Context, r *usageReceipt) error {
 	if r.WebSocket {
 		requestType = 3
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO usage_logs(user_id,api_key_id,account_id,request_id,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,stream,duration_ms,created_at,group_id,rate_multiplier,first_token_ms,user_agent,ip_address,account_rate_multiplier,reasoning_effort,request_type,service_tier,inbound_endpoint,upstream_endpoint,upstream_model,requested_model,channel_id,billing_mode,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,account_stats_cost,upstream_response_model,upstream_model_mismatch,upstream_request_id,native_compaction_v2,requested_reasoning_effort,openai_ws_mode,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$43,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$44,$45,$46,$47,NULLIF($48,''),NULLIF($49,0),$50,NULLIF($51,''),NULLIF($52,''),NULLIF($53,''))`, r.UserID, r.KeyID, r.AccountID, r.RequestID, r.Model, r.Usage.Input, r.Usage.Output, r.Usage.CacheWrite, r.Usage.CacheRead, r.Usage.CacheWrite5m, r.Usage.CacheWrite1h, r.Cost.Input, r.Cost.Output, r.Cost.CacheWrite, r.Cost.CacheRead, r.Cost.Total, r.Cost.Actual, r.Stream, r.Duration, r.At, r.GroupID, r.UserRate, r.FirstToken, r.UserAgent, r.IP, r.AccountRate, r.Effort, requestType, r.ServiceTier, r.Inbound, r.UpstreamModel, r.RequestedModel, r.ChannelID, r.BillingMode, r.Usage.ImageInput, r.Usage.ImageOutput, r.Cost.ImageInput, r.Cost.ImageOutput, r.AccountStats, r.ResponseModel, r.ResponseModel != "" && r.ResponseModel != r.UpstreamModel, r.UpstreamRequestID, r.Upstream, r.NativeCompaction, r.RequestedEffort, r.WebSocket, r.Usage.VideoCount, r.Usage.VideoResolution, r.Usage.VideoSeconds, r.Usage.ImageCount, r.Usage.ImageSize, r.Usage.ImageSizeSource, r.Usage.ImageInputSize)
+	_, err = tx.ExecContext(ctx, `INSERT INTO usage_logs(user_id,api_key_id,account_id,request_id,model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,stream,duration_ms,created_at,group_id,rate_multiplier,first_token_ms,user_agent,ip_address,account_rate_multiplier,reasoning_effort,request_type,service_tier,inbound_endpoint,upstream_endpoint,upstream_model,requested_model,channel_id,billing_mode,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,account_stats_cost,upstream_response_model,upstream_model_mismatch,upstream_request_id,native_compaction_v2,requested_reasoning_effort,openai_ws_mode,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size,image_output_size,image_size_breakdown)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$43,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$44,$45,$46,$47,NULLIF($48,''),NULLIF($49,0),$50,NULLIF($51,''),NULLIF($52,''),NULLIF($53,''),NULLIF($54,''),$55::jsonb)`, r.UserID, r.KeyID, r.AccountID, r.RequestID, r.Model, r.Usage.Input, r.Usage.Output, r.Usage.CacheWrite, r.Usage.CacheRead, r.Usage.CacheWrite5m, r.Usage.CacheWrite1h, r.Cost.Input, r.Cost.Output, r.Cost.CacheWrite, r.Cost.CacheRead, r.Cost.Total, r.Cost.Actual, r.Stream, r.Duration, r.At, r.GroupID, r.UserRate, r.FirstToken, r.UserAgent, r.IP, r.AccountRate, r.Effort, requestType, r.ServiceTier, r.Inbound, r.UpstreamModel, r.RequestedModel, r.ChannelID, r.BillingMode, r.Usage.ImageInput, r.Usage.ImageOutput, r.Cost.ImageInput, r.Cost.ImageOutput, r.AccountStats, r.ResponseModel, r.ResponseModel != "" && r.ResponseModel != r.UpstreamModel, r.UpstreamRequestID, r.Upstream, r.NativeCompaction, r.RequestedEffort, r.WebSocket, r.Usage.VideoCount, r.Usage.VideoResolution, r.Usage.VideoSeconds, r.Usage.ImageCount, r.Usage.ImageSize, r.Usage.ImageSizeSource, r.Usage.ImageInputSize, r.Usage.ImageOutputSize, imageSizeBreakdown(r.Usage.ImageSizes))
 	if err != nil {
 		return err
 	}

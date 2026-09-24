@@ -231,6 +231,13 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 		}
 		observation.Usage.SearchCalls = meter.count()
 	}
+	if t.Selection.ResponseImage != nil {
+		meter := responseImageMeter{}
+		if err = meter.observe(raw); err != nil {
+			return err
+		}
+		meter.apply(&observation.Usage, t.Selection.ResponseImage)
+	}
 	if !observation.HasUsage {
 		// Queued work may start between polls or race cancellation. Only explicit
 		// provider usage proves consumption, including an explicit zero result.
@@ -270,7 +277,7 @@ func (a *App) settleBackgroundResponse(ctx context.Context, t *backgroundRespons
 	var result struct{ Status string }
 	_ = json.Unmarshal(t.Result, &result)
 	if t.Store && (result.Status == "completed" || result.Status == "incomplete") {
-		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items}
+		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil}
 		if err := a.storeResponseBinding(ctx, &t.Identity, t.UpstreamID, binding); err != nil {
 			return err
 		}
@@ -483,7 +490,11 @@ func (a *App) streamBackgroundResponse(w http.ResponseWriter, r *http.Request, t
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 4096), 2<<20)
+	frameLimit := 2 << 20
+	if t.Selection.ResponseImage != nil {
+		frameLimit = 16 << 20
+	}
+	scanner.Buffer(make([]byte, 4096), frameLimit)
 	var frame []string
 	size := 0
 	done := false
@@ -553,7 +564,7 @@ func (a *App) streamBackgroundResponse(w http.ResponseWriter, r *http.Request, t
 	for scanner.Scan() {
 		line := scanner.Text()
 		size += len(line)
-		if size > 2<<20 {
+		if size > frameLimit {
 			err = &apiError{502, "background event exceeds limit"}
 			break
 		}

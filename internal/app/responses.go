@@ -81,6 +81,13 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				if kind == "image_generation_call" && item["id"] != nil {
+					id := credentialString(item, "id")
+					if !validResponseID(id) || len(in.ItemReferences) >= 1024 {
+						return in, bad("invalid image generation item reference")
+					}
+					in.ItemReferences = append(in.ItemReferences, id)
+				}
 				if kind == "item_reference" || kind == "" && item["id"] != nil {
 					id := credentialString(item, "id")
 					if !validResponseID(id) {
@@ -129,6 +136,16 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if credentialString(tool, "type") == "image_generation" {
+			if in.ResponseImage != nil {
+				return in, bad("only one image_generation tool is supported")
+			}
+			in.ResponseImage, err = parseResponseImageTool(tool)
+			if err != nil {
+				return in, err
+			}
+			continue
+		}
 		if hostedSearchTool(credentialString(tool, "type")) {
 			in.HostedSearch = true
 			continue
@@ -137,8 +154,21 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if in.HostedSearch && (in.Action != "" || in.NativeCompaction) {
-		return in, bad("hosted search requires a normal Responses request")
+	if (in.HostedSearch || in.ResponseImage != nil) && (in.Action != "" || in.NativeCompaction) {
+		return in, bad("hosted tools require a normal Responses request")
+	}
+	if in.ResponseImage != nil {
+		var items []map[string]json.RawMessage
+		_ = json.Unmarshal(body["input"], &items)
+		for _, item := range items {
+			var content []map[string]json.RawMessage
+			_ = json.Unmarshal(item["content"], &content)
+			for _, part := range content {
+				if credentialString(part, "type") == "input_image" && part["file_id"] != nil && string(part["file_id"]) != "null" {
+					return in, bad("image inputs require URLs or data URLs; unscoped file IDs are not supported")
+				}
+			}
+		}
 	}
 	if in.Background && in.NativeCompaction {
 		return in, bad("native compaction cannot run in the background")
@@ -301,6 +331,7 @@ func (o *textObservation) observeResponses(data []byte) error {
 type responseBinding struct {
 	AccountID int64
 	Target    string
+	ImageTool bool     `json:",omitempty"`
 	History   string   `json:",omitempty"`
 	Items     []string `json:",omitempty"`
 }
@@ -344,7 +375,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -432,7 +463,8 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 		if binding != nil && (binding.AccountID != source.AccountID || binding.Target != source.Target) {
 			return nil, bad("response items must share the previous response upstream source")
 		}
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target}
+		imageTool := source.ImageTool || binding != nil && binding.ImageTool
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool}
 	}
 	return binding, nil
 }

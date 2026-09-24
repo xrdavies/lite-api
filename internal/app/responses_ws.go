@@ -263,7 +263,7 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 			}
 			return nil, &apiError{502, "upstream WebSocket handshake failed"}
 		}
-		conn.SetReadLimit(2 << 20)
+		conn.SetReadLimit(16 << 20)
 		s.upstream, s.proxyTarget = conn, proxyTarget
 		s.binding = &responseBinding{AccountID: account.ID, Target: responseTarget(account)}
 	}
@@ -390,7 +390,7 @@ func (w *socketResponseWriter) Write(p []byte) (int, error) {
 		w.status = 200
 	}
 	w.buffer = append(w.buffer, p...)
-	if len(w.buffer) > 2<<20 {
+	if len(w.buffer) > 16<<20 {
 		w.err = errors.New("WebSocket event exceeds limit")
 		return 0, w.err
 	}

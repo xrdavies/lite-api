@@ -329,6 +329,8 @@ type priceUsage struct {
 	ImageRequest                                                     bool
 	ImageCount                                                       int64
 	ImageSize, ImageSizeSource, ImageInputSize                       string
+	ImageOutputSize                                                  string
+	ImageSizes                                                       [3]int64
 	VideoCount, VideoSeconds                                         int64
 	VideoResolution                                                  string
 	AudioUnits                                                       string

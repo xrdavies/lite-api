@@ -27,6 +27,7 @@ type textRequest struct {
 	Headers                                      http.Header
 	Search                                       *grokSearchRequest
 	HostedSearch                                 bool
+	ResponseImage                                *responseImageConfig
 }
 
 func (in textRequest) compositeEndpoint() string {

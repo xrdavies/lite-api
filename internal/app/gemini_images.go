@@ -133,7 +133,7 @@ func geminiImageText(part map[string]json.RawMessage) (string, error) {
 	return "![image](data:" + kind + ";base64," + base64.StdEncoding.EncodeToString(decoded) + ")", nil
 }
 
-func (s *gatewaySelection) geminiImagePrice(g gatewayGroup, model, size string) (modelPrice, json.Number, error) {
+func (s *gatewaySelection) generatedImagePrice(g gatewayGroup, model, size string) (modelPrice, json.Number, error) {
 	if s.Restrict {
 		if _, ok := matchPrice(s.Pricing, s.Account.Platform, model); !ok {
 			return modelPrice{}, "", denied()
@@ -173,12 +173,12 @@ func (s *gatewaySelection) geminiImagePrice(g gatewayGroup, model, size string) 
 	return modelPrice{Platform: s.Account.Platform, Models: []string{model}, BillingMode: "image", PerRequest: price}, g.imageRate(), nil
 }
 
-func (s *gatewaySelection) geminiImageCost(g gatewayGroup, model string, u priceUsage, tier, effort string, at time.Time) (priceCost, string, json.Number, error) {
+func (s *gatewaySelection) generatedImageCost(g gatewayGroup, model string, u priceUsage, tier, effort string, at time.Time) (priceCost, string, json.Number, error) {
 	size := u.ImageSize
 	if size == "" {
 		size = "2K"
 	}
-	price, rate, err := s.geminiImagePrice(g, model, size)
+	price, rate, err := s.generatedImagePrice(g, model, size)
 	if err != nil {
 		return priceCost{}, "", "", err
 	}

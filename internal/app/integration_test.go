@@ -313,6 +313,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testGeminiQuotaPolicy(t, a, admin, otherToken)
 	testHostedSearch(t, a, admin, "grok")
 	testHostedSearch(t, a, admin, "openai")
+	testResponseImages(t, a, admin)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

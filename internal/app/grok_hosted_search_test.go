@@ -64,7 +64,7 @@ func TestGrokHostedSearch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = addHostedSearchCost(&cost, gatewayGroup{SearchPrice: price, Rate: "0.3333"}, 3); err != nil {
+		if err = addHostedSearchCost(&cost, gatewayGroup{SearchPrice: price, Rate: "0.3333"}, 3, "0.3333"); err != nil {
 			t.Fatal(err)
 		}
 		value := "5"

@@ -203,7 +203,7 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 					selection := gatewaySelection{Account: &upstreamAccount{Platform: model.Platform}, Catalog: catalog, GroupPricing: g.pricing, Pricing: c.Pricing, Restrict: c.Restrict}
 					prices := map[string]any{}
 					for _, size := range []string{"1K", "2K", "4K"} {
-						if price, _, err := selection.geminiImagePrice(imageGroup, name, size); err == nil {
+						if price, _, err := selection.generatedImagePrice(imageGroup, name, size); err == nil {
 							prices[size] = publicPricing(plazaPrice(price, g.longContext))
 						}
 					}

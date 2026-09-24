@@ -201,7 +201,7 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 删除前持久保存意图，立即阻断该响应的读取、取消、续接和已知输出条目引用，包括 WebSocket 本地关联。上游结果不明确时保留无期限记录，重复 DELETE 向原来源核实；有效成功回执或上游 404 确认后，清除后台结果与响应关联，拒绝标记保留 30 天，重复 DELETE 直接返回成功。延迟写入不能恢复已删除关联或后台任务。此操作不清除创建请求的独立幂等响应缓存，仍按原 24 小时规则重放；已知 ID 的新续接被拒绝。在途请求不强制终止。普通 `store=false` 或协议转换响应不提供原生删除，后台临时结果可在本地归属有效期内删除。当前通过本地协议及 Docker 数据库验证，真实供应商删除联调仍待完成。
 
-`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、内置图片、文件搜索和代码执行等其他托管工具仍待对应隔离和计费实现，当前明确拒绝；OpenAI/Grok 托管网页搜索见下文。
+`previous_response_id` 绑定到原客户端 Key、分组、上游账号及上游凭证/地址，Redis 保存 30 天的关联元数据；缺失、到期或账号停用/轮换后拒绝续接，不切换到另一账号。`store=false` 不建立关联；同幂等键的已完成响应可直接重放。当前只支持通过该网关创建的响应续接。conversation、文件搜索和代码执行等其他托管工具仍待对应隔离和计费实现，当前明确拒绝；OpenAI/Grok 托管网页搜索见下文。
 
 原生 Responses 的 `input` 支持 `item_reference`，`type` 可省略或为 null，且不要求 `previous_response_id`，字段定义见 [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。只接受此客户端 Key/分组已通过网关收到的成功或 incomplete 响应输出条目；多个条目及可选 previous response 必须绑定同一上游账号和来源。未知/跨 Key/到期引用返回 404，混合来源返回 400，来源轮换或原账号不可调度拒绝派发；不会转成 Chat/Messages/Gemini 请求。
 
@@ -232,6 +232,12 @@ OpenAI 接受 search_context_size、近似 user_location，以及正式工具的
 托管搜索按实际完成的 web_search_call/x_search_call 计数，事件与最终 output 去重；客户端同名函数不算搜索。OpenAI 仅使用原生 web_search_call，Grok 另接受其 server_side_tool_usage_details 累计计数。费用为原模型 token 费用加 `调用数 × search_price_per_1k / 1000`，沿用该字段固定默认值 5 USD/千次和用户倍率；这是兼容计费基线，不是原厂实时报价，管理员应按内部计费政策配置。`web_search_price_per_call` 仍只用于 alpha 独立搜索。搜索费用进入 total_cost/actual_cost 及账号费用，不伪装为 token；原 schema 无单独搜索次数列。
 
 断流已知搜索消费仍结算，不以缺少 token usage 宣称完整成功；后台结果按原价快照一次结算，重复查询或恢复不再次调用或扣费。共享 HTTP/WS 模拟、Docker PostgreSQL/Redis 验证覆盖两平台和 composite 的调用、参数保留、拒绝错误平台/转换、流式去重、免费搜索、SQL 故障及重启恢复；尚未使用真实 OpenAI/Grok 搜索凭证联调。
+
+原生 Responses 支持 OpenAI API Key 的 `image_generation` 工具，覆盖 JSON、SSE、WebSocket 和后台模式；composite 必须解析到 OpenAI。分组须开启 `allow_image_generation`，账号须使用 Responses 协议。支持生成/编辑、模型、尺寸、质量、背景、格式、压缩、部分图片和 URL/data URL 蒙版选项；同一请求最多声明一个图片工具，`additional_tools` 同样校验。协议参考 [OpenAI 图片工具](https://developers.openai.com/api/docs/guides/tools-image-generation)，具体模型和选项可用性由上游决定。文件 ID 蒙版和图片输入目前拒绝，使用 URL 或 data URL。
+
+计量只计算 `image_generation_call` 的完整 base64 结果，部分预览不另计张数；事件与最终输出按 ID 去重，无 ID 使用内容摘要。返回尺寸优先、请求尺寸次之，缺省 2K；多尺寸结果沿用最高档计价，并保存 `image_output_size`、`image_size_breakdown`。明确 token 价卡使用真实 token；否则使用现有分组图片价格、渠道按张价及固定兼容回落价，图片独立倍率仍生效。默认计费模型来自图片工具，省略时沿用兼容值 `gpt-image-2`，这不改变上游默认模型；渠道计价来源覆盖规则保持。未生成图片时按原文本模型计费。混合网页搜索按自身分组倍率另加费用，不改变图片倍率。
+
+图片工具的终态 JSON/SSE 在结算后发布，断流已知按张消费仍结算；缺少 token usage 不宣称完整成功，显式 token 价卡缺 usage 不以零费结算。后台按原价快照恢复，重复查询和恢复不重复扣费。续接需重新声明图片工具，以重新检查权限和价格；带 ID 的图片历史与 `item_reference` 一样核对当前 Key/分组归属。输入仍限 4 MiB，图片事件/JSON 结果限 16 MiB，异步结果沿用加密 Redis 持久存储。仅做本地协议和数据库验证，真实图片供应商联调待完成。
 
 管理员通过 `/api/v1/admin/settings/web-search-emulation` 的 GET/PUT 管理搜索模拟，`/test` 接受 `query`，`/reset-usage` 接受 `provider_type=brave|tavily`。配置包含 `enabled` 和 `providers`；每个提供方保留 `type`、`api_key`、`quota_limit`、`subscribed_at`、`proxy_id`、`expires_at`。PUT 替换配置，空 Key 保留同类型旧值，移除提供方可删除凭证；响应仅返回 `api_key_configured`，不会返回 Key。`quota_used` 为只读，未知字段拒绝，修改有管理审计。配置沿用原 settings 键，无新表。
 
