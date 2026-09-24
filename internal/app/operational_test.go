@@ -184,6 +184,24 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 		a.Handler().ServeHTTP(w, r)
 		return w
 	}
+	// Removed convenience endpoints may match a resource wildcard. Even an
+	// authenticated administrator must reach ID rejection, never those products.
+	for _, route := range []struct{ method, path string }{
+		{"GET", "/api/v1/admin/groups/live-capability"},
+		{"PUT", "/api/v1/admin/groups/sort-order"},
+		{"GET", "/api/v1/admin/accounts/data"},
+		{"GET", "/api/v1/admin/proxies/data"},
+	} {
+		for _, actor := range []struct {
+			token string
+			code  int
+		}{{admin, 400}, {ordinary, 403}, {"", 401}} {
+			w := call(route.method, route.path, actor.token, map[string]any{})
+			if w.Code != actor.code || actor.token == admin && !bytes.Contains(w.Body.Bytes(), []byte("invalid id")) {
+				t.Fatalf("excluded route %s %s: %d %s", route.method, route.path, w.Code, w.Body.String())
+			}
+		}
+	}
 	data := func(method, path, token string, body any) json.RawMessage {
 		t.Helper()
 		w := call(method, path, token, body)
