@@ -391,25 +391,33 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, local := range []bool{false, true} {
-		t.Run(fmt.Sprintf("native-tools-local-%v", local), func(t *testing.T) { testNativeResponseTools(t, a, admin, local) })
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview"} {
+		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
 
 // Shared native transports, identity, and recovery assertions apply to both
 // server tool discovery and client-owned execution tools.
-func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
+func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	t.Helper()
 	defer pauseTestWorkers(a)()
 	ctx := context.Background()
-	email := fmt.Sprintf("native-tools-%v@example.test", local)
-	name := fmt.Sprintf("Native tools local=%v", local)
+	email := "native-tools-" + kind + "@example.test"
+	name := "Native tools " + kind
 	ip := "192.0.2.181:1234"
 	declaration := `[{"type":"tool_search"},{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object"},"defer_loading":true}]}]`
 	output, history, marker, toolMarker := serverSearchHistory, serverSearchHistory, `"execution":"server"`, `"defer_loading":true`
-	if local {
+	if kind == "local" {
 		declaration, output, history, marker, toolMarker = nativeLocalTools, nativeLocalCalls, nativeLocalHistory, `"type":"shell_call"`, `"type":"local"`
 		ip = "192.0.2.182:1234"
+	}
+	if kind == "computer" || kind == "computer_use_preview" {
+		declaration, output, history, marker, toolMarker = `[{"type":"computer"}]`, nativeComputerCalls, nativeComputerHistory, `"pending_safety_checks"`, `"type":"computer"`
+		ip = "192.0.2.183:1234"
+		if kind == "computer_use_preview" {
+			declaration, output, toolMarker = nativeComputerPreview, nativeComputerLegacyCall, `"environment":"browser"`
+			ip = "192.0.2.184:1234"
+		}
 	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
@@ -510,6 +518,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), marker) || !strings.Contains(string(received.Load().(map[string]json.RawMessage)["tools"]), toolMarker) {
 		t.Fatal("native hosted search", w.Code, w.Body.String())
 	}
+	var initial struct{ Output json.RawMessage }
+	if json.Unmarshal(w.Body.Bytes(), &initial) != nil || string(initial.Output) != output {
+		t.Fatal("native tool output changed", string(initial.Output))
+	}
 	check(1)
 	for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
 		if replay := call("POST", path, key, body, "hosted-search-json"); replay.Body.String() != w.Body.String() || calls.Load() != 1 {
@@ -524,6 +536,9 @@ func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
 		t.Fatal("foreign search continuation", w.Code)
 	}
 	body["input"], body["stream"] = json.RawMessage(history), true
+	if kind != "search" {
+		delete(body, "tools") // Full native history alone must preserve platform admission.
+	}
 	w = call("POST", "/responses", key, body, "")
 	if !strings.Contains(w.Body.String(), "response.completed") || string(received.Load().(map[string]json.RawMessage)["input"]) != history {
 		t.Fatal("hosted history or SSE lost", w.Code, w.Body.String())
@@ -532,6 +547,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
 	delete(body, "previous_response_id")
 	delete(body, "stream")
 	body["input"] = "continue"
+	body["tools"] = json.RawMessage(declaration)
 	// Both WebSocket and background execution retain native semantics and pricing.
 	server := httptest.NewServer(a.Handler())
 	defer server.Close()
@@ -554,7 +570,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin string, local bool) {
 	delete(body, "type")
 	check(3)
 	body["background"], body["store"] = true, true
-	if !local {
+	if kind == "search" {
 		body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
 	}
 	w = call("POST", "/responses", key, body, "hosted-search-background")

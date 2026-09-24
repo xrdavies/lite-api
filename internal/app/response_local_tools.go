@@ -3,12 +3,12 @@ package app
 import "encoding/json"
 
 func responseLocalTool(kind string) bool {
-	return kind == "apply_patch" || kind == "local_shell" || kind == "shell"
+	return kind == "apply_patch" || kind == "local_shell" || kind == "shell" || kind == "computer" || kind == "computer_use_preview"
 }
 
 func responseLocalItem(kind string) bool {
 	switch kind {
-	case "apply_patch_call", "apply_patch_call_output", "local_shell_call", "local_shell_call_output", "shell_call", "shell_call_output":
+	case "apply_patch_call", "apply_patch_call_output", "local_shell_call", "local_shell_call_output", "shell_call", "shell_call_output", "computer_call", "computer_call_output":
 		return true
 	}
 	return false
@@ -47,6 +47,9 @@ func validateLocalEnvironment(raw json.RawMessage) error {
 
 func validateResponseLocalTool(tool map[string]json.RawMessage) error {
 	kind := credentialString(tool, "type")
+	if kind == "computer" || kind == "computer_use_preview" {
+		return validateComputerTool(tool)
+	}
 	if kind == "shell" {
 		if err := validateLocalEnvironment(tool["environment"]); err != nil {
 			return err
@@ -119,6 +122,8 @@ func validateResponseLocalItem(item map[string]json.RawMessage) error {
 	var object map[string]json.RawMessage
 	var text *string
 	switch kind {
+	case "computer_call", "computer_call_output":
+		return validateComputerItem(item)
 	case "apply_patch_call":
 		if json.Unmarshal(item["operation"], &object) != nil || object == nil || credentialString(object, "path") == "" {
 			return bad("invalid patch operation")

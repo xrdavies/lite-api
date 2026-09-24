@@ -213,6 +213,10 @@ OpenAI 类型的原生 Responses 账号支持客户端执行的 `apply_patch`、
 
 这些工具支持 HTTP JSON/SSE、WebSocket、后台响应和指向 OpenAI 的 composite 路由，复用模型 token 计费、当前 Key 续接和故障恢复；不转换为 Chat/Messages/Gemini 函数。`allowed_callers` 仅允许 direct；托管容器、programmatic 调用和通过工具发现注入这些专用工具当前拒绝。输入限 4 MiB；本地 skills 最多 128 项，客户端自行执行和控制权限。原生流可在扣费前返回工具增量或调用项，客户端须等 `response.completed` / `response.incomplete` 后执行；终态等待结算，失败不发布成功标记。当前为本地协议及数据库验证，真实供应商能力取决于具体模型和账号。
 
+同一原生链路支持 `{"type":"computer"}` 和旧版 `computer_use_preview`（需提供正数 display_width/display_height 及 windows/mac/linux/ubuntu/browser 环境）。`computer_call` 的单个 `action` 或批量 `actions`、`pending_safety_checks` 原样返回，客户端提交 `computer_call_output` 截图和自行确认的 `acknowledged_safety_checks`；网关不生成确认、不操作浏览器或桌面。截图接受 HTTP(S) URL 或 PNG/JPEG/GIF/WebP base64 data URL，可带 detail=auto/low/high/original；不读取本地路径、不拉取截图，未建立归属的上游 file_id 拒绝。协议依据 [OpenAI Computer use](https://developers.openai.com/api/docs/guides/tools-computer-use)。
+
+Computer 声明及完整调用/结果历史均要求 OpenAI 原生 Responses 账号，支持三前缀、JSON/SSE、WebSocket、后台恢复及 composite；历史单独提交也不能绕过平台限制。计费沿用模型 token 用量，不收本地执行或网页搜索附加费；模型与中转是否支持该工具需实际验证。请求仍限 4 MiB，客户端应等待已结算终态再执行动作，并自行落实上游返回的安全检查与操作授权。文件搜索、托管代码执行、MCP 及共享文件生命周期不因 Computer 接入而启用。
+
 条目元数据与响应关联在 Redis 原子保存 30 天，不保存原生内容；最多 1024 个引用/输出项。HTTP `store=false` 不保存条目，WebSocket `store=false` 仅在原连接最近 1024 个响应内使用；断线后须重发完整内容。来自旧版本且未记录条目 ID 的响应仍可 previous_response 续接，但无法凭空恢复其条目归属。幂等重放不重新派发或计费，token 计数引用只做权限和来源校验。
 
 HTTP Responses 支持 `background=true`，只调度原生 Responses API Key 账号；创建复用模型/额度/路由/价格预检，返回上游 response ID。三个前缀均提供 `GET /responses/{id}` 查询和 `POST /responses/{id}/cancel` 取消，只允许创建时的 Key/分组访问。查询和取消无需剩余余额，但仍检查 Key 状态、IP、RPM、用户与账号并发。凭证/地址/协议变更后暂停轮询，恢复原来源后继续，不换账号或重新生成。
