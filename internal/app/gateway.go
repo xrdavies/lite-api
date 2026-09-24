@@ -400,7 +400,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "responses" && u.protocol() == "anthropic" && chatAnthropicPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
-		if len(in.ItemReferences) > 0 {
+		if len(in.ItemReferences) > 0 || in.Background {
 			// Remote item references can only be resolved by their native Responses
 			// account after checking Key-scoped item ownership. Never send them through
 			// a protocol conversion that cannot prove the referenced item identity.
@@ -550,6 +550,8 @@ func (a *App) gatewayRoutes() {
 	}
 	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
 		a.mux.HandleFunc("GET "+path, a.responsesWebSocket)
+		a.mux.HandleFunc("GET "+path+"/{response_id}", a.backgroundResponseLookup)
+		a.mux.HandleFunc("POST "+path+"/{response_id}/cancel", a.backgroundResponseLookup)
 		for _, suffix := range []string{"", "/{action...}"} {
 			a.mux.HandleFunc("POST "+path+suffix, func(w http.ResponseWriter, r *http.Request) { a.textGateway(w, r, "responses") })
 		}
@@ -715,8 +717,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if writer != nil {
 		w = writer
-		defer finish()
 	}
+	finishRequest := true
+	defer func() {
+		if finish != nil && finishRequest {
+			finish()
+		}
+	}()
 	g, err = a.gatewayAuth(r, true)
 	if err != nil {
 		fail(err)
@@ -1187,6 +1194,20 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			return
 		}
 		upstreamStarted = time.Now()
+		if in.Background {
+			defer selected.Release()
+			finishRequest, err = a.submitBackgroundResponse(w, r, g, selected, in, upstreamBody, id, digest(string(body)), effort, originalEffort, started)
+			if err != nil {
+				if w.Header().Get("Content-Type") == "text/event-stream" {
+					a.recordGatewayError(id, g, selected, r, err, started)
+				} else {
+					fail(err)
+				}
+			} else if writer != nil {
+				writer.succeeded = true
+			}
+			return
+		}
 		if emulation != nil {
 			var result *webSearchResponse
 			result, err = a.runWebSearch(ctx, *emulation, webSearchQuery(request), selected.Account.ProxyID, false)

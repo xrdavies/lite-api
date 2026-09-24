@@ -204,6 +204,7 @@ func (a *App) startWorkers() {
 	a.startImageTasks(ctx)
 	a.startBatchImages(ctx)
 	a.startVideoTasks(ctx)
+	a.startBackgroundResponses(ctx)
 	a.startBalanceChecks(ctx)
 	a.startBillingProbes(ctx)
 	a.startProxyExpiry(ctx)

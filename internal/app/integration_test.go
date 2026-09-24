@@ -253,6 +253,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testImageTasks(t, a, admin)
 	testBatchImages(t, a, admin)
 	testResponses(t, a, admin)
+	testBackgroundResponses(t, a, admin)
 	testModelDiscovery(t, a, admin)
 	testModelPlaza(t, a, admin)
 	testReferencePricing(t, a, admin)

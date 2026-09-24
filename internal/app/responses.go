@@ -38,13 +38,21 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			if json.Unmarshal(raw, &enabled) != nil {
 				return in, bad("invalid " + field)
 			}
-			if field == "background" && enabled {
-				return in, bad("background Responses require persistent task support")
+			if field == "background" {
+				in.Background = enabled
 			}
 			if field == "store" {
 				in.Store = enabled
 			}
 		}
+	}
+	if in.Background {
+		if in.Action != "" || socketTurn(r.Context()) != nil {
+			return in, bad("background Responses require the HTTP create endpoint")
+		}
+		// Background retention is opt-in; the provider only keeps omitted/false
+		// store responses for its short polling window.
+		in.Store = string(body["store"]) == "true"
 	}
 	if raw := body["conversation"]; raw != nil && string(raw) != "null" {
 		return in, bad("use previous_response_id for scoped conversations")
@@ -134,6 +142,9 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	}
 	if in.HostedSearch && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted search requires a normal Responses request")
+	}
+	if in.Background && in.NativeCompaction {
+		return in, bad("native compaction cannot run in the background")
 	}
 	return in, nil
 }

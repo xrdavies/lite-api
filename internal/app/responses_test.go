@@ -276,7 +276,7 @@ func testResponses(t *testing.T, a *App, admin string) {
 			t.Fatal("additional tools bypassed admission", w.Code, calls.Load())
 		}
 	}
-	for _, field := range []string{"background", "conversation", "tools", "previous_response_id"} {
+	for _, field := range []string{"conversation", "tools", "previous_response_id"} {
 		saved, exists := body[field]
 		body[field] = map[string]any{"background": true, "conversation": "conv_foreign", "input": []any{map[string]any{"type": "item_reference", "id": "msg_foreign"}}, "tools": []any{map[string]any{"type": "web_search"}}, "previous_response_id": "../escape"}[field]
 		if w := call("/responses", key, body, ""); w.Code != 400 {

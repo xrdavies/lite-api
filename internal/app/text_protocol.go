@@ -18,6 +18,7 @@ type textRequest struct {
 	Protocol, Scope, Model, Effort, Tier, Action string
 	Previous                                     string
 	Store                                        bool
+	Background                                   bool
 	NativeCompaction                             bool
 	ItemReferences                               []string
 	Stream, CountOnly                            bool

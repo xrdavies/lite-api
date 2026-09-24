@@ -90,6 +90,8 @@ type App struct {
 	streamIdle        time.Duration
 	imageStreamIdle   time.Duration
 	geminiQuotaPolicy geminiQuotaPolicy
+
+	responseWorkerDone chan struct{}
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -196,6 +198,7 @@ func (a *App) Close() {
 	<-a.imageWorkerDone
 	<-a.batchWorkerDone
 	<-a.videoWorkerDone
+	<-a.responseWorkerDone
 	<-a.balanceWorkerDone
 	<-a.billingWorkerDone
 	<-a.proxyWorkerDone
