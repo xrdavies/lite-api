@@ -30,6 +30,9 @@ type textRequest struct {
 	HostedToolSearch                             bool
 	NativeClientTools                            bool
 	NativeMCP                                    bool
+	NativeCode                                   bool
+	ContainerReferences                          []string
+	ResponseContainers                           []string
 	ResponseImage                                *responseImageConfig
 }
 
@@ -496,6 +499,7 @@ type textObservation struct {
 	Protocol, Model, Tier string
 	ResponseID, Action    string
 	ResponseItems         []string
+	ResponseContainers    []string
 	Usage                 priceUsage
 	HasUsage, CountOnly   bool
 	started, stopped      bool

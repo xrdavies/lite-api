@@ -391,7 +391,7 @@ func TestHostedToolSearch(t *testing.T) {
 }
 
 func testHostedToolSearch(t *testing.T, a *App, admin string) {
-	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp"} {
+	for _, kind := range []string{"search", "local", "computer", "computer_use_preview", "mcp", "code"} {
 		t.Run("native-tools-"+kind, func(t *testing.T) { testNativeResponseTools(t, a, admin, kind) })
 	}
 }
@@ -423,6 +423,10 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		declaration, output, history, marker, toolMarker = nativeMCPTools, nativeMCPCalls, nativeMCPHistory, `"type":"mcp_approval_request"`, `"require_approval":"always"`
 		ip = "192.0.2.185:1234"
 	}
+	if kind == "code" {
+		declaration, output, history, marker, toolMarker = nativeCodeTools, nativeCodeCalls, nativeCodeCalls, `"type":"code_interpreter_call"`, `"memory_limit":"4g"`
+		ip = "192.0.2.186:1234"
+	}
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
 		raw, _ := json.Marshal(body)
 		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
@@ -453,6 +457,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	key, kid := k["key"].(string), id(k)
 	var calls atomic.Int64
 	var reject atomic.Bool
+	var textOnly atomic.Bool
 	var invalidMCPEnvelope atomic.Bool
 	var pending, received atomic.Value
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +498,12 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			return
 		}
 		response := fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":%s,%s}`, n, output, responseUsage)
+		if kind == "code" && conn != nil {
+			response = strings.ReplaceAll(strings.ReplaceAll(response, "ci_team", "ci_socket"), "cntr_team", "cntr_socket")
+		}
+		if textOnly.Load() {
+			response = fmt.Sprintf(`{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":[{"id":"msg_code_%d","type":"message","role":"assistant","content":[{"type":"output_text","text":"4","annotations":[]}]}],%s}`, n, n, responseUsage)
+		}
 		if kind == "mcp" {
 			response = strings.TrimSuffix(response, "}") + `,"tools":` + declaration + `}`
 			if tools := body["tools"]; tools != nil && !strings.Contains(string(tools), "client-mcp-secret") {
@@ -526,6 +537,18 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		if conn != nil {
 			if err := conn.Write(r.Context(), websocket.MessageText, []byte(event)); err != nil {
 				t.Error(err)
+			}
+			if kind == "code" {
+				_, next, err := conn.Read(r.Context())
+				if err != nil || !bytes.Contains(next, []byte(`"container":"cntr_socket"`)) || !bytes.Contains(next, []byte(`"store":false`)) {
+					t.Error("socket container continuation", err, string(next))
+					return
+				}
+				n := calls.Add(1)
+				plain := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_hosted_tool_%d","object":"response","model":"native-tool","status":"completed","output":[],%s}}`, n, responseUsage)
+				if err := conn.Write(r.Context(), websocket.MessageText, []byte(plain)); err != nil {
+					t.Error(err)
+				}
 			}
 			_, _, _ = conn.Read(r.Context())
 		} else {
@@ -569,6 +592,29 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	if w = call("POST", "/responses", other, body, ""); w.Code != 404 || calls.Load() != 1 {
 		t.Fatal("foreign search continuation", w.Code)
 	}
+	if kind == "code" {
+		for _, request := range []map[string]any{
+			{"model": "tool-model", "input": "calculate", "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_team"}]`)},
+			{"model": "tool-model", "input": "calculate", "previous_response_id": first.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_foreign"}]`)},
+		} {
+			if got := call("POST", "/responses", key, request, ""); got.Code != 404 || calls.Load() != 1 {
+				t.Fatal("unowned container dispatched", got.Code, got.Body.String())
+			}
+		}
+		implicit := map[string]any{"model": "tool-model", "previous_response_id": first.ID, "input": []any{map[string]any{"role": "user", "content": []any{map[string]string{"type": "input_file", "file_id": "foreign"}}}}}
+		if got := call("POST", "/responses", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+			t.Fatal("implicit code file access bypass", got.Code, got.Body.String())
+		}
+		implicit["input"] = "continue"
+		if got := call("POST", "/responses/compact", key, implicit, ""); got.Code != 400 || calls.Load() != 1 {
+			t.Fatal("implicit code compaction bypass", got.Code)
+		}
+		foreign := map[string]any{"model": "tool-model", "input": json.RawMessage(history)}
+		if got := call("POST", "/responses", other, foreign, ""); got.Code != 404 || calls.Load() != 1 {
+			t.Fatal("foreign full code history dispatched", got.Code)
+		}
+		delete(body, "previous_response_id") // Owned item IDs alone must select the original source.
+	}
 	body["input"], body["stream"] = json.RawMessage(history), true
 	if kind == "mcp" {
 		delete(body, "previous_response_id")
@@ -606,21 +652,53 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal(err)
 	}
 	body["type"] = "response.create"
+	if kind == "code" {
+		body["store"] = false
+	}
 	raw, _ := json.Marshal(body)
 	if err = conn.Write(wsCtx, websocket.MessageText, raw); err != nil {
 		t.Fatal(err)
 	}
 	_, raw, err = conn.Read(wsCtx)
-	conn.CloseNow()
 	if err != nil || !bytes.Contains(raw, []byte(`"response.completed"`)) || !bytes.Contains(raw, []byte(marker)) {
+		conn.CloseNow()
 		t.Fatal("hosted search WS", string(raw), err)
 	}
 	if kind == "mcp" && bytes.Contains(raw, []byte("client-mcp-secret")) {
+		conn.CloseNow()
 		t.Fatal("MCP headers exposed over WS")
 	}
+	codeExtra := 0
+	if kind == "code" {
+		var event struct{ Response struct{ ID string } }
+		_ = json.Unmarshal(raw, &event)
+		request := map[string]any{"type": "response.create", "model": "tool-model", "input": "continue", "store": false, "previous_response_id": event.Response.ID, "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_socket"}]`)}
+		next, _ := json.Marshal(request)
+		if err := conn.Write(wsCtx, websocket.MessageText, next); err != nil {
+			conn.CloseNow()
+			t.Fatal(err)
+		}
+		_, next, err = conn.Read(wsCtx)
+		if err != nil || !bytes.Contains(next, []byte(`"response.completed"`)) {
+			conn.CloseNow()
+			t.Fatal("socket scoped container reuse", string(next), err)
+		}
+		delete(request, "type")
+		if got := call("POST", "/responses", key, request, ""); got.Code != 404 {
+			conn.CloseNow()
+			t.Fatal("store=false container escaped socket context", got.Code)
+		}
+		codeExtra = 1
+	}
+	conn.CloseNow()
 	delete(body, "type")
-	check(3)
+	check(3 + codeExtra)
 	body["background"], body["store"] = true, true
+	if kind == "code" {
+		body["previous_response_id"] = first.ID
+		delete(body, "tools")
+		textOnly.Store(true) // A plain reply must retain its inherited container context.
+	}
 	if kind == "search" {
 		body["tools"] = json.RawMessage(`[{"type":"tool_search","execution":"server"}]`)
 	}
@@ -654,7 +732,13 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			t.Fatal("search recovery", err)
 		}
 	}
-	check(4)
+	check(4 + codeExtra)
+	if kind == "code" {
+		binding, err := fresh.previousResponse(ctx, identity, accepted.ID)
+		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
+			t.Fatal("code ownership lost across background recovery", binding, err)
+		}
+	}
 	if kind == "mcp" {
 		if bytes.Contains(task.Result, []byte("client-mcp-secret")) {
 			t.Fatal("MCP header persisted in recovered background result")
@@ -672,6 +756,11 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 		t.Fatal("search wallet/key drift", err)
 	}
 	delete(body, "background")
+	if kind == "code" {
+		delete(body, "previous_response_id")
+		body["tools"] = json.RawMessage(declaration)
+		textOnly.Store(false)
+	}
 	// Composite admission uses the resolved provider, not the public model name.
 	cgid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Composite " + name, "platform": "composite", "model_pricing": prices}))
 	cp := fmt.Sprintf("/api/v1/admin/groups/%d", cgid)
@@ -680,6 +769,40 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	ckey := must("POST", "/api/v1/keys", user, map[string]any{"name": "composite-search", "group_id": cgid})["key"].(string)
 	if w = call("POST", "/responses", ckey, body, ""); w.Code != 200 {
 		t.Fatal("composite hosted search", w.Code, w.Body.String())
+	}
+	if kind == "code" {
+		request := map[string]any{"model": "tool-model", "previous_response_id": accepted.ID, "input": "reuse", "tools": json.RawMessage(`[{"type":"code_interpreter","container":"cntr_team"}]`)}
+		textOnly.Store(true)
+		got := call("POST", "/responses", key, request, "")
+		textOnly.Store(false)
+		if got.Code != 200 {
+			t.Fatal("owned container reuse after plain background reply", got.Code, got.Body.String())
+		}
+		var continued struct{ ID string }
+		_ = json.Unmarshal(got.Body.Bytes(), &continued)
+		binding, err := fresh.previousResponse(ctx, identity, continued.ID)
+		if err != nil || !binding.CodeTool || len(binding.Containers) != 1 || binding.Containers[0] != "cntr_team" {
+			t.Fatal("code context lost across plain HTTP reply", binding, err)
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
+		before := calls.Load()
+		if got := call("POST", "/responses", key, request, ""); got.Code != 503 || calls.Load() != before {
+			t.Fatal("code context switched credentials", got.Code, got.Body.String())
+		}
+		must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_key": "hosted-search-provider"}})
+		second := must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Second code provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "hosted-search-provider", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"tool-model": "native-tool"}}})
+		reject.Store(true)
+		got = call("POST", "/responses", key, body, "code-ambiguous")
+		if got.Code != 502 || calls.Load() != before+1 {
+			t.Fatal("code execution retried after ambiguous rejection", got.Code, calls.Load()-before)
+		}
+		_ = call("POST", "/responses", key, body, "code-ambiguous")
+		if calls.Load() != before+1 {
+			t.Fatal("code idempotency repeated rejected execution")
+		}
+		reject.Store(false)
+		must("PUT", "/api/v1/admin/accounts/"+fmt.Sprint(id(second)), admin, map[string]any{"status": "inactive"})
+		must("POST", ap+"/recover-state", admin, map[string]any{})
 	}
 	if kind == "mcp" {
 		for _, stream := range []bool{false, true} {

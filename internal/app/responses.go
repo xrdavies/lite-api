@@ -81,6 +81,18 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 					return in, bad("supply full input items or a scoped previous_response_id")
 				}
 				kind := credentialString(item, "type")
+				if kind == "code_interpreter_call" {
+					id, container, err := responseCodeItem(item)
+					if err != nil {
+						return in, err
+					}
+					if len(in.ItemReferences) >= 1024 || len(in.ContainerReferences) >= 1024 {
+						return in, bad("too many code interpreter references")
+					}
+					in.ItemReferences = append(in.ItemReferences, id)
+					in.ContainerReferences = append(in.ContainerReferences, container)
+					in.NativeCode = true
+				}
 				if responseMCPItem(kind) {
 					ref, err := validateResponseMCPItem(item)
 					if err != nil {
@@ -162,6 +174,20 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		return in, err
 	}
 	for _, tool := range tools {
+		if credentialString(tool, "type") == "code_interpreter" {
+			container, err := responseCodeTool(tool)
+			if err != nil {
+				return in, err
+			}
+			if container != "" {
+				if len(in.ContainerReferences) >= 1024 {
+					return in, bad("too many code interpreter references")
+				}
+				in.ContainerReferences = append(in.ContainerReferences, container)
+			}
+			in.NativeCode = true
+			continue
+		}
 		if credentialString(tool, "type") == "mcp" {
 			if err := validateResponseMCPTool(tool); err != nil {
 				return in, err
@@ -201,7 +227,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeMCP) && (in.Action != "" || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeMCP || in.NativeCode) && (in.Action != "" || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	if in.ResponseImage != nil {
@@ -211,14 +237,18 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			var content []map[string]json.RawMessage
 			_ = json.Unmarshal(item["content"], &content)
 			for _, part := range content {
-				if credentialString(part, "type") == "input_image" && part["file_id"] != nil && string(part["file_id"]) != "null" {
-					return in, bad("image inputs require URLs or data URLs; unscoped file IDs are not supported")
+				if part["file_id"] != nil && string(part["file_id"]) != "null" {
+					return in, bad("media inputs require inline content or URLs; unscoped file IDs are not supported")
 				}
 			}
 		}
 	}
 	if in.Background && in.NativeCompaction {
 		return in, bad("native compaction cannot run in the background")
+	}
+	// Container ownership is checked after resolving response/item affinity.
+	if err := validateResponseContainers(textRequest{NativeCode: in.NativeCode}, body, nil); err != nil {
+		return in, err
 	}
 	return in, nil
 }
@@ -361,6 +391,11 @@ func (o *textObservation) observeResponses(data []byte) error {
 			return &apiError{502, "upstream response output is invalid or exceeds limit"}
 		}
 		o.ResponseItems = nil
+		var err error
+		o.ResponseContainers, err = responseContainerIDs(items)
+		if err != nil {
+			return err
+		}
 		for _, item := range items {
 			if id := credentialString(item, "id"); id != "" {
 				if !validResponseID(id) {
@@ -376,12 +411,14 @@ func (o *textObservation) observeResponses(data []byte) error {
 // Native responses bind only metadata; protocol conversions include encrypted history.
 // Missing/expired bindings refuse continuation across tenants or upstream sources.
 type responseBinding struct {
-	AccountID int64
-	Target    string
-	ImageTool bool     `json:",omitempty"`
-	MCPTool   bool     `json:",omitempty"`
-	History   string   `json:",omitempty"`
-	Items     []string `json:",omitempty"`
+	AccountID  int64
+	Target     string
+	ImageTool  bool     `json:",omitempty"`
+	MCPTool    bool     `json:",omitempty"`
+	CodeTool   bool     `json:",omitempty"`
+	Containers []string `json:",omitempty"`
+	History    string   `json:",omitempty"`
+	Items      []string `json:",omitempty"`
 }
 
 func responseBindingKey(g *gatewayIdentity, id string) string {
@@ -423,7 +460,7 @@ func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id s
 	for _, item := range binding.Items {
 		keys = append(keys, responseItemKey(g, item))
 	}
-	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool})
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target, ImageTool: binding.ImageTool, MCPTool: binding.MCPTool, CodeTool: binding.CodeTool, Containers: binding.Containers})
 	for _, key := range keys {
 		keys = append(keys, key+":delete")
 	}
@@ -513,7 +550,15 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 		}
 		imageTool := source.ImageTool || binding != nil && binding.ImageTool
 		mcpTool := source.MCPTool || binding != nil && binding.MCPTool
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool}
+		codeTool := source.CodeTool || binding != nil && binding.CodeTool
+		containers := source.Containers
+		if binding != nil {
+			containers, err = mergeResponseContainers(binding.Containers, containers)
+			if err != nil {
+				return nil, err
+			}
+		}
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers}
 	}
 	return binding, nil
 }

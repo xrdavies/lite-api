@@ -26,7 +26,9 @@ type backgroundResponse struct {
 	Effort, Tier    string
 	RequestedEffort *string
 	Items           []string
-	MCPTool         bool `json:",omitempty"`
+	MCPTool         bool     `json:",omitempty"`
+	CodeTool        bool     `json:",omitempty"`
+	Containers      []string `json:",omitempty"`
 }
 
 func backgroundKey(id string) string { return "gateway:background:task:" + id }
@@ -122,6 +124,8 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 	}
 	t := &backgroundResponse{videoTask: videoTask{ID: id, Target: responseTarget(s.Account), Stage: "submitting", Identity: *g, Selection: *s, Requested: in.Model, Payload: payload, IP: clientIP(r), UserAgent: truncate(r.UserAgent(), 512), Inbound: r.URL.Path, Created: started}, Store: in.Store, Stream: in.Stream, Effort: effort, Tier: in.Tier, RequestedEffort: requestedEffort}
 	t.MCPTool = in.NativeMCP
+	t.CodeTool = in.NativeCode
+	t.Containers = in.ResponseContainers
 	account := *s.Account
 	account.Credentials = nil
 	account.Extra = map[string]json.RawMessage{}
@@ -261,6 +265,11 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 	}
 	t.Result, _ = json.Marshal(result)
 	t.Items = observation.ResponseItems
+	t.Containers, err = mergeResponseContainers(t.Containers, observation.ResponseContainers)
+	if err != nil {
+		return err
+	}
+	t.CodeTool = t.CodeTool || len(t.Containers) > 0
 	if !failed || observation.Usage != (priceUsage{}) {
 		at := time.Now().UTC()
 		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, observation.Model, observation.Tier, t.Effort, observation.Usage, t.Stream, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamID)
@@ -290,7 +299,7 @@ func (a *App) settleBackgroundResponse(ctx context.Context, t *backgroundRespons
 	var result struct{ Status string }
 	_ = json.Unmarshal(t.Result, &result)
 	if t.Store && (result.Status == "completed" || result.Status == "incomplete") {
-		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool}
+		binding := responseBinding{AccountID: t.Selection.Account.ID, Target: t.Target, Items: t.Items, ImageTool: t.Selection.ResponseImage != nil, MCPTool: t.MCPTool, CodeTool: t.CodeTool, Containers: t.Containers}
 		if err := a.storeResponseBinding(ctx, &t.Identity, t.UpstreamID, binding); err != nil {
 			return err
 		}

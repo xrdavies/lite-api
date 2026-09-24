@@ -85,7 +85,7 @@ func (a *App) deleteResponseResource(w http.ResponseWriter, r *http.Request, g *
 			if task.Stage != "terminal" {
 				return conflict("cancel or finish the background response before deleting it")
 			}
-			deletion.Source = responseBinding{AccountID: task.Selection.Account.ID, Target: task.Target, Items: task.Items, MCPTool: task.MCPTool}
+			deletion.Source = responseBinding{AccountID: task.Selection.Account.ID, Target: task.Target, Items: task.Items, MCPTool: task.MCPTool, CodeTool: task.CodeTool, Containers: task.Containers}
 		} else {
 			binding, err := a.previousResponse(ctx, g, id)
 			if err != nil {
