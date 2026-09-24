@@ -292,6 +292,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testStreamTimeout(t, a, admin, otherToken)
 	testAnthropicPolicy(t, a, admin, otherToken)
 	testBillingProbes(t, a, admin, otherToken)
+	testProxyFallback(t, a, admin, otherToken)
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

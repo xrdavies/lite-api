@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -194,7 +193,7 @@ func (a *App) upstreamTransport(ctx context.Context, account *upstreamAccount, r
 	tr.ResponseHeaderTimeout = 30 * time.Second
 	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	if account.ProxyID != nil {
-		proxy, err := a.resolveProxy(ctx, *account.ProxyID, map[int64]bool{})
+		proxy, err := a.resolveProxy(ctx, *account.ProxyID)
 		if err != nil {
 			return nil, err
 		}
@@ -368,50 +367,26 @@ func (u *upstreamAccount) mappedModel(model string) (string, error) {
 	}
 	return "", bad("model is not allowed by this account")
 }
-func (a *App) resolveProxy(ctx context.Context, id int64, seen map[int64]bool) (*url.URL, error) {
-	if seen[id] || len(seen) > 8 {
-		return nil, bad("proxy fallback cycle")
-	}
-	seen[id] = true
-	var protocol, host, status, mode string
-	var username, password sql.NullString
-	var port int
-	var expires sql.NullTime
-	var backup sql.NullInt64
-	err := a.DB.QueryRowContext(ctx, `SELECT protocol,host,port,username,password,status,expires_at,fallback_mode,backup_proxy_id FROM proxies WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&protocol, &host, &port, &username, &password, &status, &expires, &mode, &backup)
-	if err != nil {
+func (a *App) resolveProxy(ctx context.Context, id int64) (*url.URL, error) {
+	p, err := resolveProxyTarget(ctx, a.DB, id, time.Now())
+	if err != nil || p == nil {
 		return nil, err
 	}
-	if status != "active" {
-		return nil, bad("proxy is inactive")
-	}
-	if expires.Valid && time.Now().After(expires.Time) {
-		switch mode {
-		case "direct":
-			return nil, nil
-		case "proxy":
-			if backup.Valid {
-				return a.resolveProxy(ctx, backup.Int64, seen)
-			}
-		}
-		return nil, bad("proxy has expired")
-	}
-	if protocol != "http" && protocol != "https" && protocol != "socks5" && protocol != "socks5h" {
+	if p.Protocol != "http" && p.Protocol != "https" && p.Protocol != "socks5" && p.Protocol != "socks5h" {
 		return nil, bad("unsupported proxy protocol")
 	}
-	// The transport dials the proxy using this pinned IP; HTTPS proxies retain a
-	// hostname for TLS through the guarded DialContext in the caller.
-	addr, err := a.resolveUpstream(ctx, host)
+	// Pin proxy DNS; HTTPS retains its hostname for certificate validation.
+	addr, err := a.resolveUpstream(ctx, p.Host)
 	if err != nil {
 		return nil, err
 	}
-	pinnedHost := addr.String()
-	if protocol == "https" {
-		pinnedHost = host
+	host := addr.String()
+	if p.Protocol == "https" {
+		host = p.Host
 	}
-	u := &url.URL{Scheme: protocol, Host: net.JoinHostPort(pinnedHost, strconv.Itoa(port))}
-	if username.Valid && username.String != "" {
-		u.User = url.UserPassword(username.String, password.String)
+	u := &url.URL{Scheme: p.Protocol, Host: net.JoinHostPort(host, strconv.Itoa(p.Port))}
+	if p.Username.Valid && p.Username.String != "" {
+		u.User = url.UserPassword(p.Username.String, p.Password.String)
 	}
 	return u, nil
 }

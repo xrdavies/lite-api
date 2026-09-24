@@ -64,6 +64,7 @@ type App struct {
 	videoWorkerDone   chan struct{}
 	balanceWorkerDone chan struct{}
 	billingWorkerDone chan struct{}
+	proxyWorkerDone   chan struct{}
 	balancePolicy     balanceCheckPolicy
 	balanceMu         sync.Mutex
 	planMu            sync.Mutex
@@ -185,6 +186,7 @@ func (a *App) Close() {
 	<-a.videoWorkerDone
 	<-a.balanceWorkerDone
 	<-a.billingWorkerDone
+	<-a.proxyWorkerDone
 	a.Redis.Close()
 	a.instanceLock.Close()
 	a.DB.Close()

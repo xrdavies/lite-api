@@ -185,6 +185,11 @@ func (a *App) saveProxy(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if !create {
+		if err = invalidateProxySnapshots(r.Context(), tx, id); err != nil {
+			return err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
@@ -250,7 +255,7 @@ func (a *App) deleteProxy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	var used bool
-	if err = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM accounts WHERE proxy_id=$1 AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM proxies WHERE backup_proxy_id=$1 AND deleted_at IS NULL)`, id).Scan(&used); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM accounts WHERE (proxy_id=$1 OR proxy_fallback_origin_id=$1) AND deleted_at IS NULL) OR EXISTS(SELECT 1 FROM proxies WHERE backup_proxy_id=$1 AND deleted_at IS NULL)`, id).Scan(&used); err != nil {
 		return err
 	}
 	if used {

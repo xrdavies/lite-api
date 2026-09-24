@@ -63,6 +63,10 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 代理支持 HTTP、HTTPS、SOCKS5/SOCKS5h 和到期后的明确备用/直连配置。上游重定向不跟随，TLS 验证不能关闭，公开上游必须使用 HTTPS。内网模型或代理须在部署环境 `UPSTREAM_PRIVATE_CIDRS` 中明确允许目标网段；默认拒绝本机和私网。不要将该配置扩大为任意地址。
 
+代理到期回退同时用于 HTTP 和 WebSocket。运行时立即沿显式备用链选择有效代理或 direct；无可用路径、循环、链超过九个节点时拒绝派发，人工停用的起始代理不会启用回退。单实例启动时及每分钟扫描最多 100 个到期 active 代理，在同一事务中标记 `expired`、移动账号的 `proxy_id` 并将首次原代理保存在 `proxy_fallback_origin_id`；多次回退保留首次来源，无解时保留原绑定并阻止连接。事务失败整体回滚，下次扫描继续。
+
+管理员先续期并激活原代理，再调用 `POST /api/v1/admin/accounts/{id}/revert-proxy-fallback` 还原，成功返回 `{"message":"reverted"}`；续期本身不移动账号。未处于回退状态或原代理不可用返回 409，账号不存在返回 404。手工设置账号 `proxy_id`（包括 0 直连）清除原代理记录；仍被账号当前绑定、原代理记录或备用链引用的代理不能删除。代理编辑、到期处理、账号指派和还原共用事务锁，避免并发续期被旧结果覆盖。代理及其备用链变更会清除受影响账号的倍率/模型快照并更新版本，消费累计和其他 JSON 保持；已通过路由选择的在途请求可以完成，新请求使用当前配置。
+
 独立上游验证无需数据库：设置本地 `UPSTREAM_BASE_URL`、`UPSTREAM_API_KEY`、`UPSTREAM_MODEL` 后执行 `./bin/lite-api upstream-check`。命令发起一次 JSON 和一次 SSE 文本生成，仅输出状态和时延摘要。Go 客户端对指定中转和 `gpt-5.6-luna` 的 JSON/SSE 已实测成功；其他平台当前由协议模拟测试覆盖，不能据此宣称所有原厂模型均已联调。
 
 管理员可通过 `/api/v1/admin/accounts/upstream-billing-probe/settings` 的 GET/PUT 配置倍率探测，默认 `{"enabled":true,"interval_minutes":30}`，间隔接受 5–1440 分钟。账号默认不参与；PUT `/api/v1/admin/accounts/{id}/upstream-billing-probe` 接受 `{"enabled":true}`，POST 同路径立即探测，POST `/api/v1/admin/accounts/upstream-billing-probe/batch` 接受最多 20 个 `account_ids`，去重并分别返回结果。全局开关只控制定时执行，手动探测不受它限制。单实例每分钟扫描到期账号，每轮最多 20 个、最多四个并发，同账号禁止重叠。

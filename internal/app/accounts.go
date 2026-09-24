@@ -204,7 +204,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	}
 	var proxy, expiry, load any
 	if in.ProxyID != nil && *in.ProxyID > 0 {
-		if _, err = a.resolveProxy(r.Context(), *in.ProxyID, map[int64]bool{}); err != nil {
+		if _, err = a.resolveProxy(r.Context(), *in.ProxyID); err != nil {
 			return err
 		}
 		proxy = *in.ProxyID
@@ -299,7 +299,7 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	if in.ProxyID != nil && *in.ProxyID > 0 {
-		if _, err = a.resolveProxy(r.Context(), *in.ProxyID, map[int64]bool{}); err != nil {
+		if _, err = a.resolveProxy(r.Context(), *in.ProxyID); err != nil {
 			return err
 		}
 	}
@@ -339,6 +339,7 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 			proxy = *in.ProxyID
 		}
 		add("proxy_id", proxy)
+		sets = append(sets, "proxy_fallback_origin_id=NULL")
 	}
 	if in.ExpiresAt != nil {
 		var expiry any
@@ -539,6 +540,7 @@ func (a *App) accountState(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) accountRoutes() {
 	a.billingProbeRoutes()
+	a.route("POST /api/v1/admin/accounts/{id}/revert-proxy-fallback", "admin", a.revertProxyFallback)
 	a.route("GET /api/v1/admin/cn-providers/accounts/{id}/balance", "admin", a.accountBalance)
 	a.route("GET /api/v1/admin/accounts", "admin", a.listAccounts)
 	a.route("POST /api/v1/admin/accounts", "admin", a.createAccount)
@@ -560,11 +562,14 @@ func accountListFilter(r *http.Request) (string, []any) {
 }
 
 func validateProxyAssignment(ctx context.Context, tx *sql.Tx, id *int64) error {
-	if id == nil || *id == 0 {
+	if id == nil {
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(720034)"); err != nil {
 		return err
+	}
+	if *id == 0 {
+		return nil
 	}
 	var ok bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM proxies WHERE id=$1 AND deleted_at IS NULL AND status='active')", *id).Scan(&ok); err != nil {

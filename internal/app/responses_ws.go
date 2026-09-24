@@ -243,7 +243,7 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 	s := turn.socket
 	proxyTarget := "direct"
 	if account.ProxyID != nil {
-		proxy, err := a.resolveProxy(ctx, *account.ProxyID, map[int64]bool{})
+		proxy, err := a.resolveProxy(ctx, *account.ProxyID)
 		if err != nil {
 			return nil, err
 		}
