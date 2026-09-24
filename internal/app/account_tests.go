@@ -5,31 +5,61 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-type accountTestResult struct {
-	Status   string    `json:"status"`
-	Text     string    `json:"response_text"`
-	Error    string    `json:"error_message"`
-	Latency  int64     `json:"latency_ms"`
-	Started  time.Time `json:"started_at"`
-	Finished time.Time `json:"finished_at"`
+type accountTestInput struct {
+	Model  string `json:"model_id"`
+	Prompt string `json:"prompt"`
+	Mode   string `json:"mode"`
+	Image  string `json:"image_data_url"`
 }
 
-func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, model, prompt string) accountTestResult {
+type accountTestResult struct {
+	Status   string           `json:"status"`
+	Media    []map[string]any `json:"-"`
+	Text     string           `json:"response_text"`
+	Error    string           `json:"error_message"`
+	Latency  int64            `json:"latency_ms"`
+	Started  time.Time        `json:"started_at"`
+	Finished time.Time        `json:"finished_at"`
+}
+
+func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in accountTestInput) accountTestResult {
 	result := accountTestResult{Status: "failed", Started: time.Now().UTC()}
 	err := func() error {
-		if model == "" || len(model) > 100 {
-			return bad("model_id is required and must fit 100 characters")
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		mapped, err := u.mappedModel(model)
+		mapped, mode, err := prepareAccountTest(u, in)
 		if err != nil {
 			return err
 		}
+		if !a.takeSlot("account-test", u.ID, 1) {
+			return conflict("an account test is already running")
+		}
+		defer a.releaseSlot("account-test", u.ID)
+		timeout := 45 * time.Second
+		if mode != "text" {
+			timeout = 90 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if a.DB != nil {
+			release, err := a.acquireAccountSlot(ctx, u.ID)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
+		if mode != "text" {
+			return a.testAccountMedia(ctx, u, mapped, mode, in, &result)
+		}
+		prompt := in.Prompt
 		if prompt == "" {
 			prompt = "Reply with OK."
 		}
@@ -50,8 +80,6 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, model, pro
 			body = map[string]any{"model": mapped, "messages": []any{map[string]any{"role": "user", "content": prompt}}, "max_completion_tokens": 64}
 		}
 		raw, _ := json.Marshal(body)
-		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		defer cancel()
 		response, err := a.upstreamRequest(ctx, u, http.MethodPost, path, raw)
 		if err != nil {
 			return err
@@ -122,7 +150,17 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, model, pro
 			result.Error = "upstream test canceled"
 		}
 	}
-	result.Text = strings.ReplaceAll(result.Text, credentialString(u.Credentials, "api_key"), "[REDACTED]")
+	if key := credentialString(u.Credentials, "api_key"); key != "" {
+		result.Text = strings.ReplaceAll(result.Text, key, "[REDACTED]")
+		for _, event := range result.Media {
+			raw, _ := json.Marshal(event)
+			if strings.Contains(string(raw), key) {
+				result.Media = nil
+				result.Status, result.Error = "failed", "upstream test returned sensitive content"
+				break
+			}
+		}
+	}
 	if len([]rune(result.Text)) > 4096 {
 		result.Text = string([]rune(result.Text)[:4096])
 	}
@@ -142,24 +180,21 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var in struct {
-		Model  string `json:"model_id"`
-		Prompt string `json:"prompt"`
-		Mode   string `json:"mode"`
+	var in accountTestInput
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(&in); err != nil {
+		return bad("invalid account test JSON")
 	}
-	if err = decode(w, r, &in); err != nil {
-		return err
-	}
-	if in.Model == "" || len(in.Model) > 100 {
-		return bad("model_id is required")
-	}
-	if len(in.Prompt) > 4000 {
-		return bad("test prompt is too long")
-	}
-	if in.Mode != "" && in.Mode != "text" {
-		return bad("test mode is not supported by this endpoint yet")
+	if decoder.Decode(new(any)) != io.EOF {
+		return bad("exactly one JSON object is required")
 	}
 	u, err := a.loadAccount(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	mapped, _, err := prepareAccountTest(u, in)
 	if err != nil {
 		return err
 	}
@@ -173,10 +208,10 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 		}
 		return http.NewResponseController(w).Flush()
 	}
-	if err = send(map[string]any{"type": "test_start", "model": in.Model}); err != nil {
+	if err = send(map[string]any{"type": "test_start", "model": mapped}); err != nil {
 		return nil
 	}
-	result := a.runAccountTest(r.Context(), u, in.Model, in.Prompt)
+	result := a.runAccountTest(r.Context(), u, in)
 	if result.Status == "success" {
 		if err = a.recoverTestAccount(r.Context(), u); err != nil {
 			_ = send(map[string]any{"type": "error", "error": "test succeeded but health state could not be saved"})
@@ -185,8 +220,18 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 		if err = send(map[string]any{"type": "content", "text": result.Text}); err != nil {
 			return nil
 		}
+		for _, event := range result.Media {
+			if err = send(event); err != nil {
+				return nil
+			}
+		}
 		_ = send(map[string]any{"type": "test_complete", "success": true})
 	} else {
+		if result.Text != "" {
+			if err = send(map[string]any{"type": "content", "text": result.Text}); err != nil {
+				return nil
+			}
+		}
 		_ = send(map[string]any{"type": "error", "error": result.Error})
 	}
 	return nil

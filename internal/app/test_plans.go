@@ -256,7 +256,7 @@ func (a *App) runDueTests(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// ponytail: sequential health tests (45s cap each); use a bounded worker pool if due-plan latency grows.
+	// ponytail: sequential health tests (45s text / 90s media caps); use a bounded worker pool if due-plan latency grows.
 	for _, b := range raw {
 		var plan testPlan
 		if err = json.Unmarshal(b, &plan); err != nil {
@@ -290,7 +290,7 @@ func (a *App) runTestPlan(ctx context.Context, plan testPlan) error {
 	if err != nil {
 		return err
 	}
-	result := a.runAccountTest(ctx, u, plan.Model, "")
+	result := a.runAccountTest(ctx, u, accountTestInput{Model: plan.Model})
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

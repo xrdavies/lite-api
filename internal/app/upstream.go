@@ -436,3 +436,14 @@ func readUpstreamJSON(resp *http.Response) (map[string]json.RawMessage, error) {
 	}
 	return result, nil
 }
+
+func (a *App) acquireAccountSlot(ctx context.Context, id int64) (func(), error) {
+	var limit int
+	if err := a.DB.QueryRowContext(ctx, "SELECT concurrency FROM accounts WHERE id=$1 AND deleted_at IS NULL", id).Scan(&limit); err != nil {
+		return nil, err
+	}
+	if !a.takeSlot("account", id, limit) {
+		return nil, &apiError{429, "upstream account concurrency limit reached"}
+	}
+	return func() { a.releaseSlot("account", id) }, nil
+}

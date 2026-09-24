@@ -242,7 +242,7 @@ func testUpstreamManagement(t *testing.T, a *App, admin, user string, gid int64)
 		t.Fatal(err)
 	}
 	loaded.Credentials["base_url"], _ = json.Marshal(redirect.URL)
-	probe := a.runAccountTest(ctx, loaded, "alias", "")
+	probe := a.runAccountTest(ctx, loaded, accountTestInput{Model: "alias"})
 	if probe.Status != "failed" || redirected.Load() != 0 {
 		t.Fatal("redirect followed with credential")
 	}
@@ -380,16 +380,16 @@ func testUpstreamManagement(t *testing.T, a *App, admin, user string, gid int64)
 		time.Sleep(100 * time.Millisecond)
 	}
 	call("DELETE", planPath, admin, nil, 200)
-	call("DELETE", path, admin, nil, 200)
-	call("GET", path, admin, nil, 404)
 	// Context cancellation ends the request and releases the transport.
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); <-r.Context().Done() }))
 	defer slow.Close()
 	loaded.Credentials["base_url"], _ = json.Marshal(slow.URL)
 	cctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
-	probe = a.runAccountTest(cctx, loaded, "alias", "")
+	probe = a.runAccountTest(cctx, loaded, accountTestInput{Model: "alias"})
 	if probe.Status != "failed" || !strings.Contains(probe.Error, "timed out") {
 		t.Fatal("canceled request remained successful", probe)
 	}
+	call("DELETE", path, admin, nil, 200)
+	call("GET", path, admin, nil, 404)
 }

@@ -271,7 +271,7 @@ func (a *App) videoContent(w http.ResponseWriter, r *http.Request, t *videoTask)
 	if err != nil {
 		return err
 	}
-	release, err := a.videoAccountSlot(r.Context(), u.ID)
+	release, err := a.acquireAccountSlot(r.Context(), u.ID)
 	if err != nil {
 		return err
 	}

@@ -22,7 +22,7 @@ func CheckUpstream(ctx context.Context, base, key, model string) (map[string]any
 	credentials["api_key"], _ = json.Marshal(key)
 	credentials["base_url"], _ = json.Marshal(base)
 	u := &upstreamAccount{Platform: "openai", Type: "apikey", Credentials: credentials}
-	result := a.runAccountTest(ctx, u, model, "")
+	result := a.runAccountTest(ctx, u, accountTestInput{Model: model, Mode: "text"})
 	if result.Status != "success" {
 		return nil, errors.New(result.Error)
 	}

@@ -245,16 +245,6 @@ func (a *App) videoSource(ctx context.Context, t *videoTask) (*upstreamAccount, 
 	return u, nil
 }
 
-func (a *App) videoAccountSlot(ctx context.Context, id int64) (func(), error) {
-	var limit int
-	if err := a.DB.QueryRowContext(ctx, "SELECT concurrency FROM accounts WHERE id=$1 AND deleted_at IS NULL", id).Scan(&limit); err != nil {
-		return nil, err
-	}
-	if !a.takeSlot("account", id, limit) {
-		return nil, &apiError{429, "video account concurrency limit reached"}
-	}
-	return func() { a.releaseSlot("account", id) }, nil
-}
 func seedanceStatus(raw []byte, t *videoTask) (json.RawMessage, string, int64, string, error) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil || credentialString(fields, "id") != t.UpstreamID {
@@ -317,7 +307,7 @@ func (a *App) refreshVideoTask(ctx context.Context, t *videoTask) error {
 	if err != nil {
 		return err
 	}
-	release, err := a.videoAccountSlot(ctx, u.ID)
+	release, err := a.acquireAccountSlot(ctx, u.ID)
 	if err != nil {
 		return err
 	}
@@ -726,7 +716,7 @@ func (a *App) videoLookup(w http.ResponseWriter, r *http.Request, g *gatewayIden
 	if err != nil {
 		return err
 	}
-	release, err := a.videoAccountSlot(r.Context(), u.ID)
+	release, err := a.acquireAccountSlot(r.Context(), u.ID)
 	if err != nil {
 		return err
 	}
