@@ -72,6 +72,14 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	if err != nil {
 		return nil, err
 	}
+	if u.SearchCalls > 0 {
+		if s.Account.Platform != "grok" || s.Search != "" {
+			return nil, bad("unexpected hosted search usage")
+		}
+		if err = addGrokSearchCost(&cost, g.Group, u.SearchCalls); err != nil {
+			return nil, err
+		}
+	}
 	r := &usageReceipt{RequestID: id, PayloadHash: payload, UserID: g.UserID, KeyID: g.Key.ID, AccountID: s.Account.ID, GroupID: g.Key.GroupID, ChannelID: s.ChannelID, Platform: s.Account.Platform, Model: model, RequestedModel: requested, UpstreamModel: s.UpstreamModel, ResponseModel: response, ServiceTier: tier, Effort: effort, Cost: cost, UserRate: g.Group.Rate.String(), AccountRate: s.Rate.String(), Usage: u, Stream: stream, Duration: duration.Milliseconds(), FirstToken: first, At: at, IP: ip, UserAgent: truncate(agent, 512), Inbound: inbound, UpstreamRequestID: truncate(upstreamID, 128), BillingMode: p.BillingMode}
 	if u.VideoCount > 0 {
 		r.UserRate = g.Group.videoRate().String()
@@ -194,6 +202,9 @@ func (r *usageReceipt) fingerprint() string {
 	}
 	if r.Usage.ImageCount > 0 {
 		raw += fmt.Sprintf("|image|%d|%s|%d|%d", r.Usage.ImageCount, r.Usage.ImageSize, r.Usage.ImageInput, r.Usage.ImageOutput)
+	}
+	if r.Usage.SearchCalls > 0 {
+		raw += fmt.Sprintf("|search|%d", r.Usage.SearchCalls)
 	}
 	return digest(raw)
 }

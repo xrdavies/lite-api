@@ -335,6 +335,7 @@ type priceUsage struct {
 	Input, Output, CacheWrite, CacheWrite5m, CacheWrite1h, CacheRead int64
 	ImageInput, ImageOutput                                          int64
 	Requests                                                         int64
+	SearchCalls                                                      int64
 }
 type priceCost struct {
 	Input, Output, CacheWrite, CacheRead, ImageInput, ImageOutput string

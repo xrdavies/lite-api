@@ -65,7 +65,7 @@ func searchOutputTools(item map[string]json.RawMessage) ([]map[string]json.RawMe
 		if err := validateResponseClientTool(tool); err != nil {
 			return nil, err
 		}
-		if credentialString(tool, "type") == "tool_search" {
+		if kind := credentialString(tool, "type"); kind == "tool_search" || grokSearchProtocol(kind) {
 			return nil, bad("discovery must return executable tools")
 		}
 	}
@@ -102,7 +102,7 @@ func mergeResponseDiscoveries(tools, items []map[string]json.RawMessage) ([]map[
 		return key, namespace + "\x00" + responseToolDefinition(tool), nil
 	}
 	for _, tool := range tools {
-		if credentialString(tool, "type") == "tool_search" {
+		if kind := credentialString(tool, "type"); kind == "tool_search" || grokSearchProtocol(kind) {
 			continue
 		}
 		ns := ""

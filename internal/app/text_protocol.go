@@ -24,6 +24,7 @@ type textRequest struct {
 	ImageSize, ImageSizeSource, ImageInputSize   string
 	Headers                                      http.Header
 	Search                                       *grokSearchRequest
+	HostedSearch                                 bool
 }
 
 func (in textRequest) compositeEndpoint() string {

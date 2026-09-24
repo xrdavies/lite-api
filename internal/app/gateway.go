@@ -418,6 +418,9 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if grokSearchProtocol(protocol) || voiceProtocol(protocol) || protocol == "custom-voices" {
 			matches = u.Platform == "grok" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
+		if in.HostedSearch {
+			matches = u.Platform == "grok" && u.protocol() == "responses"
+		}
 		if !matches {
 			continue
 		}
@@ -766,6 +769,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if in.Search != nil && g.Group.Platform != "grok" {
 		fail(bad("this endpoint requires a Grok group"))
+		return
+	}
+	if in.HostedSearch && g.Group.Platform != "grok" {
+		fail(bad("hosted web_search and x_search require a Grok target"))
 		return
 	}
 	if protocol == "images" && !g.Group.AllowImage {
@@ -1242,6 +1249,18 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	firstToken := int64(0)
 	observe := observation.observe
+	if wireIn.Protocol == "responses" && selected.Account.Platform == "grok" && selected.Search == "" && !in.CountOnly {
+		meter := &grokHostedSearchMeter{}
+		observe = func(raw []byte) error {
+			observeErr := observation.observe(raw)
+			meterErr := meter.observe(raw)
+			observation.Usage.SearchCalls = meter.count()
+			if observeErr != nil {
+				return observeErr
+			}
+			return meterErr
+		}
+	}
 	var responseBody []byte
 	var forwardErr error
 	responseType := "application/json"
@@ -1604,11 +1623,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		// Token counts check eligibility but do not create consumption.
 	} else if turn := socketTurn(ctx); turn != nil && turn.warmup && !observation.HasUsage {
 		// Native generate=false prepares state without model usage.
-	} else if !observation.HasUsage {
+	} else if !observation.HasUsage && observation.Usage.SearchCalls == 0 {
 		if forwardErr == nil {
 			forwardErr = &apiError{502, "upstream usage is missing; billing requires review"}
 		}
 	} else {
+		if !observation.HasUsage && forwardErr == nil {
+			forwardErr = &apiError{502, "upstream token usage is missing; known search usage is billed and tokens require review"}
+		}
 		payloadHash := digest(string(body))
 		if protocol == "gemini" {
 			payloadHash = digest(model + "\n" + string(body))

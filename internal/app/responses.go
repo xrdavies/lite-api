@@ -93,16 +93,25 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	} else if in.Previous == "" && body["prompt"] == nil {
 		return in, bad("input or previous_response_id is required")
 	}
-	// Hosted tools have separate charges and task lifecycles; accepting them before
-	// those meters exist would silently bill only their surrounding text tokens.
+	// Hosted tools require their own meters and platform admission.
 	tools, err := responseClientTools(body)
 	if err != nil {
 		return in, err
 	}
 	for _, tool := range tools {
+		if grokSearchProtocol(credentialString(tool, "type")) {
+			if err := validateGrokHostedSearch(tool); err != nil {
+				return in, err
+			}
+			in.HostedSearch = true
+			continue
+		}
 		if err := validateResponseClientTool(tool); err != nil {
 			return in, err
 		}
+	}
+	if in.HostedSearch && (in.Action != "" || in.NativeCompaction) {
+		return in, bad("hosted search requires a normal Responses request")
 	}
 	return in, nil
 }
