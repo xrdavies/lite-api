@@ -144,6 +144,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 			warm := string(req["generate"]) == "false"
 			if !warm {
 				send(map[string]any{"type": "response.output_text.delta", "delta": "hello"})
+				response["output"] = []any{map[string]any{"type": "message", "id": "msg_" + rid, "role": "assistant", "content": []any{}}}
 				response["usage"] = map[string]any{"input_tokens": 10, "output_tokens": 5, "input_tokens_details": map[string]int{"cached_tokens": 2}}
 			}
 			response["status"] = "completed"
@@ -294,7 +295,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	}
 	b = body()
 	b["previous_response_id"] = first
-	b["input"] = []any{map[string]string{"type": "function_call_output", "call_id": "call_a", "output": "ok"}}
+	b["input"] = []any{map[string]string{"type": "item_reference", "id": "msg_" + first}, map[string]string{"type": "function_call_output", "call_id": "call_a", "output": "ok"}}
 	write(c, b)
 	assertResult(terminal(c), "response.completed")
 	if handshakes.Load() != 1 {
@@ -309,12 +310,13 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	}
 	b = body()
 	b["previous_response_id"] = warmID
+	b["input"] = []any{map[string]string{"id": "msg_" + first}}
 	write(c, b)
 	assertResult(terminal(c), "response.completed")
 	c.CloseNow()
 	other := dial("/responses", key, nil, 101)
 	b = body()
-	b["previous_response_id"] = first
+	b["input"] = []any{map[string]string{"id": "msg_" + first}}
 	write(other, b)
 	assertResult(terminal(other), "error")
 	other.CloseNow()
@@ -328,6 +330,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	c = dial("/responses", key, nil, 101)
 	b = body()
 	b["previous_response_id"] = stored
+	b["input"] = []any{map[string]string{"id": "msg_" + stored}}
 	write(c, b)
 	assertResult(terminal(c), "response.completed")
 	c.CloseNow()

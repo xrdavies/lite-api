@@ -59,14 +59,14 @@ func (u *upstreamAccount) supportsResponseSocket() bool {
 func (s *responseSocket) eligible(u *upstreamAccount) bool {
 	return u.supportsResponseSocket() && (s.binding == nil || s.binding.AccountID == u.ID && s.binding.Target == responseTarget(u))
 }
-func (s *responseSocket) remember(id string, u *upstreamAccount) {
+func (s *responseSocket) remember(id string, u *upstreamAccount, items ...string) {
 	if id == "" {
 		return
 	}
 	if _, exists := s.responses[id]; !exists {
 		s.responseOrder = append(s.responseOrder, id)
 	}
-	s.responses[id] = responseBinding{AccountID: u.ID, Target: responseTarget(u)}
+	s.responses[id] = responseBinding{AccountID: u.ID, Target: responseTarget(u), Items: items}
 	// ponytail: keep 1024 connection-local IDs, older stored responses use Redis;
 	// nonstored chains older than this bound must resend full context.
 	if len(s.responseOrder) > 1024 {

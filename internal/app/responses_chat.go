@@ -174,6 +174,8 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 		switch kind := credentialString(item, "type"); kind {
 		case "additional_tools":
 			continue
+		case "item_reference":
+			return nil, bad("item_reference requires a native Responses account")
 		case "reasoning":
 			var parts []struct{ Type, Text string }
 			if raw := item["summary"]; raw != nil && json.Unmarshal(raw, &parts) != nil {

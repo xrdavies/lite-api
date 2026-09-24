@@ -400,6 +400,12 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "responses" && u.protocol() == "anthropic" && chatAnthropicPlatform(u.Platform) && in.Action == "" && !in.NativeCompaction && socketTurn(ctx) == nil {
 			matches = true
 		}
+		if len(in.ItemReferences) > 0 {
+			// Remote item references can only be resolved by their native Responses
+			// account after checking Key-scoped item ownership. Never send them through
+			// a protocol conversion that cannot prove the referenced item identity.
+			matches = protocol == "responses" && u.protocol() == "responses"
+		}
 		if protocol == "embeddings" {
 			matches = u.Platform == "openai" && (u.protocol() == "chat_completions" || u.protocol() == "responses")
 		}
@@ -798,6 +804,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
+	if err == nil {
+		binding, err = a.responseItemSource(ctx, g, in.ItemReferences, binding)
+	}
 	if err != nil {
 		fail(err)
 		return
@@ -1673,7 +1682,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	if turn := socketTurn(ctx); turn != nil {
-		turn.socket.remember(observation.ResponseID, selected.Account)
+		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
 	}
 	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1685,7 +1694,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if responsesGemini != nil {
 				err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, responsesGemini.assistant()))
 			} else {
-				err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID)
+				err = a.bindResponse(bindingCtx, g, selected.Account, observation.ResponseID, observation.ResponseItems...)
 			}
 		}
 		bindingCancel()

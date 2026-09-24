@@ -19,6 +19,7 @@ type textRequest struct {
 	Previous                                     string
 	Store                                        bool
 	NativeCompaction                             bool
+	ItemReferences                               []string
 	Stream, CountOnly                            bool
 	ImageGeneration                              bool
 	ImageSize, ImageSizeSource, ImageInputSize   string
@@ -486,6 +487,7 @@ func textGatewayError(w http.ResponseWriter, protocol string, err error) {
 type textObservation struct {
 	Protocol, Model, Tier string
 	ResponseID, Action    string
+	ResponseItems         []string
 	Usage                 priceUsage
 	HasUsage, CountOnly   bool
 	started, stopped      bool

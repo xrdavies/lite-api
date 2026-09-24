@@ -13,6 +13,46 @@ import (
 
 const responseUsage = `"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":3},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":6},"total_tokens":28}`
 
+func TestResponseItemReferences(t *testing.T) {
+	for _, item := range []string{`{"id":"msg_one"}`, `{"id":"msg_one","type":null}`, `{"id":"msg_one","type":"item_reference"}`} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"model":"model","input":[`+item+`]}`), &body)
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", body)
+		if err != nil || len(in.ItemReferences) != 1 || in.ItemReferences[0] != "msg_one" || !strings.Contains(string(body["input"]), `"type":"item_reference"`) {
+			t.Fatal("valid reference rejected or not normalized", item, in, err)
+		}
+		if _, err := responsesToChatRequest(body, nil); err == nil {
+			t.Fatal("reference was sent through a conversion")
+		}
+	}
+	for _, item := range []string{`{"type":"item_reference"}`, `{"id":"../escape"}`, `{"id":"msg_one","type":false}`, `{"id":"msg_one","type":""}`, `{"id":"msg_one","role":"user","content":"foreign"}`, `{"id":"msg_one","type":"item_reference","content":"foreign"}`} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"model":"model","input":[`+item+`]}`), &body)
+		if _, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", body); err == nil {
+			t.Fatal("invalid reference accepted", item)
+		}
+	}
+	for _, stream := range []bool{false, true} {
+		raw := `{"id":"resp_one","object":"response","status":"completed","output":[{"id":"msg_one","type":"message"},{"id":"rs_one","type":"reasoning"}],` + responseUsage + `}`
+		if stream {
+			raw = `{"type":"response.completed","response":` + raw + `}`
+		}
+		o := textObservation{Protocol: "responses"}
+		if err := o.observe([]byte(raw)); err != nil || len(o.ResponseItems) != 2 || o.ResponseItems[1] != "rs_one" || !o.HasUsage {
+			t.Fatal("output item observation", stream, o, err)
+		}
+	}
+	var limitBody map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"model":"model","input":[`+strings.Repeat(`{"id":"msg_one"},`, 1024)+`{"id":"msg_one"}]}`), &limitBody)
+	if _, err := parseTextRequest(httptest.NewRequest("POST", "/responses", nil), "responses", limitBody); err == nil {
+		t.Fatal("unbounded references accepted")
+	}
+	o := textObservation{Protocol: "responses"}
+	if err := o.observe([]byte(`{"id":"resp_one","object":"response","status":"completed","output":[{"id":"../escape"}],` + responseUsage + `}`)); err == nil || !o.HasUsage {
+		t.Fatal("invalid output ID accepted or consumption lost", err)
+	}
+}
+
 func TestResponsesProtocol(t *testing.T) {
 	for _, status := range []string{"completed", "incomplete", "failed"} {
 		o := textObservation{Protocol: "responses"}
@@ -125,6 +165,14 @@ func testResponses(t *testing.T, a *App, admin string) {
 			usage = `"usage":null`
 		}
 		response := fmt.Sprintf(`{"object":"response","id":"resp_%d","model":"response-model","status":%q,"service_tier":"default","output":[{"type":"function_call","call_id":"call_one","name":"weather","arguments":"{\"city\":\"Tokyo\"}"},{"type":"reasoning","encrypted_content":"encrypted-reasoning"}],%s}`, n, status, usage)
+		response = strings.Replace(response, `"type":"function_call"`, fmt.Sprintf(`"type":"function_call","id":"fc_%d"`, n), 1)
+		var items []map[string]json.RawMessage
+		_ = json.Unmarshal(body["input"], &items)
+		for _, item := range items {
+			if item["id"] != nil && credentialString(item, "type") != "item_reference" {
+				t.Error("item reference type was not normalized")
+			}
+		}
 		if mode.Load() == 6 {
 			response = strings.Replace(response, `"name":"weather"`, `"name":"weather","namespace":"files"`, 1)
 		}
@@ -228,7 +276,7 @@ func testResponses(t *testing.T, a *App, admin string) {
 			t.Fatal("additional tools bypassed admission", w.Code, calls.Load())
 		}
 	}
-	for _, field := range []string{"background", "conversation", "input", "tools", "previous_response_id"} {
+	for _, field := range []string{"background", "conversation", "tools", "previous_response_id"} {
 		saved, exists := body[field]
 		body[field] = map[string]any{"background": true, "conversation": "conv_foreign", "input": []any{map[string]any{"type": "item_reference", "id": "msg_foreign"}}, "tools": []any{map[string]any{"type": "web_search"}}, "previous_response_id": "../escape"}[field]
 		if w := call("/responses", key, body, ""); w.Code != 400 {
@@ -277,6 +325,69 @@ func testResponses(t *testing.T, a *App, admin string) {
 		}
 	}
 	mode.Store(0)
+	// Item ownership is scoped to the Key, independently of a previous response.
+	referenced := map[string]any{"model": "client-response", "input": []any{map[string]any{"id": "fc_1"}}}
+	for _, path := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		if w := call(path, key, referenced, "item-once"); w.Code != 200 {
+			t.Fatal("owned item reference", path, w.Code, w.Body.String())
+		}
+	}
+	referenced["previous_response_id"] = "resp_1"
+	referenced["stream"] = true
+	if w := call("/responses", key, referenced, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "event: response.completed") {
+		t.Fatal("streamed item reference", w.Code, w.Body.String())
+	}
+	delete(referenced, "stream")
+	delete(referenced, "previous_response_id")
+	streamItem := fmt.Sprintf("fc_%d", calls.Load())
+	referenced["input"] = []any{map[string]any{"id": streamItem}}
+	if w := call("/responses", key, referenced, ""); w.Code != 200 {
+		t.Fatal("SSE output item not bound", w.Code)
+	}
+	var countBefore int
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE api_key_id=$1", kid).Scan(&countBefore); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("/responses/input_tokens", key, referenced, ""); w.Code != 200 {
+		t.Fatal("item token count", w.Code, w.Body.String())
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE api_key_id=$1", kid).Scan(&logs); err != nil || logs != countBefore {
+		t.Fatal("item token count billed", logs, countBefore, err)
+	}
+	referenced["input"] = []any{map[string]any{"id": "fc_1"}}
+	foreign := manage("/api/v1/keys", user, map[string]any{"name": "Foreign item key", "group_id": gid})["key"].(string)
+	if w := call("/responses", foreign, body, ""); w.Code != 200 {
+		t.Fatal("foreign response setup", w.Code)
+	}
+	foreignResponse := fmt.Sprintf("resp_%d", calls.Load())
+	foreignItem := fmt.Sprintf("fc_%d", calls.Load())
+	before = calls.Load()
+	for _, previous := range []string{"", foreignResponse} {
+		if previous != "" {
+			referenced["previous_response_id"] = previous
+		}
+		if w := call("/responses", foreign, referenced, ""); w.Code != 404 || calls.Load() != before {
+			t.Fatal("foreign item accepted with owned previous response", w.Code)
+		}
+	}
+	referenced["previous_response_id"] = "resp_1"
+	referenced["input"] = []any{map[string]any{"type": "item_reference", "id": foreignItem}}
+	if w := call("/responses", key, referenced, ""); w.Code != 404 || calls.Load() != before {
+		t.Fatal("foreign item accepted on shared upstream", w.Code)
+	}
+	referenced["input"] = []any{map[string]any{"type": "item_reference", "id": "fc_unknown"}}
+	if w := call("/responses", key, referenced, ""); w.Code != 404 || calls.Load() != before {
+		t.Fatal("unobserved item accepted", w.Code)
+	}
+	nonstored := map[string]any{"model": "client-response", "input": "private", "store": false}
+	if w := call("/responses", key, nonstored, ""); w.Code != 200 {
+		t.Fatal("nonstored response", w.Code)
+	}
+	referenced["input"] = []any{map[string]any{"id": fmt.Sprintf("fc_%d", calls.Load())}}
+	before = calls.Load()
+	if w := call("/responses", key, referenced, ""); w.Code != 404 || calls.Load() != before {
+		t.Fatal("nonstored item survived HTTP request", w.Code)
+	}
 	// A more preferred account must never receive the first account's response ID.
 	account("Other Responses", other.URL, 0)
 	body["previous_response_id"] = "resp_1"
@@ -290,6 +401,41 @@ func testResponses(t *testing.T, a *App, admin string) {
 	var keyInfo gatewayKey
 	keyInfo.ID, keyInfo.GroupID = kid, gid
 	identity := &gatewayIdentity{Key: keyInfo}
+	original, err := a.loadAccount(t.Context(), aid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	referenced["input"] = []any{map[string]any{"id": "fc_1", "type": nil}}
+	delete(referenced, "previous_response_id")
+	if w := call("/responses", key, referenced, ""); w.Code != 200 || otherCalls.Load() != 0 {
+		t.Fatal("item reference fell back to preferred account", w.Code)
+	}
+	if err := a.Redis.Del(t.Context(), responseItemKey(identity, streamItem)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	referenced["input"] = []any{map[string]any{"id": streamItem}}
+	before = calls.Load()
+	if w := call("/responses", key, referenced, ""); w.Code != 404 || calls.Load() != before {
+		t.Fatal("expired item was sent upstream", w.Code)
+	}
+	referenced["input"] = []any{map[string]any{"id": "fc_1"}}
+	// All stored IDs are checked before any part of a binding is published.
+	otherSource := responseBinding{AccountID: aid + 999, Target: "other-source"}
+	if err := a.storeResponseBinding(t.Context(), identity, "resp_other_source", otherSource); err != nil {
+		t.Fatal(err)
+	}
+	referenced["previous_response_id"] = "resp_other_source"
+	before = calls.Load()
+	if w := call("/responses", key, referenced, ""); w.Code != 400 || calls.Load() != before || otherCalls.Load() != 0 {
+		t.Fatal("mixed response/item sources accepted", w.Code)
+	}
+	otherSource.Items = []string{"fc_1"}
+	if err := a.storeResponseBinding(t.Context(), identity, "resp_collision", otherSource); err == nil {
+		t.Fatal("item source collision accepted")
+	}
+	if n, err := a.Redis.Exists(t.Context(), responseBindingKey(identity, "resp_collision")).Result(); err != nil || n != 0 {
+		t.Fatal("partial binding after collision", n, err)
+	}
 	bound, err := a.previousResponse(t.Context(), identity, "resp_1")
 	if err != nil || bound.AccountID != aid {
 		t.Fatal("persisted response binding", bound, err)
@@ -302,10 +448,6 @@ func testResponses(t *testing.T, a *App, admin string) {
 	}
 	if w := call("/responses", key, body, ""); w.Code != 404 || otherCalls.Load() != 0 {
 		t.Fatal("missing response binding fell back to another account", w.Code)
-	}
-	original, err := a.loadAccount(t.Context(), aid)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := a.bindResponse(t.Context(), identity, original, "resp_1"); err != nil {
 		t.Fatal(err)
@@ -320,6 +462,10 @@ func testResponses(t *testing.T, a *App, admin string) {
 	before = calls.Load()
 	if w := call("/responses", key, body, "response-rotated"); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
 		t.Fatal("continuation survived upstream key rotation", w.Code)
+	}
+	delete(referenced, "previous_response_id")
+	if w := call("/responses", key, referenced, ""); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
+		t.Fatal("item survived upstream key rotation", w.Code)
 	}
 	var reconciled bool
 	if err := a.DB.QueryRow("SELECT (10-balance)=(SELECT sum(round(actual_cost,8)) FROM usage_logs WHERE user_id=$1) FROM users WHERE id=$1", uid).Scan(&reconciled); err != nil || !reconciled {

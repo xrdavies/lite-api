@@ -406,6 +406,12 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	}
 	other := must("POST", "/api/v1/keys", user, map[string]any{"name": "other", "group_id": gid})["key"].(string)
 	before := calls.Load()
+	itemRequest := body(false)
+	itemRequest["previous_response_id"] = result.ID
+	itemRequest["input"] = []any{map[string]string{"type": "item_reference", "id": "msg_convert"}}
+	if w := call("POST", "/responses", key, itemRequest, ""); w.Code != 400 || calls.Load() != before {
+		t.Fatal("item reference entered Chat conversion", w.Code)
+	}
 	if w := call("POST", "/responses", other, continued, ""); w.Code != 404 || calls.Load() != before {
 		t.Fatal("cross-Key continuation", w.Code)
 	}

@@ -69,8 +69,28 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 				return in, bad("Responses input must be text or an array of objects")
 			}
 			for _, item := range items {
-				if item == nil || credentialString(item, "type") == "item_reference" {
+				if item == nil {
 					return in, bad("supply full input items or a scoped previous_response_id")
+				}
+				kind := credentialString(item, "type")
+				if kind == "item_reference" || kind == "" && item["id"] != nil {
+					id := credentialString(item, "id")
+					if !validResponseID(id) {
+						return in, bad("item_reference requires a valid item ID")
+					}
+					for field := range item {
+						if field != "id" && field != "type" {
+							return in, bad("item_reference accepts only id and type")
+						}
+					}
+					if raw := item["type"]; raw != nil && string(raw) != "null" && kind != "item_reference" {
+						return in, bad("invalid item_reference type")
+					}
+					in.ItemReferences = append(in.ItemReferences, id)
+					if len(in.ItemReferences) > 1024 {
+						return in, bad("too many item references")
+					}
+					item["type"] = json.RawMessage(`"item_reference"`)
 				}
 				in.NativeCompaction = in.NativeCompaction || credentialString(item, "type") == "compaction_trigger"
 			}
@@ -88,6 +108,8 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 				normalized = append(normalized, map[string]json.RawMessage{"type": json.RawMessage(`"compaction_trigger"`)})
 				body["input"], _ = json.Marshal(normalized)
 				in.Headers.Set("X-Codex-Beta-Features", "remote_compaction_v2")
+			} else if len(in.ItemReferences) > 0 {
+				body["input"], _ = json.Marshal(items)
 			}
 		}
 	} else if in.Previous == "" && body["prompt"] == nil {
@@ -177,7 +199,7 @@ func (o *textObservation) observeResponses(data []byte) error {
 	var event struct {
 		Type, Object, ID, Model, Status string
 		Tier                            string `json:"service_tier"`
-		Usage, Response, Error          json.RawMessage
+		Usage, Response, Error, Output  json.RawMessage
 		Input                           *int64 `json:"input_tokens"`
 	}
 	if json.Unmarshal(data, &event) != nil || string(data) == "null" {
@@ -248,6 +270,21 @@ func (o *textObservation) observeResponses(data []byte) error {
 	}
 	o.ResponseID = event.ID
 	o.stopped = event.Status == "completed" || event.Status == "incomplete" || event.Object == "response.compaction"
+	if o.stopped && event.Output != nil && string(event.Output) != "null" {
+		var items []map[string]json.RawMessage
+		if json.Unmarshal(event.Output, &items) != nil || len(items) > 1024 {
+			return &apiError{502, "upstream response output is invalid or exceeds limit"}
+		}
+		o.ResponseItems = nil
+		for _, item := range items {
+			if id := credentialString(item, "id"); id != "" {
+				if !validResponseID(id) {
+					return &apiError{502, "upstream response item ID is invalid"}
+				}
+				o.ResponseItems = append(o.ResponseItems, id)
+			}
+		}
+	}
 	return nil
 }
 
@@ -256,7 +293,8 @@ func (o *textObservation) observeResponses(data []byte) error {
 type responseBinding struct {
 	AccountID int64
 	Target    string
-	History   string `json:",omitempty"`
+	History   string   `json:",omitempty"`
+	Items     []string `json:",omitempty"`
 }
 
 func responseBindingKey(g *gatewayIdentity, id string) string {
@@ -285,17 +323,85 @@ func (a *App) previousResponse(ctx context.Context, g *gatewayIdentity, id strin
 	}
 	return &binding, nil
 }
-func (a *App) bindResponse(ctx context.Context, g *gatewayIdentity, u *upstreamAccount, id string) error {
-	return a.storeResponseBinding(ctx, g, id, responseBinding{AccountID: u.ID, Target: responseTarget(u)})
+func (a *App) bindResponse(ctx context.Context, g *gatewayIdentity, u *upstreamAccount, id string, items ...string) error {
+	return a.storeResponseBinding(ctx, g, id, responseBinding{AccountID: u.ID, Target: responseTarget(u), Items: items})
 }
 
 func (a *App) storeResponseBinding(ctx context.Context, g *gatewayIdentity, id string, binding responseBinding) error {
 	raw, _ := json.Marshal(binding)
-	key := responseBindingKey(g, id)
-	// Atomic collision checking also protects against an upstream reusing IDs.
-	ok, err := a.Redis.Eval(ctx, `local old=redis.call('GET',KEYS[1]);if old and old~=ARGV[1] then return 0 end;redis.call('SET',KEYS[1],ARGV[1],'EX',2592000);return 1`, []string{key}, string(raw)).Int()
+	keys := []string{responseBindingKey(g, id)}
+	for _, item := range binding.Items {
+		keys = append(keys, responseItemKey(g, item))
+	}
+	source, _ := json.Marshal(responseBinding{AccountID: binding.AccountID, Target: binding.Target})
+	// Validate every collision before writing: a failed item binding must not
+	// publish a response whose items resolve to a different upstream source.
+	ok, err := a.Redis.Eval(ctx, `
+for i,key in ipairs(KEYS) do
+ local value=ARGV[2];if i==1 then value=ARGV[1] end
+ local old=redis.call('GET',key);if old and old~=value then return 0 end
+end
+for i,key in ipairs(KEYS) do
+ local value=ARGV[2];if i==1 then value=ARGV[1] end
+ redis.call('SET',key,value,'EX',2592000)
+end
+return 1`, keys, string(raw), string(source)).Int()
 	if err != nil || ok != 1 {
 		return &apiError{503, "response affinity could not be saved"}
 	}
 	return nil
+}
+
+func responseItemKey(g *gatewayIdentity, id string) string {
+	return fmt.Sprintf("gateway:response-item:%d:%d:%s", g.Key.ID, g.Key.GroupID, digest(id))
+}
+
+func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []string, binding *responseBinding) (*responseBinding, error) {
+	if len(ids) == 0 {
+		return binding, nil
+	}
+	if binding != nil && binding.History != "" {
+		return nil, bad("item_reference requires a native Responses account")
+	}
+	local := map[string]responseBinding{}
+	if turn := socketTurn(ctx); turn != nil {
+		for _, response := range turn.socket.responses {
+			for _, item := range response.Items {
+				local[item] = response
+			}
+		}
+	}
+	var keys []string
+	for _, id := range ids {
+		if _, ok := local[id]; !ok {
+			keys = append(keys, responseItemKey(g, id))
+		}
+	}
+	var stored []any
+	if len(keys) > 0 {
+		var err error
+		stored, err = a.Redis.MGet(ctx, keys...).Result()
+		if err != nil {
+			return nil, &apiError{503, "response item affinity is unavailable"}
+		}
+	}
+	for _, id := range ids {
+		source, ok := local[id]
+		if !ok {
+			value := stored[0]
+			stored = stored[1:]
+			if value == nil {
+				return nil, missing()
+			}
+			raw, ok := value.(string)
+			if !ok || json.Unmarshal([]byte(raw), &source) != nil || source.AccountID <= 0 || source.Target == "" || source.History != "" {
+				return nil, &apiError{503, "response item affinity is invalid"}
+			}
+		}
+		if binding != nil && (binding.AccountID != source.AccountID || binding.Target != source.Target) {
+			return nil, bad("response items must share the previous response upstream source")
+		}
+		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target}
+	}
+	return binding, nil
 }
