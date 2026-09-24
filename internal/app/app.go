@@ -30,6 +30,7 @@ type Config struct {
 	DatabaseURL, RedisURL, ListenAddr, JWTSecret, UpstreamPrivateCIDRs, PricingFile string
 	BalanceCheckEnabled, BalanceThreshold, BalanceCheckIntervalMinutes              string
 	StreamDataIntervalTimeout, ImageStreamDataIntervalTimeout                       string
+	GeminiQuotaPolicy                                                               string
 }
 
 func ConfigFromEnv() Config {
@@ -45,6 +46,7 @@ func ConfigFromEnv() Config {
 		BalanceCheckIntervalMinutes:    os.Getenv("GATEWAY_CN_PROVIDERS_BALANCE_CHECK_INTERVAL_MINUTES"),
 		StreamDataIntervalTimeout:      os.Getenv("GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT"),
 		ImageStreamDataIntervalTimeout: os.Getenv("GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT"),
+		GeminiQuotaPolicy:              os.Getenv("GEMINI_QUOTA_POLICY"),
 	}
 }
 
@@ -87,6 +89,7 @@ type App struct {
 	panelExpires      time.Time
 	streamIdle        time.Duration
 	imageStreamIdle   time.Duration
+	geminiQuotaPolicy geminiQuotaPolicy
 }
 
 func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
@@ -108,6 +111,14 @@ func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
 }
 
 func New(ctx context.Context, cfg Config) (*App, error) {
+	var quotaPolicy geminiQuotaPolicy
+	if strings.TrimSpace(cfg.GeminiQuotaPolicy) != "" {
+		var err error
+		quotaPolicy, err = parseGeminiQuotaPolicy([]byte(cfg.GeminiQuotaPolicy), true)
+		if err != nil {
+			return nil, errors.New("invalid GEMINI_QUOTA_POLICY")
+		}
+	}
 	streamIdle, imageStreamIdle, err := parseStreamIntervals(cfg)
 	if err != nil {
 		return nil, err
@@ -158,6 +169,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
 	a.streamIdle, a.imageStreamIdle = streamIdle, imageStreamIdle
+	a.geminiQuotaPolicy = quotaPolicy
 	a.balancePolicy = balancePolicy
 	a.priceFile = cfg.PricingFile
 	a.prices.Store(pricing.prices.Load())

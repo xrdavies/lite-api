@@ -16,15 +16,31 @@ func (a *App) getSettings(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+		policy, err := a.geminiQuotaOverride(r.Context())
+		if err != nil {
+			return err
+		}
+		var fields map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &fields); err != nil {
+			return err
+		}
+		fields[geminiQuotaSetting] = policy
+		raw, err = json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+	}
 	return reply(w, raw)
 }
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
-		Name             *string `json:"site_name"`
-		Available        *bool   `json:"available_channels_enabled"`
-		PlazaEnabled     *bool   `json:"model_plaza_enabled"`
-		PlazaRequireAuth *bool   `json:"model_plaza_require_auth"`
-		PlazaDescription *string `json:"model_plaza_description"`
+		Name             *string         `json:"site_name"`
+		Available        *bool           `json:"available_channels_enabled"`
+		PlazaEnabled     *bool           `json:"model_plaza_enabled"`
+		PlazaRequireAuth *bool           `json:"model_plaza_require_auth"`
+		PlazaDescription *string         `json:"model_plaza_description"`
+		GeminiPolicy     json.RawMessage `json:"gemini_quota_policy"`
 	}
 	if err := decode(w, r, &in); err != nil {
 		return err
@@ -34,6 +50,11 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.PlazaDescription != nil && len(*in.PlazaDescription) > 10000 {
 		return bad("model_plaza_description is too long")
+	}
+	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
+		if _, err := parseGeminiQuotaPolicy(in.GeminiPolicy, true); err != nil {
+			return err
+		}
 	}
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -56,7 +77,10 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	if in.PlazaDescription != nil {
 		values["model_plaza_description"] = *in.PlazaDescription
 	}
-	for _, key := range []string{"site_name", "available_channels_enabled", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description"} {
+	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
+		values[geminiQuotaSetting] = string(in.GeminiPolicy)
+	}
+	for _, key := range []string{"site_name", "available_channels_enabled", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting} {
 		value, ok := values[key]
 		if !ok {
 			continue

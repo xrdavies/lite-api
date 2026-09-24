@@ -49,7 +49,17 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 管理员还可通过 `GET /api/v1/admin/accounts/{id}/usage` 查询适用的账号额度信息。Grok 返回已观察到的请求/token 限额、重置时间、Retry-After 与时间戳，并附本地当日及滚动 24 小时精确用量；HTTP（含 SSE 响应头）与 WebSocket 握手共用采集，尚无观测时明确返回 `quota_unknown`。快照仅保留已解析数值，不保存任意头、Cookie 或 plan 声明；不改变账号配置版本、消费计数或人工状态。凭证、地址、协议及代理变化清除快照，旧请求不能覆盖新配置。无额度头的普通成功响应保留上次观测及原时间戳；401/403/429 记录最近拒绝，不把缺少额度当成零。快照是历史观测，不保证当前剩余额度，也不直接改变调度。
 
-Gemini 同一路径返回 `source=local`、`quota_basis=compatibility_default` 的本地估算，按模型名 flash/lite 与其余 Pro 分类；每日按 America/Los_Angeles 自然日（含夏令时），每分钟按固定分钟统计。`credentials.tier_id` 仅 Gemini 接受空字符串、`aistudio_free`、`aistudio_paid`；缺省沿用固定兼容值 Pro 50/日、2/分钟及 Flash 1500/日、15/分钟，paid 不显示日额度、分钟分别为 1000/2000。这些值不是实时原厂额度，估算不用于调度；历史 `gemini_quota_policy` 自定义规则尚未接入。窗口 `cost` 沿用用户实际消费口径。
+Gemini 同一路径返回 `source=local` 的本地估算，按模型名 flash/lite 与其余 Pro 分类；每日按 America/Los_Angeles 自然日（含夏令时），每分钟按固定分钟统计。`credentials.tier_id` 仅 Gemini 接受空字符串、`aistudio_free`、`aistudio_paid`；缺省沿用固定兼容值 Pro 50/日、2/分钟及 Flash 1500/日、15/分钟，paid 不显示日额度、分钟分别为 1000/2000。这些值不是实时原厂额度，估算不用于调度。窗口 `cost` 沿用用户实际消费口径，计数和金额直接由 SQL 汇总。
+
+管理员可通过 `GET/PUT /api/v1/admin/settings` 的 `gemini_quota_policy` 配置额度展示规则，沿用原 settings 键；公开设置不返回该字段。优先级为兼容默认值、部署环境 `GEMINI_QUOTA_POLICY` JSON、数据库覆盖；每层只覆盖指定字段，查询立即使用数据库最新值。`quota_basis` 分别为 `compatibility_default`、`deployment_policy` 或 `configured_policy`，`quota_tier` 表示当前账号档位。环境 JSON 不合法时启动失败；数据库配置损坏时诊断返回 503，可用 PUT 修复，不影响模型请求。
+
+规则仅接受 API Key 的 `aistudio_free/aistudio_paid`（名称忽略首尾空格和大小写），使用 `quota_rules` 的 `shared_rpd`、`rpm`、`gemini_pro/gemini_flash` 下的 `rpd/rpm` 及可选 `desc`。正数共享额度替代对应日/分钟模型窗口；0 不显示该窗口，日额度另接受 -1 表示无限额。以下 PUT 只修改此设置；省略或 null 保持，`{}` 清除数据库覆盖并回落到部署/默认值。对象整体替换，最多 32 KiB；不改账号状态、已发生消费或账务。
+
+```json
+{"gemini_quota_policy":{"quota_rules":{"aistudio_paid":{"shared_rpd":10000,"rpm":60}}}}
+```
+
+兼容 V1 `tiers` 下的 `pro_rpd/flash_rpd/cooldown_minutes`；同层非空 `quota_rules` 优先于 `tiers`。`cooldown_minutes` 保留字段含义，但不用于 API Key 冷却：真实 429 优先使用每日超限提示或正文中的 `quotaResetDelay`、`google.rpc.RetryInfo.retryDelay`、`Please retry in …s`，其次有效 `Retry-After`，均缺失时到洛杉矶次日零点。小数秒向上取整，RetryInfo 最多 15 分钟、其他正文提示最多 24 小时、Retry-After 最多两小时。通用 429 冷却开关不覆盖该平台规则；旧请求不能改写管理员更新后的账号。
 
 该查询接受 `source=active|passive` 和 `force=true|false`，在当前 API Key 范围内均只读，不发起收费探测或自动恢复账号；其他六个平台明确返回 400，原始本地用量仍通过 `today-stats` 查询。`POST /api/v1/admin/accounts/check-mixed-channel` 接受 `platform`、`group_ids` 和可选 `account_id`，对允许的平台返回 `has_risk=false`；原告警所依赖的平台组合已不在范围内，实际绑定仍由账号保存接口校验。
 

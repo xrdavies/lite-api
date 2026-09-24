@@ -208,20 +208,29 @@ func (a *App) geminiAccountUsage(w http.ResponseWriter, r *http.Request, u *upst
 	minute := now.Truncate(time.Minute)
 	// Historical API-key defaults are local estimates, never provider promises
 	// or additional scheduler limits. Unknown model names retain the Pro bucket.
-	proDay, flashDay, proMinute, flashMinute := 50, 1500, 2, 15
-	if credentialString(u.Credentials, "tier_id") == "aistudio_paid" {
-		proDay, flashDay, proMinute, flashMinute = -1, -1, 1000, 2000
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	quota, basis, err := a.accountGeminiQuota(ctx, u)
+	if err != nil {
+		return err
+	}
+	proDay, flashDay, proMinute, flashMinute := quota.ProDay, quota.FlashDay, quota.ProMinute, quota.FlashMinute
+	if quota.SharedDay > 0 {
+		proDay, flashDay = 0, 0
+	}
+	if quota.SharedMinute > 0 {
+		proMinute, flashMinute = 0, 0
+	}
 	raw, err := jsonRow(a.DB.QueryRowContext(ctx, `WITH windows(name,start_at,reset_at,quota,flash) AS (VALUES
  ('gemini_pro_daily',$2::timestamptz,$3::timestamptz,$6::bigint,false),
  ('gemini_flash_daily',$2::timestamptz,$3::timestamptz,$7::bigint,true),
  ('gemini_pro_minute',$4::timestamptz,$4::timestamptz+interval '1 minute',$8::bigint,false),
- ('gemini_flash_minute',$4::timestamptz,$4::timestamptz+interval '1 minute',$9::bigint,true))
- SELECT jsonb_build_object('source','local','five_hour',NULL,'updated_at',$5::timestamptz,
- 'quota_basis','compatibility_default','timezone','America/Los_Angeles') || COALESCE(jsonb_object_agg(name,
- jsonb_build_object('utilization',s.requests::numeric*100/quota,'resets_at',reset_at,
+ ('gemini_flash_minute',$4::timestamptz,$4::timestamptz+interval '1 minute',$9::bigint,true),
+ ('gemini_shared_daily',$2::timestamptz,$3::timestamptz,$10::bigint,NULL),
+ ('gemini_shared_minute',$4::timestamptz,$4::timestamptz+interval '1 minute',$11::bigint,NULL))
+	SELECT jsonb_build_object('source','local','five_hour',NULL,'updated_at',$5::timestamptz,
+ 'quota_basis',$12::text,'quota_tier',$13::text,'timezone','America/Los_Angeles') || COALESCE(jsonb_object_agg(name,
+ jsonb_build_object('utilization',s.requests::numeric*100/NULLIF(quota,0),'resets_at',reset_at,
  'remaining_seconds',GREATEST(0,trunc(extract(epoch FROM reset_at-$5::timestamptz))),
  'used_requests',s.requests,'limit_requests',quota,'window_stats',jsonb_build_object(
  'requests',s.requests,'tokens',s.tokens,'cost',s.cost,'standard_cost',0,'user_cost',0))) FILTER(WHERE quota>0),'{}'::jsonb)
@@ -229,7 +238,7 @@ func (a *App) geminiAccountUsage(w http.ResponseWriter, r *http.Request, u *upst
  COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS tokens,
  COALESCE(sum(actual_cost),0) AS cost FROM usage_logs WHERE account_id=$1
  AND created_at>=start_at AND created_at<$5
- AND (lower(model) LIKE '%flash%' OR lower(model) LIKE '%lite%')=flash)s`, u.ID, day, reset, minute, now, proDay, flashDay, proMinute, flashMinute))
+ AND (flash IS NULL OR (lower(model) LIKE '%flash%' OR lower(model) LIKE '%lite%')=flash))s`, u.ID, day, reset, minute, now, proDay, flashDay, proMinute, flashMinute, quota.SharedDay, quota.SharedMinute, basis, geminiTier(u)))
 	if err != nil {
 		return err
 	}

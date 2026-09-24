@@ -352,7 +352,9 @@ func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, statu
 	case 401, 403:
 		clause = "status='error',error_message='upstream authentication rejected'"
 	case 429:
-		if seconds == 0 {
+		if s.Account.Platform == "gemini" && s.Account.Type == "apikey" {
+			seconds = geminiRateLimitSeconds(body, retry, time.Now())
+		} else if seconds == 0 {
 			settings, err := a.loadRate429Settings(ctx)
 			if err != nil {
 				slog.Warn("429 policy unavailable; using default")
