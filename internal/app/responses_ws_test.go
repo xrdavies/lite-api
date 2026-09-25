@@ -283,6 +283,18 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	dial("/v1/responses", key, http.Header{"Origin": []string{"https://untrusted.test"}}, 403)
 	dial("/v1/responses", key, http.Header{"Idempotency-Key": []string{"connect"}}, 400)
 	c := dial("/v1/responses", key, nil, 101)
+	// Existing sessions retain their policy snapshot; new sessions enforce the
+	// current policy against the mapped upstream model before sending a frame.
+	must("PUT", "/api/v1/admin/settings", admin, map[string]any{fastPolicySetting: fastPolicySettings{Rules: []fastPolicyRule{{Tier: "priority", Scope: "apikey", Action: "block", Models: []string{"up-ws"}, Message: "fast-disabled"}}}})
+	defer a.DB.Exec("DELETE FROM settings WHERE key=$1", fastPolicySetting)
+	blocked := dial("/v1/responses", key, nil, 101)
+	beforePolicyCalls := calls.Load()
+	write(blocked, body())
+	denial := terminal(blocked)
+	if denial["type"] != "error" || calls.Load() != beforePolicyCalls || !strings.Contains(string(mustJSON(denial)), "fast-disabled") {
+		t.Fatal("WebSocket fast block", denial, calls.Load())
+	}
+	blocked.CloseNow()
 	b := body()
 	b["stream_id"] = "main"
 	write(c, b)
@@ -300,6 +312,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow("SELECT service_tier,total_cost::text FROM usage_logs WHERE api_key_id=$1 ORDER BY id DESC LIMIT 1", kid).Scan(&fastTier, &total); err != nil || fastTier != "priority" || total != "0.0380000000" {
 		t.Fatal("WebSocket fast accounting", fastTier, total, err)
 	}
+	must("PUT", "/api/v1/admin/settings", admin, map[string]any{fastPolicySetting: fastPolicySettings{}})
 	b = body()
 	b["previous_response_id"] = first
 	b["input"] = []any{map[string]string{"type": "item_reference", "id": "msg_" + first}, map[string]string{"type": "function_call_output", "call_id": "call_a", "output": "ok"}}

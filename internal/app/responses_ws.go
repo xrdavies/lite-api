@@ -122,6 +122,12 @@ func (a *App) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseSlot("websocket", g.Key.ID)
 	ctx, cancel := context.WithTimeout(r.Context(), time.Hour)
 	defer cancel()
+	policy, err := a.loadFastPolicy(ctx)
+	if err != nil {
+		gatewayError(w, err)
+		return
+	}
+	ctx = context.WithValue(ctx, fastPolicyKey{}, policy)
 	s := &responseSocket{keyID: g.Key.ID, groupID: g.Key.GroupID, userID: g.UserID, responses: map[string]responseBinding{}}
 	a.gatewayMu.Lock()
 	if a.gatewayStopped || len(a.websockets) >= 128 {

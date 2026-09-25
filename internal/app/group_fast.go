@@ -31,25 +31,31 @@ func (g *gatewayIdentity) openAIFastScope() bool {
 	return platform == "openai" || platform == "composite"
 }
 
-// Only OpenAI text wire protocols accept this policy; native Messages, media
-// and token counting retain their own request contracts.
+// OpenAI text wire protocols share tier validation; only OpenAI accounts can
+// receive the group override. Native Messages, media and counting are excluded.
 func (g *gatewayIdentity) applyFast(body map[string]json.RawMessage, u *upstreamAccount, in textRequest) (string, error) {
-	if u.Platform != "openai" || in.CountOnly || (in.Protocol != "responses" && in.Protocol != "chat_completions" && in.Protocol != "anthropic") || (u.protocol() != "responses" && u.protocol() != "chat_completions") {
+	if !fastPolicyProtocol(u, in) {
 		return in.Tier, nil
 	}
+	if raw := body["service_tier"]; raw != nil && string(raw) != "null" && strings.TrimSpace(in.Tier) == "" {
+		return "", bad("invalid OpenAI service_tier")
+	}
 	tier := strings.ToLower(strings.TrimSpace(in.Tier))
-	if g.openAIFastScope() && g.Group.ForceFast || tier == "fast" {
+	if tier == "fast" {
 		tier = "priority"
 	}
 	switch tier {
-	case "":
-		return tier, nil
-	case "priority", "flex", "auto", "default", "scale", "ultrafast":
-		body["service_tier"], _ = json.Marshal(tier)
-		return tier, nil
+	case "", "priority", "flex", "auto", "default", "scale", "ultrafast":
 	default:
 		return "", bad("invalid OpenAI service_tier")
 	}
+	if u.Platform == "openai" && g.openAIFastScope() && g.Group.ForceFast {
+		tier = "priority"
+	}
+	if tier != "" {
+		body["service_tier"], _ = json.Marshal(tier)
+	}
+	return tier, nil
 }
 
 // An API Key upstream can lower the billed tier, but cannot increase it merely

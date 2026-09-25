@@ -67,7 +67,13 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 OpenAI/composite 分组支持 `force_openai_fast` 和 `free_openai_fast`：前者将发往 OpenAI Chat/Responses 协议的文本请求设为 `service_tier=priority`，包含 Messages 转换、JSON/SSE、Responses WebSocket 和后台任务；原生 Anthropic 协议、计数和独立媒体入口不强制添加。`fast` 别名归一为 priority，未强制时其余合法档位原样保留，未知档位在派发前拒绝。省略/null 保留开关，false 关闭；其他平台保存时归一为 false。两个字段仅在管理员分组视图返回。
 
-`free_openai_fast` 只将 priority/fast 的用户费用按标准档重算，保留原用户/分组倍率、推理与时段倍率及工具费用；`total_cost`、成本明细和账号额度仍按有效档位计算。上游声明较低档位时使用较低档计费，缺省、未知或较高声明不能提高收费；响应内容保持上游原值，用量 `service_tier` 记录计费采用的档位。请求发出后的设置变化不改本次价格，后台任务持久化开关及实际发送档位，SQL 故障恢复沿用原快照并去重。全局 Fast/Flex 规则仍待实现，本节仅描述已接入的分组策略。
+`free_openai_fast` 只将 priority/fast 的用户费用按标准档重算，保留原用户/分组倍率、推理与时段倍率及工具费用；`total_cost`、成本明细和账号额度仍按有效档位计算。上游声明较低档位时使用较低档计费，缺省、未知或较高声明不能提高收费；响应内容保持上游原值，用量 `service_tier` 记录计费采用的档位。请求发出后的设置变化不改本次价格，后台任务持久化开关及实际发送档位，SQL 故障恢复沿用原快照并去重。全局 Fast/Flex 规则通过 `GET/PUT /api/v1/admin/settings` 的 `openai_fast_policy_settings` 配置，保存于同名 settings 键。
+
+策略格式为 `{"rules":[{"service_tier":"priority","action":"filter","scope":"apikey"}]}`。`service_tier` 支持 `all/priority/ultrafast/flex/missing`，空值归一为 all；action 支持 `pass/filter/block/force_priority`，scope 仅接受 `all/apikey`。可配置 `user_ids`、`model_whitelist`、`error_message`、`fallback_action` 和 `fallback_error_message`。用户 ID 来自 Key 所属用户，先按顺序匹配用户专属规则，再匹配全局规则；命中第一条 tier/scope 规则后按最终上游模型选择主动作或 fallback，不继续后续规则。模型区分大小写，支持末尾 `*`；未指定 fallback 时 pass。
+
+规则在分组强制 Fast 之后执行，可再次过滤或阻止 priority；作用于实际发往 Chat/Responses 协议的文本请求，包括 Grok/国内平台及 composite 的适用目标。原生 Anthropic/Gemini、计数和独立媒体不受该策略影响。`all` 不匹配省略/null 的档位；`missing` 只有 `force_priority` 对 OpenAI 目标生效，其他动作保持省略。每次 HTTP 请求与其账号重试共用一次读取的策略快照；WebSocket 在连接建立时读取，修改仅影响新连接。已接受的后台任务和已完成的幂等重放沿用原档位和账务，不因之后的 block 重发或漏记消费。
+
+省略/null 保持设置，`{"rules":[]}` 清空规则；默认空规则。最多 100 条规则，每条最多 1000 个唯一正数用户 ID、100 个模型模式，错误消息各最多 2000 字节。配置与其他本次 settings 修改同事务提交；普通用户不能读写，公共设置不返回。持久配置损坏或读取失败时，适用请求在上游派发前返回 503，管理员可重新 PUT 有效规则恢复。
 
 管理员还可通过 `GET /api/v1/admin/accounts/{id}/usage` 查询适用的账号额度信息。Grok 返回已观察到的请求/token 限额、重置时间、Retry-After 与时间戳，并附本地当日及滚动 24 小时精确用量；HTTP（含 SSE 响应头）与 WebSocket 握手共用采集，尚无观测时明确返回 `quota_unknown`。快照仅保留已解析数值，不保存任意头、Cookie 或 plan 声明；不改变账号配置版本、消费计数或人工状态。凭证、地址、协议及代理变化清除快照，旧请求不能覆盖新配置。无额度头的普通成功响应保留上次观测及原时间戳；401/403/429 记录最近拒绝，不把缺少额度当成零。快照是历史观测，不保证当前剩余额度，也不直接改变调度。
 

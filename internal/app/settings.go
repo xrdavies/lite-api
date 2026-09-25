@@ -26,6 +26,11 @@ func (a *App) getSettings(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		fields[geminiQuotaSetting] = policy
+		fast, err := a.loadFastPolicy(r.Context())
+		if err != nil {
+			return err
+		}
+		fields[fastPolicySetting], _ = json.Marshal(fast)
 		raw, err = json.Marshal(fields)
 		if err != nil {
 			return err
@@ -35,12 +40,13 @@ func (a *App) getSettings(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
-		Name             *string         `json:"site_name"`
-		Available        *bool           `json:"available_channels_enabled"`
-		PlazaEnabled     *bool           `json:"model_plaza_enabled"`
-		PlazaRequireAuth *bool           `json:"model_plaza_require_auth"`
-		PlazaDescription *string         `json:"model_plaza_description"`
-		GeminiPolicy     json.RawMessage `json:"gemini_quota_policy"`
+		Name             *string             `json:"site_name"`
+		Available        *bool               `json:"available_channels_enabled"`
+		PlazaEnabled     *bool               `json:"model_plaza_enabled"`
+		PlazaRequireAuth *bool               `json:"model_plaza_require_auth"`
+		PlazaDescription *string             `json:"model_plaza_description"`
+		GeminiPolicy     json.RawMessage     `json:"gemini_quota_policy"`
+		FastPolicy       *fastPolicySettings `json:"openai_fast_policy_settings"`
 	}
 	if err := decode(w, r, &in); err != nil {
 		return err
@@ -50,6 +56,11 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.PlazaDescription != nil && len(*in.PlazaDescription) > 10000 {
 		return bad("model_plaza_description is too long")
+	}
+	if in.FastPolicy != nil {
+		if err := in.FastPolicy.validate(); err != nil {
+			return err
+		}
 	}
 	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
 		if _, err := parseGeminiQuotaPolicy(in.GeminiPolicy, true); err != nil {
@@ -62,6 +73,10 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer tx.Rollback()
 	values := map[string]string{}
+	if in.FastPolicy != nil {
+		raw, _ := json.Marshal(in.FastPolicy)
+		values[fastPolicySetting] = string(raw)
+	}
 	if in.Name != nil {
 		values["site_name"] = *in.Name
 	}
@@ -80,7 +95,7 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
 		values[geminiQuotaSetting] = string(in.GeminiPolicy)
 	}
-	for _, key := range []string{"site_name", "available_channels_enabled", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting} {
+	for _, key := range []string{"site_name", "available_channels_enabled", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting, fastPolicySetting} {
 		value, ok := values[key]
 		if !ok {
 			continue

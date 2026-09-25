@@ -993,6 +993,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var chatRequest *responsesChatRequest
 	maxAttempts := 3
 	originalTier := request["service_tier"]
+	fastPolicy, _ := ctx.Value(fastPolicyKey{}).(*fastPolicySettings)
 	if in.Search != nil || audioIn != nil {
 		maxAttempts = 4
 	}
@@ -1086,6 +1087,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			request["service_tier"] = originalTier
 		}
 		tier, err = g.applyFast(request, selected.Account, in)
+		if err == nil && fastPolicyProtocol(selected.Account, in) {
+			if fastPolicy == nil {
+				fastPolicy, err = a.loadFastPolicy(ctx)
+			}
+			if err == nil {
+				tier, err = fastPolicy.apply(request, g.UserID, selected.UpstreamModel, selected.Account.Platform, tier)
+			}
+		}
 		if err != nil {
 			selected.Release()
 			fail(err)

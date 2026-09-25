@@ -70,6 +70,8 @@ docker compose --env-file .env.deploy -f compose.deploy.yaml exec -T app /lite-a
 
 schema 保持不变不等于所有版本都可任意回退：Redis 中的任务、结算凭据与加密格式也必须兼容。以实际版本组合运行部署验证；有新增任务类型的版本应先完成任务或确认旧版本可恢复它。不要用 `down --volumes` 发布或回退。
 
+全局 Fast/Flex 规则沿用 `settings.openai_fast_policy_settings`，不会新增任务格式；已接受的后台任务继续按持久化档位结算。旧版本不执行这些规则，依赖 block/filter/force_priority 的流量应保持在支持该策略的版本。WebSocket 使用连接建立时的策略快照，需要立即应用新规则时应让客户端重连。
+
 启用远程 MCP 后，响应关联与后台任务含 MCP 标记，用于无声明续接的脱敏与禁止重试。回退到不识别该标记的版本前应停止相关调用并完成后台任务，不能让旧版本继续处理仍有效的 MCP 会话；保留当前版本处理这些会话，或等其归属记录到期后再回退。
 
 Code Interpreter 和托管 Shell 在响应关联及后台任务中共用工具标记与容器归属；托管 Shell 的 skill 引用按账号 `extra.response_skills` 绑定分组及上游来源，inline skill 不写入 Redis。回退到不识别这些字段的版本前须停止相关调用、结束 WebSocket 并完成后台任务；旧版本不能继续承接仍有效的代码工具会话。SQL schema 不变，容器本身的过期和数据保留由上游负责。
