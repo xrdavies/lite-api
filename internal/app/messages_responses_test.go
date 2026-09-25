@@ -245,6 +245,10 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 			return
 		}
 		n := calls.Add(1)
+		if r.URL.Path == "/v1/responses/input_tokens" {
+			fmt.Fprint(w, `{"object":"response.input_tokens","input_tokens":12}`)
+			return
+		}
 		var body map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		raw := mustJSON(body)
@@ -462,8 +466,8 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 		t.Fatal(requested, actual, err)
 	}
 	before = calls.Load()
-	if w := call("POST", "/v1/messages/count_tokens", key, body(false), ""); w.Code != 503 || calls.Load() != before {
-		t.Fatal("fabricated count", w.Code)
+	if w := call("POST", "/v1/messages/count_tokens", key, body(false), ""); w.Code != 200 || calls.Load() != before+1 || !strings.Contains(w.Body.String(), `"input_tokens":12`) {
+		t.Fatal("count_tokens bridge", w.Code, w.Body.String())
 	}
 	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
 		g := group(platform)

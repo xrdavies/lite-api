@@ -274,6 +274,10 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 			return
 		}
 		calls.Add(1)
+		if r.URL.Path == "/v1/responses/input_tokens" {
+			fmt.Fprint(w, `{"object":"response.input_tokens","input_tokens":12}`)
+			return
+		}
 		var body map[string]json.RawMessage
 		if json.NewDecoder(r.Body).Decode(&body) != nil || credentialString(body, "model") != "mapped-chat" || r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer chat-upstream" || r.Header.Get("Cookie") != "" || body["previous_response_id"] != nil || body["input"] != nil || string(body["store"]) != "false" {
 			t.Error("upstream Chat request", r.URL.Path, body)
@@ -415,6 +419,9 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	if w := call("POST", "/responses", other, continued, ""); w.Code != 404 || calls.Load() != before {
 		t.Fatal("cross-Key continuation", w.Code)
 	}
+	if w := call("POST", "/responses/input_tokens", key, continued, ""); w.Code != 400 || calls.Load() != before {
+		t.Fatal("local converted response ID sent to native counting", w.Code)
+	}
 	must("PUT", fmt.Sprintf("/api/v1/admin/accounts/%d", aid), admin, map[string]any{"credentials": map[string]any{"api_key": "rotated"}})
 	if w := call("POST", "/responses", key, continued, ""); w.Code != 503 || calls.Load() != before {
 		t.Fatal("continued after credential rotation", w.Code)
@@ -465,11 +472,11 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	}
 	mode.Store(0)
 	before = calls.Load()
-	for _, path := range []string{"/responses/compact", "/responses/input_tokens"} {
-		w := call("POST", path, key, body(false), "")
-		if w.Code != 503 || calls.Load() != before {
-			t.Fatal("native operation converted", path, w.Code)
-		}
+	if w := call("POST", "/responses/compact", key, body(false), ""); w.Code != 503 || calls.Load() != before {
+		t.Fatal("native compaction converted", w.Code)
+	}
+	if w := call("POST", "/responses/input_tokens", key, body(false), ""); w.Code != 200 || calls.Load() != before+1 || !strings.Contains(w.Body.String(), `"input_tokens":12`) {
+		t.Fatal("native count endpoint", w.Code, w.Body.String())
 	}
 	if _, err := a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_reverse_receipt CHECK(user_id<>" + fmt.Sprint(uid) + ") NOT VALID"); err != nil {
 		t.Fatal(err)

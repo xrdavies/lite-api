@@ -95,6 +95,31 @@ func (a *App) messagesReasoningInput(g *gatewayIdentity, body map[string]json.Ra
 	return saved, binding, nil
 }
 
+// Counting shares the input conversion, but never sends generation controls.
+func messagesCountRequest(body map[string]json.RawMessage, saved map[string]json.RawMessage) ([]byte, error) {
+	input := map[string]json.RawMessage{}
+	for _, field := range []string{"model", "messages", "system", "tools", "tool_choice"} {
+		if value := body[field]; value != nil {
+			input[field] = value
+		}
+	}
+	raw, _, err := messagesToResponses(input, saved)
+	if err != nil {
+		return nil, err
+	}
+	var converted map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &converted); err != nil {
+		return nil, err
+	}
+	output := map[string]json.RawMessage{}
+	for _, field := range []string{"model", "input", "tools", "tool_choice"} {
+		if value := converted[field]; value != nil {
+			output[field] = value
+		}
+	}
+	return json.Marshal(output)
+}
+
 func messagesToResponses(body map[string]json.RawMessage, saved map[string]json.RawMessage) ([]byte, string, error) {
 	options, effort, err := messagesOpenAIOptions(body)
 	if err != nil {

@@ -221,7 +221,9 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 
-三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
+三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。OpenAI 类型账号的 `/input_tokens` 独立于其文本协议，使用配置地址和 Bearer Key 调用上游同名端点。协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
+
+`POST /v1/messages/count_tokens` 和 `/messages/count_tokens` 可通过 OpenAI 类型的 Chat/Responses 账号调用 [Responses 输入计数接口](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)。沿用 Messages 分组开关、原始模型白名单、账号准入和模型映射；系统提示、消息、工具及工具选择转换为输入，生成控制参数不发往计数端点，返回 `{"input_tokens":整数}`。不调用生成端点、不创建消费记录或扣减余额/Key 额度，不受 Fast 和利润策略限制；仍执行鉴权、余额/限额、RPM及并发准入。已完成幂等请求直接重放；上游 404 返回不支持计数，负数或缺失计数返回 502。原生 Anthropic 和 Gemini 计数分支继续使用各自协议；其他平台的本地计数尚待实现，不能据此推定可用。
 
 三个前缀下的 `GET /responses/{id}` 也支持查询已成功结算、保存了归属的普通原生 HTTP/SSE/WS 响应；`GET /responses/{id}/input_items` 读取输入条目，接受 `after`、`limit=1..100`、`order=asc|desc`。两者支持官方 `include` 或 `include[]` 选项，两种参数形式不可混用，未知/重复标量参数拒绝。接口定义见 [查询响应](https://developers.openai.com/api/reference/resources/responses/methods/retrieve) 和 [输入条目列表](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list)。
 
@@ -329,7 +331,7 @@ OpenAI 接受 search_context_size、近似 user_location，以及正式工具的
 
 搜索模拟仍执行余额、Key/平台额度、模型与渠道限制、并发、RPM、幂等及事务结算。响应 token 是文本长度估算，账务记录模型 token 为零；显式按次价格仍收费，token 价格下费用为零。搜索失败不记成功用量；结束事件在结算后发送，JSON 幂等重放不重新搜索。管理测试不计用户费用。仅使用本地协议服务和真实 PostgreSQL/Redis 验证，尚未使用真实 Brave/Tavily 凭证联调。
 
-`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 及 `/messages/count_tokens` 别名支持原生 Anthropic 计数及 Gemini 转换计数；别名共用鉴权、模型限制和幂等记录，不写消费账务。按量兼容平台可使用 `credentials.api_protocol=anthropic`。原生转发时版本和 beta 协议头受长度限制后传递，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
+`POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 及 `/messages/count_tokens` 别名支持原生 Anthropic、Gemini 转换和 OpenAI 输入计数桥接；别名共用鉴权、模型限制和幂等记录，不写消费账务。按量兼容平台可使用 `credentials.api_protocol=anthropic`。原生转发时版本和 beta 协议头受长度限制后传递，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
 
 OpenAI 目标的 Messages 和 count_tokens 入口需要管理员设置 `allow_messages_dispatch=true`，默认关闭；composite 路由到 OpenAI 时使用该组开关，其他目标继续使用各自协议。配置 Claude Code fallback 时使用实际调度组的开关与映射。已完成的幂等结果可重放；新请求和等待账号期间的策略变更受检查。
 
@@ -337,11 +339,11 @@ OpenAI 分组的 `messages_dispatch_model_config` 接受 `opus_mapped_model`、`
 
 Messages 调度模型用于账号能力筛选和优先账号池。实际转发先应用渠道映射，命中的账号映射（包括原样透传）优先；未命中时采用分组调度模型，不对其再次做账号映射。白名单始终检查客户端原始模型，日志及 requested 计价仍保留原名，channel_mapped/upstream 计价分别使用实际对应阶段的名称；普通 Chat/Responses 不使用此配置。用户分组视图仅返回开关，不公开内部映射。
 
-Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；`count_tokens` 仍要求原生计数账号。
+Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；OpenAI 类型的 `count_tokens` 使用上文的输入计数桥接，其他兼容平台仍待各自计数实现。
 
 该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。
 
-Messages 也可直接调用上述六个平台的 Responses 协议账号，支持 JSON/SSE、系统/图文/PDF、工具及包含图片的工具结果、结构化输出。请求使用 `store=false` 与 `include=["reasoning.encrypted_content"]`，不经过 Chat 格式；工具 ID 与数字精度保持。文本及思考摘要增量返回，工具块和后续内容等结算成功后发送；length/filter 分别成为 max_tokens/refusal，原始 Responses 用量参与扣费。该转换不支持非空 stop_sequences、托管工具或原生 count_tokens。
+Messages 也可直接调用上述六个平台的 Responses 协议账号，支持 JSON/SSE、系统/图文/PDF、工具及包含图片的工具结果、结构化输出。请求使用 `store=false` 与 `include=["reasoning.encrypted_content"]`，不经过 Chat 格式；工具 ID 与数字精度保持。文本及思考摘要增量返回，工具块和后续内容等结算成功后发送；length/filter 分别成为 max_tokens/refusal，原始 Responses 用量参与扣费。生成转换不支持非空 stop_sequences 或托管工具；OpenAI 类型账号的 count_tokens 使用独立输入计数桥接。
 
 Responses 思考密文通过 AES-GCM 封装为 Messages 的 signature，绑定当前客户端 Key/分组和上游账号/凭证来源，30 天有效。客户端携带该签名续接时只能选择原来源；跨 Key/组、篡改、到期、部署密钥或上游凭证轮换会拒绝，原账号不可用时不改投。外部厂商签名不作为 Responses 密文转发。服务端不为此保存新会话表或明文历史；相同响应的幂等重放保留原签名。完整 reasoning item 的 ID、summary 和 encrypted_content 用于重放，行为依据 [OpenAI reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)。已用本地 HTTP 上游和数据库验证，尚未进行真实上游联调。
 

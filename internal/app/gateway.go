@@ -400,7 +400,10 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if (protocol == "chat_completions" || protocol == "anthropic") && u.protocol() == "gemini" {
 			matches = true
 		}
-		if protocol == "anthropic" && !in.CountOnly && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
+		if protocol == "anthropic" && (!in.CountOnly || u.Platform == "openai") && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
+			matches = true
+		}
+		if protocol == "responses" && in.CountOnly && u.Platform == "openai" {
 			matches = true
 		}
 		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
@@ -913,6 +916,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if err == nil && binding != nil && binding.ImageTool && in.ResponseImage == nil && !in.CountOnly {
 		err = bad("image-capable continuations must declare image_generation again")
 	}
+	if err == nil && in.CountOnly && binding != nil && binding.History != "" {
+		err = bad("counting a converted response requires resending the full input")
+	}
 	if err == nil && binding != nil && binding.MCPTool {
 		in.NativeMCP = true
 		ctx = context.WithValue(ctx, responseSecretsKey{}, true)
@@ -1175,7 +1181,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 			geminiBridge = newGeminiChatStream(model, includeChatUsage, custom)
 		}
-		if protocol == "anthropic" && selected.Account.protocol() == "responses" {
+		if protocol == "anthropic" && in.CountOnly && selected.Account.Platform == "openai" && selected.Account.protocol() != "anthropic" {
+			upstreamBody, err = messagesCountRequest(request, reasoningInput)
+			if err != nil {
+				selected.Release()
+				fail(err)
+				return
+			}
+			wireIn.Protocol, wireIn.Headers, wireIn.Action = "responses", nil, "/input_tokens"
+			path = "/v1/responses/input_tokens"
+		}
+		if protocol == "anthropic" && !in.CountOnly && selected.Account.protocol() == "responses" {
 			upstreamBody, wireIn.Effort, err = messagesToResponses(request, reasoningInput)
 			if err != nil {
 				selected.Release()
@@ -1188,7 +1204,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return a.sealMessagesReasoning(g, selected.Account, item)
 			})
 		}
-		if protocol == "anthropic" && selected.Account.protocol() == "chat_completions" {
+		if protocol == "anthropic" && !in.CountOnly && selected.Account.protocol() == "chat_completions" {
 			upstreamBody, wireIn.Effort, err = messagesToChat(request)
 			if err != nil {
 				selected.Release()
@@ -1222,7 +1238,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			path = "/v1/responses"
 			chatBridge = newResponseChatStream(model, includeChatUsage)
 		}
-		if protocol == "responses" && selected.Account.protocol() != "responses" {
+		if protocol == "responses" && !in.CountOnly && selected.Account.protocol() != "responses" {
 			if selected.Account.protocol() == "anthropic" {
 				chatRequest, wireIn.Effort, err = responsesToAnthropicRequest(request, history)
 			} else {
@@ -1412,7 +1428,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		status := resp.StatusCode
 		failureBody := readUpstreamError(resp)
 		resp.Body.Close()
-		failure := a.upstreamError(ctx, selected.Account, status, failureBody, &apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)})
+		fallbackError := &apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)}
+		countUnsupported := in.CountOnly && wireIn.Protocol == "responses" && status == http.StatusNotFound
+		if countUnsupported {
+			fallbackError = &apiError{404, "token counting is not supported by upstream"}
+		}
+		failure := a.upstreamError(ctx, selected.Account, status, failureBody, fallbackError)
 		lastRejection = nil
 		_ = errors.As(failure, &lastRejection)
 		lastRejectedAccount = selected
@@ -1424,6 +1445,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			a.markGatewayFailure(ctx, selected, status, resp.Header.Get("Retry-After"), failureBody)
 		}
 		selected.Release()
+		if countUnsupported {
+			fail(failure)
+			return
+		}
 		if in.NativeMCP || in.NativeCode || in.NativeProgrammatic || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			// A tool may already have acted before the provider returned an error.
 			fail(failure)
@@ -1515,11 +1540,15 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			if wireIn.Protocol == "responses" && forwardErr == nil {
 				responseBody, forwardErr = sanitizeResponseTools(responseBody)
 			}
-			if forwardErr == nil && in.CountOnly && protocol == "anthropic" && wireIn.Protocol == "gemini" {
+			if forwardErr == nil && in.CountOnly && protocol == "anthropic" && (wireIn.Protocol == "gemini" || wireIn.Protocol == "responses") {
 				var count struct {
 					Total int64 `json:"totalTokens"`
+					Input int64 `json:"input_tokens"`
 				}
 				_ = json.Unmarshal(responseBody, &count)
+				if wireIn.Protocol == "responses" {
+					count.Total = count.Input
+				}
 				responseBody, _ = json.Marshal(map[string]int64{"input_tokens": count.Total})
 			}
 			if forwardErr == nil && wireIn.Protocol == "responses" && !in.CountOnly && !observation.complete() {
