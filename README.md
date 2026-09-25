@@ -101,6 +101,8 @@ Gemini 同一路径返回 `source=local` 的本地估算，按模型名 flash/li
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video，以及 Grok 专用 search、tts、stt、realtime；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。
 
+账号 `extra.upstream_request_id_header` 可指定直接上游用于标识请求的 HTTP 响应头，例如 `X-Request-ID`；头名最多 64 字节，忽略大小写，省略保持配置，空白或 null 清除。用量 `upstream_request_id` 只记录该头的值，去除首尾空白并按 UTF-8 边界截到 128 字节；未配置、缺失或非法值写入 NULL。视频、Seedance、后台 Responses 和异步图片保存创建请求时的标识，轮询、配置修改及结算恢复不替换它。WebSocket 用量保持 NULL；供应商任务/响应 ID 继续用于资源查询和归属，不代替 HTTP 请求标识。历史已结算记录不改写。
+
 `POST /api/v1/admin/accounts` 和 `POST /api/v1/admin/proxies` 可携带 `Idempotency-Key`，各操作分别保留 24 小时。相同管理员和请求（包括凭证）返回首次创建的脱敏结果，并设置两个重放响应头；同一操作下换管理员或改请求返回 409。并发重试只创建一次，资源、关联关系和重放结果同事务提交，失败全部回滚。成功重放不重新解析上游地址或检查代理当前可用性，不覆盖后续编辑，也不恢复已删除资源；因此返回的创建快照可能与当前详情不同。省略该请求头时每次独立创建，已完成记录到期后可重新创建；未解决的 processing 记录仍拒绝重试。现有 SQL 表中只新增脱敏响应和指纹，不额外保存上游 Key 或代理密码。
 
 图片测试返回 `image` 事件，视频创建后轮询至成功并返回 `video` 事件，只有真实结果通过校验才发送 `test_complete`。`image_data_url` 接受最多 8 MiB 的 PNG/JPEG/WebP/GIF base64 图片，用于图片编辑或视频首帧；输入 JSON 上限 12 MiB，媒体响应上限 16 MiB。原厂 OpenAI 编辑使用 [JSON 图片引用格式](https://developers.openai.com/api/reference/resources/images/methods/edit)，Grok 使用其 image 对象，Gemini 使用 inlineData。文本上限 45 秒、媒体上限 90 秒；视频超时按失败记录，并保留已接收任务 ID 供管理员核查，不重发创建。测试结果中的图片和签名 URL 只向管理员响应，不存入定时结果表。

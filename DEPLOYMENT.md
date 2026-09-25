@@ -50,7 +50,7 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-deployment.py
 - SQL 故障下消费不提交，Redis 保留待结算凭据；同时保留运行中的 Seedance 任务。
 - 对应用、Redis、PostgreSQL 执行 SIGKILL，原卷恢复后用上一提交镜像结算；检查会话、价格快照、余额/Key/用量及上游调用次数。
 - 回退后再次升级，不重复生成、扣费或管理员充值，成功请求仍能幂等重放。
-- 重新升级后创建 programmatic 后台任务，修改价格并制造 SQL 故障，再次强杀应用/Redis/PostgreSQL；由当前版本恢复原价一次结算，核对 Key 隔离、程序结果、幂等重放和无声明续接。该任务不交给不认识 programmatic 标记的旧版本。
+- 重新升级后创建 programmatic 后台任务，修改价格并制造 SQL 故障，再次强杀应用/Redis/PostgreSQL；由当前版本恢复原价一次结算，核对 Key 隔离、程序结果、幂等重放和无声明续接。同时检查上游请求 ID 仍来自创建响应头，创建后清除账号头名配置、轮询和强杀恢复均不替换它，后续新请求写入 NULL。该任务不交给不认识 programmatic 标记的旧版本。
 - 在只读镜像中使用编译内置词表执行 Grok 无账号计数、DeepSeek 本地计数和别名幂等重放；上游调用次数、余额和消费记录保持不变。
 
 此脚本补充 `scripts/test-integration.py` 的 Docker/race 业务回归。后者使用临时 MinIO 验证 S3 签名、图片转存/下载、存储故障与账务恢复；两者均不能代替真实模型供应商、各云存储配置联调或全量容量测试。
@@ -70,6 +70,8 @@ docker compose --env-file .env.deploy -f compose.deploy.yaml exec -T app /lite-a
 ```
 
 schema 保持不变不等于所有版本都可任意回退：Redis 中的任务、结算凭据与加密格式也必须兼容。以实际版本组合运行部署验证；有新增任务类型的版本应先完成任务或确认旧版本可恢复它。不要用 `down --volumes` 发布或回退。
+
+上游请求 ID 修正后，视频和后台 Responses 任务单独保存创建响应头标识。旧版可以忽略新增字段并继续账务恢复，但会恢复其原来的错误标识语义；要求请求标识准确时，应由支持该字段的版本完成这些任务。新版本读取没有该字段的旧任务时保持 NULL，已经生成的旧结算检查点和已结算历史行不回填。
 
 全局 Fast/Flex 规则沿用 `settings.openai_fast_policy_settings`，不会新增任务格式；已接受的后台任务继续按持久化档位结算。旧版本不执行这些规则，依赖 block/filter/force_priority 的流量应保持在支持该策略的版本。WebSocket 使用连接建立时的策略快照，需要立即应用新规则时应让客户端重连。
 

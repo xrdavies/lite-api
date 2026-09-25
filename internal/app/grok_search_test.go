@@ -177,7 +177,7 @@ func testGrokSearch(t *testing.T, a *App, admin string) {
 	}))
 	defer upstream.Close()
 	account := func(name, protocol string, priority int) int64 {
-		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": name, "platform": "grok", "type": "apikey", "priority": priority, "concurrency": 1, "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"quota_limit": 100}, "credentials": map[string]any{"api_key": name, "base_url": upstream.URL + "/v1", "api_protocol": protocol, "model_mapping": map[string]string{"grok-4.6": "native-grok-search"}}}))
+		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": name, "platform": "grok", "type": "apikey", "priority": priority, "concurrency": 1, "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"upstream_request_id_header": "X-Request-ID", "quota_limit": 100}, "credentials": map[string]any{"api_key": name, "base_url": upstream.URL + "/v1", "api_protocol": protocol, "model_mapping": map[string]string{"grok-4.6": "native-grok-search"}}}))
 	}
 	aid := account("grok-primary", "chat_completions", 1)
 	body := map[string]any{"query": " team query ", "max_results": 100, "model": "ignored-model", "tools": "untrusted", "store": true}

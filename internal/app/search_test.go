@@ -106,7 +106,7 @@ func testAlphaSearch(t *testing.T, a *App, admin string) {
 	}))
 	defer upstream.Close()
 	account := func(name, protocol, secret string, priority int) int64 {
-		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": name, "platform": "openai", "type": "apikey", "priority": priority, "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"quota_limit": 100}, "credentials": map[string]any{"api_key": secret, "base_url": upstream.URL + "/v1", "api_protocol": protocol, "model_mapping": map[string]string{"public-search": "upstream-search"}}}))
+		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": name, "platform": "openai", "type": "apikey", "priority": priority, "group_ids": []int64{gid}, "rate_multiplier": 3, "extra": map[string]any{"upstream_request_id_header": "X-Request-ID", "quota_limit": 100}, "credentials": map[string]any{"api_key": secret, "base_url": upstream.URL + "/v1", "api_protocol": protocol, "model_mapping": map[string]string{"public-search": "upstream-search"}}}))
 	}
 	aid := account("Search", "chat_completions", "search-upstream", 1)
 	body := map[string]any{"model": "public-search", "id": "search-session", "commands": []any{map[string]any{"type": "search", "query": "team query"}}, "prompt_cache_key": "private-cache", "store": true, "prompt_cache_retention": "24h"}

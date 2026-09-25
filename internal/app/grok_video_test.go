@@ -118,6 +118,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 			t.Error("upstream credential isolation")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Video-Trace", "video-"+r.Method)
 		if r.Method == "POST" {
 			creates++
 			operations[r.URL.Path]++
@@ -154,7 +155,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 	}))
 	defer provider.Close()
 	providerURL = provider.URL
-	aid := id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "video", "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "concurrency": 3, "rate_multiplier": 3, "credentials": map[string]any{"api_key": "video-provider-secret", "base_url": provider.URL, "model_mapping": map[string]string{"team-video": "grok-imagine-video-1.5"}}, "extra": map[string]any{"quota_limit": 100}}))
+	aid := id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "video", "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "concurrency": 3, "rate_multiplier": 3, "credentials": map[string]any{"api_key": "video-provider-secret", "base_url": provider.URL, "model_mapping": map[string]string{"team-video": "grok-imagine-video-1.5"}}, "extra": map[string]any{"quota_limit": 100, upstreamRequestIDHeaderKey: "X-Video-Trace"}}))
 	apath := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	body := map[string]any{"model": "team-video", "prompt": "private video prompt", "duration": 5, "resolution": "720p"}
 	create := func(path, k, idem string) string {
@@ -203,6 +204,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 		t.Fatal("zero balance create", w.Code)
 	}
 	exec("UPDATE users SET balance=100 WHERE id=$1", uid)
+	manage("PUT", apath, admin, map[string]any{"extra": map[string]any{upstreamRequestIDHeaderKey: "X-Changed"}})
 	manage("PUT", gpath, admin, map[string]any{"video_price_720p": "9", "video_rate_multiplier": "7"})
 	exec("ALTER TABLE usage_logs ADD CONSTRAINT test_grok_video_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID")
 	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_grok_video_failure")
@@ -219,6 +221,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 			t.Fatal(err)
 		}
 	}
+	assertUsageRequestID(t, a, first, "video-POST")
 	var count, seconds int
 	var actual, mode, resolution, balance, used, accountUsed string
 	if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text,min(billing_mode),min(video_resolution),min(video_duration_seconds) FROM usage_logs WHERE request_id=$1", first).Scan(&count, &actual, &mode, &resolution, &seconds); err != nil || count != 1 || actual != "0.0300000000" || mode != "video" || resolution != "720p" || seconds != 6 {

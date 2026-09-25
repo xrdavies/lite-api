@@ -16,7 +16,50 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
+
+const upstreamRequestIDHeaderKey = "upstream_request_id_header"
+
+func validRequestIDHeader(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, c := range name {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanUpstreamRequestID(id string) string {
+	id = strings.TrimSpace(id)
+	if !utf8.ValidString(id) || strings.ContainsAny(id, "\x00\r\n") {
+		return ""
+	}
+	if len(id) > 128 {
+		id = id[:128]
+		for !utf8.ValidString(id) {
+			id = id[:len(id)-1]
+		}
+	}
+	return id
+}
+
+// Only an explicitly configured HTTP response header identifies the request.
+// Provider resource IDs and WebSocket handshake IDs have different meanings.
+func upstreamRequestID(account *upstreamAccount, headers http.Header) string {
+	if account == nil {
+		return ""
+	}
+	name := strings.TrimSpace(credentialString(account.Extra, upstreamRequestIDHeaderKey))
+	if !validRequestIDHeader(name) {
+		return ""
+	}
+	return cleanUpstreamRequestID(headers.Get(name))
+}
 
 // URL and DNS validation run at configuration time and again on each connection.
 // Private destinations require deployment-level CIDR authorization, never a request flag.

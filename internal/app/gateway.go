@@ -1547,12 +1547,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			observation.ImageStream = &responseImageMeter{}
 		}
 	}
-	upstreamID := resp.Header.Get("X-Request-ID")
-	if upstreamID == "" {
-		upstreamID = resp.Header.Get("Xai-Request-Id")
-	}
-	if upstreamID == "" {
-		upstreamID = resp.Header.Get("Request-Id")
+	upstreamID := ""
+	if socketTurn(ctx) == nil {
+		upstreamID = upstreamRequestID(selected.Account, resp.Header)
 	}
 	firstToken := int64(0)
 	observe := observation.observe

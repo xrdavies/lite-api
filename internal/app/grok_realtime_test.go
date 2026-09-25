@@ -117,7 +117,7 @@ func testGrokRealtime(t *testing.T, a *App, admin string) {
 	}))
 	defer up.Close()
 	account := func(secret string, priority int) int64 {
-		return id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": secret, "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "priority": priority, "concurrency": 5, "rate_multiplier": 0.5, "extra": map[string]any{"quota_limit": 100}, "credentials": map[string]any{"api_key": secret, "base_url": up.URL + "/v1", "model_mapping": map[string]string{"text-only": "text-model"}}}))
+		return id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": secret, "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "priority": priority, "concurrency": 5, "rate_multiplier": 0.5, "extra": map[string]any{"quota_limit": 100, upstreamRequestIDHeaderKey: "X-Request-ID"}, "credentials": map[string]any{"api_key": secret, "base_url": up.URL + "/v1", "model_mapping": map[string]string{"text-only": "text-model"}}}))
 	}
 	aid := account("voice-primary", 1)
 	account("voice-backup", 2)
@@ -237,13 +237,14 @@ func testGrokRealtime(t *testing.T, a *App, admin string) {
 	time.Sleep(120 * time.Millisecond)
 	c.Close(websocket.StatusNormalClosure, "")
 	finished(rid)
-	var total, actual, model, providerID, accountCost string
+	var total, actual, model, accountCost string
+	var nullProviderID bool
 	var duration int64
 	var ws bool
-	err = a.DB.QueryRow("SELECT total_cost::text,actual_cost::text,model,upstream_request_id,duration_ms,openai_ws_mode,account_rate_multiplier::text FROM usage_logs WHERE request_id=$1", rid).Scan(&total, &actual, &model, &providerID, &duration, &ws, &accountCost)
+	err = a.DB.QueryRow("SELECT total_cost::text,actual_cost::text,model,upstream_request_id IS NULL,duration_ms,openai_ws_mode,account_rate_multiplier::text FROM usage_logs WHERE request_id=$1", rid).Scan(&total, &actual, &model, &nullProviderID, &duration, &ws, &accountCost)
 	// Original snapshot: 60/min = 1/sec, user multiplier 2; SQL duration has millisecond precision.
 	delta := new(big.Rat).Sub(rat(json.Number(total)), big.NewRat(duration, 1000))
-	if err != nil || !ws || model != "grok-voice-latest" || providerID != "same-provider-id" || delta.Sign() < 0 || delta.Cmp(big.NewRat(1, 1000)) >= 0 || rat(json.Number(actual)).Cmp(new(big.Rat).Mul(rat(json.Number(total)), big.NewRat(2, 1))) != 0 {
+	if err != nil || !ws || model != "grok-voice-latest" || !nullProviderID || delta.Sign() < 0 || delta.Cmp(big.NewRat(1, 1000)) >= 0 || rat(json.Number(actual)).Cmp(new(big.Rat).Mul(rat(json.Number(total)), big.NewRat(2, 1))) != 0 {
 		t.Fatal("realtime snapshot accounting", total, actual, duration, ws, err)
 	}
 	var matched bool

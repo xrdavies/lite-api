@@ -91,6 +91,7 @@ class Provider(BaseHTTPRequestHandler):
                 raw = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("X-Trace-ID", "creation-request")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -112,6 +113,7 @@ class Provider(BaseHTTPRequestHandler):
         raw = json.dumps(result).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Trace-ID", "poll-request")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -300,6 +302,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         task_id = json.loads(raw)["id"]
         count_before = int(sql("SELECT count(*) FROM usage_logs"))
         assert count_before == 42
+        assert sql("SELECT bool_and(upstream_request_id IS NULL) FROM usage_logs") == "t"
         sql("ALTER TABLE usage_logs ADD CONSTRAINT deployment_failure CHECK (false) NOT VALID;")
         status, raw, _ = request(base, "POST", "/v1/chat/completions", key, streamed, "deploy-recover")
         assert b"settlement" in raw and b"data: [DONE]" not in raw
@@ -343,8 +346,9 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         # a programmatic session whose safeguards it cannot recognize.
         pgid = api("POST", "/api/v1/admin/groups", admin, {"name": "Program recovery", "platform": "openai", "rate_multiplier": 2,
                     "model_pricing": [{"platform": "openai", "models": ["deploy-program"], "input_price": "0.001", "output_price": "0.002", "cache_read_price": "0", "cache_write_price": "0"}]})["id"]
-        api("POST", "/api/v1/admin/accounts", admin, {"name": "Program provider", "platform": "openai", "type": "apikey", "group_ids": [pgid],
-            "credentials": {"api_key": provider_key, "base_url": upstream, "api_protocol": "responses"}})
+        paid = api("POST", "/api/v1/admin/accounts", admin, {"name": "Program provider", "platform": "openai", "type": "apikey", "group_ids": [pgid],
+            "extra": {"upstream_request_id_header": "X-Trace-ID"},
+            "credentials": {"api_key": provider_key, "base_url": upstream, "api_protocol": "responses"}})["id"]
         pkey_obj = api("POST", "/api/v1/keys", token, {"name": "Program recovery", "group_id": pgid, "quota": 100})
         pkey, pkid = pkey_obj["key"], pkey_obj["id"]
         secrets_seen.append(pkey)
@@ -356,6 +360,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
                 error = error.replace(value, "[redacted]")
             raise AssertionError(f"program submission HTTP {status}: {error}")
         assert json.loads(raw)["id"] == "resp_deploy_program"
+        api("PUT", f"/api/v1/admin/accounts/{paid}", admin, {"extra": {"upstream_request_id_header": None}})
         api("PUT", f"/api/v1/admin/groups/{pgid}", admin, {"rate_multiplier": 9})
         sql("ALTER TABLE usage_logs ADD CONSTRAINT program_failure CHECK (false) NOT VALID;")
         program_ready.set()
@@ -381,6 +386,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert request(base, "GET", "/responses/resp_deploy_program", key)[0] == 404
         count, cost, used = sql(f"SELECT (SELECT count(*) FROM usage_logs WHERE api_key_id={pkid}),(SELECT sum(actual_cost) FROM usage_logs WHERE api_key_id={pkid}),quota_used FROM api_keys WHERE id={pkid}").split("|")
         assert count == "1" and Decimal(cost) == Decimal("0.016") and Decimal(used) == Decimal(cost)
+        assert sql(f"SELECT upstream_request_id FROM usage_logs WHERE api_key_id={pkid}") == "creation-request"
         assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal("0.016")
         status, _, headers = request(base, "POST", "/v1/responses", pkey, program, "deploy-program")
         assert status == 200 and headers.get("Idempotency-Replayed") == "true" and calls == before_program
@@ -391,6 +397,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert calls["program"] == before_program["program"] + 1
         cost = sql(f"SELECT sum(actual_cost) FROM usage_logs WHERE api_key_id={pkid}")
         assert Decimal(cost) == Decimal("0.016") + Decimal("0.072")
+        assert sql(f"SELECT upstream_request_id IS NULL FROM usage_logs WHERE api_key_id={pkid} ORDER BY id DESC LIMIT 1") == "t"
         assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal(cost)
         print("Programmatic task: SIGKILL recovery, original price, one settlement, replay and scoped continuation verified", flush=True)
         # Exercise compiled-in token vocabularies in the scratch image. Both

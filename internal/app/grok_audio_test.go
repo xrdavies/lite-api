@@ -198,7 +198,7 @@ func testGrokAudio(t *testing.T, a *App, admin string) {
 	}))
 	defer upstream.Close()
 	account := func(secret string, priority int) int64 {
-		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": secret, "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "priority": priority, "rate_multiplier": 0.5, "credentials": map[string]any{"api_key": secret, "base_url": upstream.URL, "model_mapping": map[string]string{"text-only": "grok-text"}}, "extra": map[string]any{"quota_limit": 10}}))
+		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": secret, "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "priority": priority, "rate_multiplier": 0.5, "credentials": map[string]any{"api_key": secret, "base_url": upstream.URL, "model_mapping": map[string]string{"text-only": "grok-text"}}, "extra": map[string]any{"upstream_request_id_header": "Xai-Request-Id", "quota_limit": 10}}))
 	}
 	aid := account("audio-primary", 1)
 	_ = account("audio-backup", 2)

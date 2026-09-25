@@ -120,6 +120,21 @@ func (in *accountInput) validate(create bool) error {
 	}
 	for key, value := range in.Extra {
 		switch key {
+		case upstreamRequestIDHeaderKey:
+			var name string
+			if json.Unmarshal(value, &name) != nil {
+				return bad("upstream_request_id_header must be a string")
+			}
+			name = strings.TrimSpace(name)
+			if name != "" && !validRequestIDHeader(name) {
+				return bad("invalid upstream_request_id_header")
+			}
+			in.Extra[key] = json.RawMessage("null")
+			if name != "" {
+				in.Extra[key], _ = json.Marshal(name)
+			} else if create {
+				delete(in.Extra, key)
+			}
 		case responseStoresKey, responseFilesKey, responseSkillsKey:
 			if _, err := parseResponseResourceGrants(value); err != nil {
 				return err
@@ -411,6 +426,9 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 			b, _ := json.Marshal(entry.value)
 			args = append(args, string(b))
 			expression := fmt.Sprintf("%s || $%d::jsonb", entry.name, len(args))
+			if entry.name == "extra" && string(entry.value[upstreamRequestIDHeaderKey]) == "null" {
+				expression = "(" + expression + ") - 'upstream_request_id_header'"
+			}
 			if entry.name == "extra" && (oldTarget != responseTarget(u) || in.ProxyID != nil) {
 				expression = "(" + expression + ") - 'upstream_model_metadata' - 'upstream_billing_probe' - 'grok_usage_snapshot'"
 			}

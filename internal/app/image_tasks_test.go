@@ -149,6 +149,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Image-Trace", "image-create-trace")
 		png := base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...))
 		_, _ = fmt.Fprintf(w, `{"created":1710000000,"data":[{"b64_json":%q}]}`, png)
 	}))
@@ -165,7 +166,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": "async-images@example.test", "password": "async-images-password"})["access_token"].(string)
 	gid := int64(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Async images", "platform": "openai", "allow_image_generation": true, "image_price_2k": "0.04", "image_rate_independent": true, "image_rate_multiplier": "0.5"})["id"].(float64))
 	manage("POST", "/api/v1/admin/channels", admin, map[string]any{"name": "Async image prices", "group_ids": []int64{gid}, "model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"async-image"}, "billing_mode": "image", "per_request_price": json.Number("0.02")}}})
-	manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Async image provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "async-upstream", "base_url": upstream.URL, "model_mapping": map[string]string{"async-image": "async-upstream-model"}}})
+	manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Async image provider", "platform": "openai", "type": "apikey", "extra": map[string]any{upstreamRequestIDHeaderKey: "X-Image-Trace"}, "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "async-upstream", "base_url": upstream.URL, "model_mapping": map[string]string{"async-image": "async-upstream-model"}}})
 	keyData := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Async image key", "group_id": gid, "quota": 100})
 	key := keyData["key"].(string)
 	kid := int64(keyData["id"].(float64))
@@ -342,6 +343,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 		t.Fatal("repeat checkpoint recovery", err)
 	}
 	poll(recoverID, "completed")
+	assertUsageRequestID(t, a, recoverID, "image-create-trace")
 	if upstreamCalls.Load() != count {
 		t.Fatal("recovery resubmitted generation")
 	}

@@ -93,6 +93,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 			w.WriteHeader(302)
 			return
 		}
+		w.Header().Set("X-Request-ID", "handshake-is-not-a-turn")
 		c, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
@@ -179,7 +180,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 		}
 	}))
 	defer func() { close(release); up.Close() }()
-	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Socket upstream", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "concurrency": 2, "credentials": map[string]any{"api_key": "native-secret", "base_url": up.URL + "/v1", "api_protocol": "responses", "model_mapping": map[string]string{"public-ws": "up-ws"}}, "extra": map[string]any{"openai_apikey_responses_websockets_v2_mode": "passthrough"}}))
+	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Socket upstream", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "concurrency": 2, "credentials": map[string]any{"api_key": "native-secret", "base_url": up.URL + "/v1", "api_protocol": "responses", "model_mapping": map[string]string{"public-ws": "up-ws"}}, "extra": map[string]any{upstreamRequestIDHeaderKey: "X-Request-ID", "openai_apikey_responses_websockets_v2_mode": "passthrough"}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	server := httptest.NewServer(a.Handler())
 	defer server.Close()
@@ -309,6 +310,10 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 		t.Fatal(cost, effort, requested, ws, kind, err)
 	}
 	var fastTier, total string
+	var nullRequestID bool
+	if err := a.DB.QueryRow("SELECT bool_and(upstream_request_id IS NULL) FROM usage_logs WHERE api_key_id=$1", kid).Scan(&nullRequestID); err != nil || !nullRequestID {
+		t.Fatal("WebSocket recorded an HTTP request ID", err)
+	}
 	if err := a.DB.QueryRow("SELECT service_tier,total_cost::text FROM usage_logs WHERE api_key_id=$1 ORDER BY id DESC LIMIT 1", kid).Scan(&fastTier, &total); err != nil || fastTier != "priority" || total != "0.0380000000" {
 		t.Fatal("WebSocket fast accounting", fastTier, total, err)
 	}

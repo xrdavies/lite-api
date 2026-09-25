@@ -161,6 +161,7 @@ type videoTask struct {
 	Protocol, Operation, Resolution            string
 	Seconds                                    int64
 	ID, UpstreamID, Target, Stage              string
+	UpstreamRequestID                          string `json:",omitempty"`
 	Identity                                   gatewayIdentity
 	Selection                                  gatewaySelection
 	Requested, Payload, IP, UserAgent, Inbound string
@@ -350,7 +351,7 @@ func (a *App) refreshVideoTask(ctx context.Context, t *videoTask) error {
 	switch status {
 	case "succeeded":
 		at := time.Now().UTC()
-		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, model, "", "", usage, false, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamID)
+		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, model, "", "", usage, false, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamRequestID)
 		if err != nil {
 			return err
 		}
@@ -652,6 +653,7 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 	}
 	task := &videoTask{ID: "task_" + randomToken(18), UpstreamID: accepted.ID, Target: responseTarget(s.Account), Stage: "pending", Identity: *g, Selection: *s, Requested: model, Payload: digest(string(upstreamBody)), IP: clientIP(r), UserAgent: truncate(r.UserAgent(), 512), Inbound: r.URL.Path, Created: started}
 	task.Protocol, task.Operation, task.Resolution, task.Seconds = protocol, operation, resolution, seconds
+	task.UpstreamRequestID = upstreamRequestID(s.Account, resp.Header)
 	account := *s.Account
 	account.Credentials = nil
 	account.Extra = map[string]json.RawMessage{}

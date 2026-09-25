@@ -175,6 +175,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 		}
 		return definite, a.upstreamError(r.Context(), s.Account, resp.StatusCode, raw, &apiError{502, "upstream background submission rejected"})
 	}
+	t.UpstreamRequestID = upstreamRequestID(s.Account, resp.Header)
 	if in.Stream {
 		resp.Body = &idleStreamBody{ReadCloser: resp.Body, ctx: upstreamCtx, cancel: stop, idle: a.streamIdle}
 		err = a.streamBackgroundResponse(w, r, t, resp)
@@ -283,7 +284,7 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 		if t.Selection.Account.Platform == "openai" {
 			tier = openAIBillingTier(t.Tier, tier)
 		}
-		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, observation.Model, tier, t.Effort, observation.Usage, t.Stream, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamID)
+		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, observation.Model, tier, t.Effort, observation.Usage, t.Stream, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamRequestID)
 		if err != nil {
 			return err
 		}

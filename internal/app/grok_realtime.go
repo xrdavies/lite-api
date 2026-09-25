@@ -188,7 +188,6 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	var upstream *websocket.Conn
 	var lastRejection *passthroughError
 	var lastRejectedAccount *gatewaySelection
-	upstreamID := ""
 	for attempt := 0; attempt < 4; attempt++ {
 		selected, err = a.chooseAccount(ctx, g, model, in, excluded, binding, nil, a.prices.Load())
 		var busy *accountBusy
@@ -246,12 +245,6 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 		upstream, resp, err = a.dialUpstreamSocket(dialCtx, selected.Account, "/v1/realtime?model="+url.QueryEscape(model), http.Header{"Authorization": []string{"Bearer " + credentialString(selected.Account.Credentials, "api_key")}, "User-Agent": []string{"lite-api/1"}})
 		dialCancel()
 		if err == nil {
-			if resp != nil {
-				upstreamID = resp.Header.Get("X-Request-ID")
-				if upstreamID == "" {
-					upstreamID = resp.Header.Get("Xai-Request-Id")
-				}
-			}
 			break
 		}
 		status, retry := 502, ""
@@ -299,7 +292,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	defer client.CloseNow()
 	client.SetReadLimit(4 << 20)
 	connected := time.Now()
-	if err = a.relayRealtime(ctx, cancel, client, upstream, r, id, model, upstreamID, connected, g, selected); err != nil {
+	if err = a.relayRealtime(ctx, cancel, client, upstream, r, id, model, connected, g, selected); err != nil {
 		a.recordGatewayError(id, g, selected, r, in, err, started)
 	}
 }
@@ -340,7 +333,7 @@ type realtimeFrame struct {
 	err    error
 }
 
-func (a *App) relayRealtime(ctx context.Context, cancel context.CancelFunc, client, upstream *websocket.Conn, r *http.Request, id, model, upstreamID string, started time.Time, g *gatewayIdentity, selected *gatewaySelection) (result error) {
+func (a *App) relayRealtime(ctx context.Context, cancel context.CancelFunc, client, upstream *websocket.Conn, r *http.Request, id, model string, started time.Time, g *gatewayIdentity, selected *gatewaySelection) (result error) {
 	frames := make(chan realtimeFrame, 2)
 	readDone := make(chan struct{}, 2)
 	read := func(conn *websocket.Conn, fromClient bool) {
@@ -384,7 +377,7 @@ func (a *App) relayRealtime(ctx context.Context, cancel context.CancelFunc, clie
 			return nil
 		}
 		u := priceUsage{AudioUnits: big.NewRat(max(at.Sub(started).Nanoseconds(), 1), int64(time.Minute)).RatString()}
-		receipt, err := a.makeReceipt(id, g, selected, model, "", "", "", u, true, at.Sub(started), 0, started, digest("realtime\n"+model), clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
+		receipt, err := a.makeReceipt(id, g, selected, model, "", "", "", u, true, at.Sub(started), 0, started, digest("realtime\n"+model), clientIP(r), r.UserAgent(), r.URL.Path, "")
 		if err != nil {
 			return err
 		}

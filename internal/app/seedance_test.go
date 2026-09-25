@@ -106,6 +106,7 @@ func testSeedance(t *testing.T, a *App, admin string) {
 			t.Error("video credential isolation")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Video-Trace", "seedance-"+r.Method)
 		const root = "/api/v3/contents/generations/tasks"
 		if r.URL.Path == root && r.Method == "POST" {
 			creates++
@@ -174,7 +175,7 @@ func testSeedance(t *testing.T, a *App, admin string) {
 		_ = json.NewEncoder(w).Encode(result)
 	}))
 	defer provider.Close()
-	account := manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "seedance", "platform": "openai", "type": "apikey", "concurrency": 3, "group_ids": []int64{gid}, "rate_multiplier": 3, "credentials": map[string]any{"api_key": "seedance-upstream-secret", "base_url": provider.URL, "model_mapping": map[string]string{"team-video": "provider-video"}, "openai_capabilities": []string{"seedance"}}, "extra": map[string]any{"quota_limit": 100}})
+	account := manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "seedance", "platform": "openai", "type": "apikey", "concurrency": 3, "group_ids": []int64{gid}, "rate_multiplier": 3, "credentials": map[string]any{"api_key": "seedance-upstream-secret", "base_url": provider.URL, "model_mapping": map[string]string{"team-video": "provider-video"}, "openai_capabilities": []string{"seedance"}}, "extra": map[string]any{"quota_limit": 100, upstreamRequestIDHeaderKey: "X-Video-Trace"}})
 	aid := id(account)
 	apath := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	prices := []any{map[string]any{"platform": "openai", "models": []string{"team-video"}, "billing_mode": "token", "output_price": "0.001"}}
@@ -235,6 +236,7 @@ func testSeedance(t *testing.T, a *App, admin string) {
 		t.Fatal("video balance gate", w.Code)
 	}
 	exec("UPDATE users SET balance=100 WHERE id=$1", uid)
+	manage("PUT", fmt.Sprintf("/api/v1/admin/accounts/%d", aid), admin, map[string]any{"extra": map[string]any{upstreamRequestIDHeaderKey: "X-Changed"}})
 	// Change live prices after acceptance: reconciliation must use the old snapshot.
 	manage("PUT", fmt.Sprintf("/api/v1/admin/channels/%d", id(channel)), admin, map[string]any{"model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"team-video"}, "billing_mode": "token", "output_price": "0.5"}}})
 	mu.Lock()
@@ -276,6 +278,7 @@ func testSeedance(t *testing.T, a *App, admin string) {
 			t.Fatal(err)
 		}
 	}
+	assertUsageRequestID(t, a, first, "seedance-POST")
 	var n int
 	var actual, balance, used, accountUsed string
 	if err = a.DB.QueryRow("SELECT count(*),COALESCE(sum(actual_cost),0)::text FROM usage_logs WHERE request_id=$1", first).Scan(&n, &actual); err != nil || n != 1 || actual != "0.0220000000" {

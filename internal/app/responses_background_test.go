@@ -87,6 +87,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			t.Error("background credential isolation")
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Background-Trace", "background-"+r.Method)
 		native := ""
 		stream := r.URL.Query().Get("stream") == "true"
 		if r.Method == "POST" && r.URL.Path == "/v1/responses" {
@@ -186,7 +187,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 		event("response.completed", response("completed"), 4)
 	}))
 	defer up.Close()
-	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Background", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "background-secret", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"bg-model": "native-bg"}}}))
+	aid := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Background", "platform": "openai", "type": "apikey", "extra": map[string]any{upstreamRequestIDHeaderKey: "X-Background-Trace"}, "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "background-secret", "base_url": up.URL, "api_protocol": "responses", "model_mapping": map[string]string{"bg-model": "native-bg"}}}))
 	ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
 	g := &gatewayIdentity{Key: gatewayKey{ID: kid, GroupID: gid}}
 	body := map[string]any{"model": "bg-model", "input": "private request", "background": true, "store": true}
@@ -220,7 +221,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	}
 	first := create("bg-once")
 	task := load(first)
-	if task.Stage != "pending" || task.Selection.Account.Credentials != nil {
+	if task.Stage != "pending" || task.Selection.Account.Credentials != nil || task.UpstreamRequestID != "background-POST" {
 		t.Fatal("background snapshot", task.Stage)
 	}
 	envelope, _ := a.Redis.Get(t.Context(), backgroundKey(task.ID)).Result()
@@ -301,6 +302,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	must("PUT", "/api/v1/admin/settings", admin, map[string]any{fastPolicySetting: fastPolicySettings{Rules: []fastPolicyRule{{Tier: "all", Action: "block", Scope: "apikey"}}}})
 	exec("ALTER TABLE usage_logs ADD CONSTRAINT test_background_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID")
 	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_background_failure")
+	must("PUT", ap, admin, map[string]any{"extra": map[string]any{upstreamRequestIDHeaderKey: "X-Changed"}})
 	set(first, "completed")
 	if w := call("GET", "/responses/"+first, key, nil, ""); w.Code != 503 || strings.Contains(w.Body.String(), "private generated") {
 		t.Fatal("unsettled output exposed", w.Code, w.Body.String())
@@ -326,6 +328,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			t.Fatal(err)
 		}
 	}
+	assertUsageRequestID(t, a, task.ID, "background-POST")
 	var count int
 	var cost, balance, used string
 	if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text FROM usage_logs WHERE request_id=$1", task.ID).Scan(&count, &cost); err != nil || count != 1 || cost != "0.0375000000" {
