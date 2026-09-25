@@ -13,11 +13,14 @@ type responsesGeminiStream struct {
 	Output *chatResponsesStream
 }
 
-func newResponsesGeminiStream(model string, custom map[string]bool) *responsesGeminiStream {
-	return &responsesGeminiStream{
-		Native: newGeminiChatStream(model, true, custom),
-		Output: newChatResponsesStream(model, custom),
+func newResponsesGeminiStream(model string, request *responsesChatRequest) *responsesGeminiStream {
+	output := newChatResponsesStream(model, nil)
+	if request != nil {
+		output.Custom, output.Namespaces, output.ToolSearch = request.Custom, request.Namespaces, request.ToolSearch
 	}
+	// Keep native calls as functions until the Responses converter restores their
+	// original namespace, custom input or client tool-search contract.
+	return &responsesGeminiStream{Native: newGeminiChatStream(model, true, nil), Output: output}
 }
 
 func (s *responsesGeminiStream) feed(wire string, stream bool) (string, error) {
@@ -79,7 +82,17 @@ func (s *responsesGeminiStream) response(raw []byte, u priceUsage) ([]byte, erro
 }
 
 func (s *responsesGeminiStream) assistant() convertedChatMessage {
-	return s.Output.assistant()
+	message := s.Output.assistant()
+	metadata := map[string]json.RawMessage{}
+	for _, tool := range s.Native.Tools {
+		if extra := tool["extra_content"]; extra != nil {
+			metadata[tool["id"].(string)], _ = json.Marshal(extra)
+		}
+	}
+	for i := range message.Calls {
+		message.Calls[i].ExtraContent = metadata[message.Calls[i].ID]
+	}
+	return message
 }
 
 func responsesGeminiRequest(body map[string]any) ([]byte, map[string]bool, string, error) {

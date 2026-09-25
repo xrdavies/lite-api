@@ -1357,13 +1357,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			wireIn.Protocol = selected.Account.protocol()
 			path, _ = wireIn.upstreamPath(selected.UpstreamModel)
 			if wireIn.Protocol == "gemini" {
-				var custom map[string]bool
 				for _, field := range []string{"generationConfig", "modalities"} {
 					if raw := request[field]; raw != nil {
 						chatRequest.Body[field] = raw
 					}
 				}
-				upstreamBody, custom, wireIn.Effort, err = responsesGeminiRequest(chatRequest.Body)
+				upstreamBody, _, wireIn.Effort, err = responsesGeminiRequest(chatRequest.Body)
 				if err != nil {
 					selected.Release()
 					fail(err)
@@ -1379,7 +1378,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 					fail(err)
 					return
 				}
-				responsesGemini = newResponsesGeminiStream(model, custom)
+				responsesGemini = newResponsesGeminiStream(model, chatRequest)
 			} else if wireIn.Protocol == "anthropic" {
 				anthropicResponses = newAnthropicResponsesStream(model, chatRequest)
 			} else {

@@ -15,7 +15,9 @@ type convertedChatTool struct {
 	// Namespace is retained in encrypted history and removed from Chat requests.
 	Namespace string `json:"namespace,omitempty"`
 	Search    bool   `json:"tool_search,omitempty"`
-	Function  struct {
+	// Gemini's opaque call metadata is populated only from authenticated history.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+	Function     struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`

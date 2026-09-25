@@ -30,7 +30,7 @@ env.update(POSTGRES_PASSWORD=secrets.token_hex(24), JWT_SECRET=secrets.token_hex
            ADMIN_EMAIL="admin@example.test", ADMIN_PASSWORD=secrets.token_hex(16),
            LITE_API_IMAGE=images[0], LITE_API_VERSION="deployment-current")
 provider_key = secrets.token_hex(24)
-calls = {"text": 0, "video": 0, "program": 0}
+calls = {"text": 0, "video": 0, "program": 0, "gemini": 0}
 calls_lock = threading.Lock()
 video_ready = threading.Event()
 program_ready = threading.Event()
@@ -53,9 +53,29 @@ class Provider(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert self.headers.get("Authorization") == "Bearer " + provider_key
+        gemini = self.path == "/v1beta/models/gemini-3.1-pro:generateContent"
+        if gemini:
+            assert self.headers.get("X-Goog-Api-Key") == provider_key and self.headers.get("Authorization") is None
+        else:
+            assert self.headers.get("Authorization") == "Bearer " + provider_key
         assert self.headers.get("Cookie") is None
-        if self.path == "/api/v3/contents/generations/tasks":
+        if gemini:
+            with calls_lock:
+                calls["gemini"] += 1
+            parts = [part for content in body["contents"] for part in content["parts"]]
+            if any("functionResponse" in part for part in parts):
+                native = [part for part in parts if "functionCall" in part]
+                assert len(native) == 1 and native[0]["thoughtSignature"] == "persisted-gemini-signature"
+                assert native[0]["functionCall"]["name"] == "team__lookup"
+                output = [{"text": "continued after restart"}]
+            else:
+                assert body["tools"][0]["functionDeclarations"][0]["name"] == "team__lookup"
+                output = [{"functionCall": {"id": "call_gemini", "name": "team__lookup", "args": {"query": "test"}},
+                           "thoughtSignature": "persisted-gemini-signature"}]
+            raw = json.dumps({"candidates": [{"content": {"role": "model", "parts": output}, "finishReason": "STOP"}],
+                              "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 3, "totalTokenCount": 5}}).encode()
+            content_type = "application/json"
+        elif self.path == "/api/v3/contents/generations/tasks":
             assert body["model"] == "deploy-video"
             with calls_lock:
                 calls["video"] += 1
@@ -431,6 +451,39 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert calls == before_counts, "local counting contacted the provider"
         assert sql(f"SELECT balance,(SELECT count(*) FROM usage_logs) FROM users WHERE id={uid}") == ledger
         print("Compiled token vocabularies: native relay, Grok without account and DeepSeek local counts, replay and zero billing verified", flush=True)
+
+        gg = api("POST", "/api/v1/admin/groups", admin, {"name": "Gemini continuation", "platform": "gemini", "rate_multiplier": 2,
+                 "model_pricing": [{"platform": "gemini", "models": ["deploy-gemini"], "input_price": "0.001",
+                                    "output_price": "0.002", "cache_read_price": "0", "cache_write_price": "0"}]})["id"]
+        api("POST", "/api/v1/admin/accounts", admin, {"name": "Gemini continuation", "platform": "gemini", "type": "apikey",
+            "group_ids": [gg], "credentials": {"api_key": provider_key, "base_url": upstream,
+            "model_mapping": {"deploy-gemini": "gemini-3.1-pro"}}})
+        gkey = api("POST", "/api/v1/keys", token, {"name": "Gemini continuation", "group_id": gg, "quota": 10})
+        gkid, gkey = gkey["id"], gkey["key"]
+        secrets_seen.append(gkey)
+        gbody = {"model": "deploy-gemini", "input": "lookup", "store": True,
+                 "tools": [{"type": "namespace", "name": "team", "tools": [{"type": "function", "name": "lookup",
+                            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}]}]}
+        status, raw, _ = request(base, "POST", "/v1/responses", gkey, gbody, "release-gemini")
+        assert status == 200 and b"persisted-gemini-signature" not in raw
+        result = json.loads(raw)
+        assert result["output"][0]["name"] == "lookup" and result["output"][0]["namespace"] == "team"
+        before_gemini = dict(calls)
+        for service in ("app", "redis", "postgres"):
+            kill(service)
+        dc("up", "-d", "--wait", "postgres", "redis")
+        dc("up", "-d", "--no-build", "app")
+        ready()
+        status, replayed, headers = request(base, "POST", "/responses", gkey, gbody, "release-gemini")
+        assert status == 200 and replayed == raw and headers.get("Idempotency-Replayed") == "true" and calls == before_gemini
+        gbody.update(previous_response_id=result["id"], input=[{"type": "function_call_output", "call_id": "call_gemini", "output": "found"}])
+        assert request(base, "POST", "/responses", key, gbody)[0] in (400, 404)
+        assert calls == before_gemini
+        status, raw, _ = request(base, "POST", "/responses", gkey, gbody)
+        assert status == 200 and b"continued after restart" in raw and calls["gemini"] == 2
+        count, cost, used = sql(f"SELECT count(*),sum(actual_cost),(SELECT quota_used FROM api_keys WHERE id={gkid}) FROM usage_logs WHERE api_key_id={gkid}").split("|")
+        assert count == "2" and Decimal(cost) == Decimal("0.032") and Decimal(used) == Decimal(cost)
+        print("Gemini Responses: encrypted tool signature/namespace survives SIGKILL, scoped continuation and single billing verified", flush=True)
         logs = dc("logs", "--no-color", "app").stdout
         assert not any(secret in logs for secret in secrets_seen), "secret in application logs"
         print("PASS: isolated release, crash recovery, rollback and upgrade; no paid upstream calls", flush=True)

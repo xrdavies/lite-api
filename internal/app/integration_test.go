@@ -300,6 +300,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testMessagesChat(t, a, admin)
 	testMessagesResponses(t, a, admin)
 	testChatGemini(t, a, admin)
+	testResponsesGemini(t, a, admin)
 	testMessagesGemini(t, a, admin)
 	testOperational(t, a, admin, otherToken)
 	testUsageSummaries(t, a, admin, otherToken)

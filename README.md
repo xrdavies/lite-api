@@ -239,6 +239,8 @@ Responses HTTP/SSE 也支持 Anthropic 平台及 OpenAI/Kimi/Zhipu/DeepSeek/Mini
 
 `previous_response_id` 的加密历史保存原生思考、签名、隐藏思考块和工具身份；续接仅使用同一 Key/分组/账号及凭证来源。顶层 instructions 可替换，input 中的系统指令继续保留。`store=false` 不保存历史，外部传入的 reasoning 密文不当作 Anthropic 签名；原生签名不出现在 Responses 内容中。失败或断流中已知 usage 仍结算，输出终态与工具完成事件等待结算成功；实际缓存读写和转换后的 effort 用于计费。该链路已通过本地协议/数据库测试，尚无真实 Anthropic 上游联调。
 
+Responses→Gemini 的 JSON/SSE 共用上述工具身份映射，恢复 namespace、custom input 和客户端 `tool_search_call`，发现的工具可继续调用。`store=true` 时，Gemini 函数调用携带的 `thoughtSignature` 随同 Key/分组/原来源的加密历史保存并原样续传，不出现在 Responses 输出中；未保存历史的显式调用沿用兼容签名占位。保留实际 Gemini usage、缓存和思考 token 计量，终态工具事件等待结算成功。本地协议、SQL/Redis、跨 Key 拒绝及故障恢复已验证；真实 Gemini 上游仍需单独联调。
+
 namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截断并附加摘要；响应恢复原 namespace/name。强制 tool_choice、additional_tools、显式历史与 previous_response_id 均使用同一映射。相同定义去重，不同定义或映射名称冲突拒绝；namespace 内的托管工具、嵌套 namespace 及同时填写 tools/children 的歧义声明拒绝。原生 Responses 路径保持合法命名空间声明和输出。
 
 客户端工具发现支持 `type=tool_search`、`execution=client`，与 [OpenAI 工具搜索文档](https://developers.openai.com/api/docs/guides/tools-tool-search) 中的客户端执行模式一致。原生 Responses HTTP/SSE/WS 保留声明及调用；Chat 转换保留 description/parameters/strict，并将调用还原为 `tool_search_call`、`execution=client` 和对象形式的 arguments。流式搜索参数累计到 output_item.done 一并发送，该完成事件等待结算成功。网关不执行客户端工具，也不另收独立搜索费用，仍结算上游文本 usage。
