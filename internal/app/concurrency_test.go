@@ -252,6 +252,10 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 		}
 	}
 	stats := must("GET", "/api/v1/admin/ops/concurrency?group_id="+fmt.Sprint(gid), admin, nil)
+	accounts := must("GET", "/api/v1/admin/accounts?group="+fmt.Sprint(gid), admin, nil)["items"].([]any)
+	if len(accounts) != 1 || accounts[0].(map[string]any)["current_concurrency"] != float64(1) {
+		t.Fatal("account list lost active upstream concurrency")
+	}
 	load = stats["account"].(map[string]any)[fmt.Sprint(aid)].(map[string]any)
 	if load["current_in_use"] != float64(1) || load["waiting_in_queue"] != float64(1) || load["account_id"] != float64(aid) || load["group_id"] != float64(gid) {
 		t.Fatal("account queue diagnostics", load)

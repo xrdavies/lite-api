@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -617,13 +618,16 @@ func (a *App) startBillingProbes(ctx context.Context) {
 
 func (a *App) billingRates(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	where, args := accountListFilter(r)
+	where, args, err := accountListFilter(r)
+	if err != nil {
+		return err
+	}
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts"+where, args...).Scan(&total); err != nil {
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts a"+where, args...).Scan(&total); err != nil {
 		return err
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT id,extra->'upstream_billing_probe' FROM accounts"+where+" ORDER BY priority,id LIMIT $4 OFFSET $5", args...)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT a.id,a.extra->'upstream_billing_probe' FROM accounts a"+where+fmt.Sprintf(" ORDER BY a.priority,a.id LIMIT $%d OFFSET $%d", len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}

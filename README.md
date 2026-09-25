@@ -97,6 +97,8 @@ Gemini 同一路径返回 `source=local` 的本地估算，按模型名 flash/li
 
 ## 上游与健康测试
 
+管理员账号列表支持 `search`（名称字面子串，最多 100 个字符）、`platform`、`type`、`status` 和 `group`（正整数分组 ID、`ungrouped` 或不筛选的 `0`）。仅列出八个保留平台的按量 API Key 账号。状态筛选区分 active、unschedulable、rate_limited、temp_unschedulable；临时停调优先于限流，过期冷却不再阻止 active 筛选，查询不改写状态。`sort_by` 支持 id/name/status/schedulable/priority/rate_multiplier/last_used_at/expires_at/created_at，默认 name 升序，同值按 ID 排序，排序先于分页。列表返回当前单实例占用的账号槽位 `current_concurrency`，不包括等待槽位的请求；总数和分页内容使用同一数据库快照，凭证保持脱敏。
+
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video，以及 Grok 专用 search、tts、stt、realtime；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。
 
 图片测试返回 `image` 事件，视频创建后轮询至成功并返回 `video` 事件，只有真实结果通过校验才发送 `test_complete`。`image_data_url` 接受最多 8 MiB 的 PNG/JPEG/WebP/GIF base64 图片，用于图片编辑或视频首帧；输入 JSON 上限 12 MiB，媒体响应上限 16 MiB。原厂 OpenAI 编辑使用 [JSON 图片引用格式](https://developers.openai.com/api/reference/resources/images/methods/edit)，Grok 使用其 image 对象，Gemini 使用 inlineData。文本上限 45 秒、媒体上限 90 秒；视频超时按失败记录，并保留已接收任务 ID 供管理员核查，不重发创建。测试结果中的图片和签名 URL 只向管理员响应，不存入定时结果表。
@@ -131,7 +133,7 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 探测支持八种已保留平台的中转账号，统一使用 Bearer Key 请求独立协议 `GET /v1/lite-api/billing`，版本根和自定义路径沿用账号配置；国内平台的 `/anthropic` 或 `/anthropic/v1` 后缀先还原。原厂域名直接记录 unsupported；此能力不是通用供应商余额接口，不支持本声明协议的中转不会产生有效倍率。客户端也可使用自己的 Key 调用此接口，返回 `object=lite-api.key_billing`、`schema_version=1`、`billing_scope=token`、组倍率、适用的用户专属倍率及生效倍率，零余额仍可查询。标准分组不应用订阅峰时系数，模型/媒体价格另行配置。
 
-`GET /api/v1/admin/accounts/upstream-billing-rates` 按账号列表相同的 search/platform/status 和分页条件读取持久快照，支持 ETag/304，不触发探测。快照使用原 `accounts.extra.upstream_billing_probe` 字段，保存白名单声明和时间、状态，失败保留上次有效数据及原 freshness；404/405 或原厂标记 unsupported，重探间隔扩大八倍并封顶一天，正常间隔有抖动，所有重探均尊重更长的 Retry-After。连接及正文共限 10 秒，响应最多 64 KiB；不跟随重定向、不重试未知结果，错误摘要不保存上游正文或凭证。
+`GET /api/v1/admin/accounts/upstream-billing-rates` 按账号列表相同的 search/platform/type/status/group 和分页条件读取持久快照，按 priority、ID 升序，支持 ETag/304，不触发探测。快照使用原 `accounts.extra.upstream_billing_probe` 字段，保存白名单声明和时间、状态，失败保留上次有效数据及原 freshness；404/405 或原厂标记 unsupported，重探间隔扩大八倍并封顶一天，正常间隔有抖动，所有重探均尊重更长的 Retry-After。连接及正文共限 10 秒，响应最多 64 KiB；不跟随重定向、不重试未知结果，错误摘要不保存上游正文或凭证。
 
 账号编辑 `upstream_billing_rate_sync_enabled=true` 同时开启探测；创建时需先建账号再开启同步。同步只把声明的 `resolved_rate_multiplier` 四舍五入到四位小数写入账号成本倍率，自动值必须大于 0 且不超过 100；声明中的峰时系数不写入。声明校验包含精确数值、倍率关系及峰时时区/区间，未知字段丢弃。有效但超出自动同步范围的声明仍可查看，账号倍率保持原值。启用同步时手工改倍率返回 409，可在同次编辑关闭同步后修改；关闭探测也关闭同步。账号或代理及其备用链在探测期间变更时拒绝写回；更换账号凭证、来源或代理绑定清除旧快照。探测不恢复健康状态、不改写用户余额、消费额度或历史费用；后续请求沿用现有账号成本结算。
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -173,9 +174,13 @@ func (in *accountInput) validate(create bool) error {
 	}
 	return nil
 }
+
+const accountView = `(to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','tier_id',credentials->'tier_id','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb))`
+
 func accountJSON(ctx context.Context, q queryer, id int64) (json.RawMessage, error) {
-	return jsonRow(q.QueryRowContext(ctx, `SELECT (to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','tier_id',credentials->'tier_id','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb)) FROM accounts a WHERE id=$1 AND deleted_at IS NULL`, id))
+	return jsonRow(q.QueryRowContext(ctx, "SELECT "+accountView+" FROM accounts a WHERE id=$1 AND deleted_at IS NULL", id))
 }
+
 func setAccountGroups(ctx context.Context, tx *sql.Tx, id int64, platform string, groups []int64, priority int) error {
 	if len(groups) > 1000 {
 		return bad("too many groups")
@@ -458,37 +463,46 @@ func (a *App) getAccount(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) listAccounts(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	where, args := accountListFilter(r)
+	where, args, err := accountListFilter(r)
+	if err != nil {
+		return err
+	}
+	// Count and page share one snapshot even when another administrator edits.
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts"+where, args...).Scan(&total); err != nil {
+	if err = tx.QueryRowContext(r.Context(), "SELECT count(*) FROM accounts a"+where, args...).Scan(&total); err != nil {
 		return err
 	}
-	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT id FROM accounts"+where+" ORDER BY priority,id LIMIT $4 OFFSET $5", args...)
+	field := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	switch field {
+	case "id", "name", "status", "schedulable", "priority", "rate_multiplier", "last_used_at", "expires_at", "created_at":
+	default:
+		field = "name"
+	}
+	direction := " ASC"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("sort_order")), "desc") {
+		direction = " DESC"
+	}
+	order := "a." + field + direction
+	if field != "id" {
+		order += ",a.id" + direction
+	}
+	active, _ := a.concurrencySnapshot()
+	counts, _ := json.Marshal(active)
+	args = append(args, string(counts), size, (page-1)*size)
+	n := len(args)
+	query := "SELECT " + accountView + fmt.Sprintf(` || jsonb_build_object('current_concurrency',COALESCE(($%d::jsonb->>('account:'||a.id::text))::int,0)) FROM accounts a`, n-2) + where + " ORDER BY " + order + fmt.Sprintf(" LIMIT $%d OFFSET $%d", n-1, n)
+	rows, err := tx.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		return err
 	}
-	ids := []int64{}
-	for rows.Next() {
-		var id int64
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	err = rows.Err()
-	rows.Close()
+	items, err := jsonRows(rows)
 	if err != nil {
 		return err
-	}
-	items := []json.RawMessage{}
-	for _, id := range ids {
-		raw, err := accountJSON(r.Context(), a.DB, id)
-		if err != nil {
-			return err
-		}
-		items = append(items, raw)
 	}
 	return pageReply(w, items, total, page, size)
 }
@@ -590,9 +604,49 @@ func (a *App) accountRoutes() {
 	a.route("GET /api/v1/admin/accounts/{id}/models", "admin", a.accountModels)
 }
 
-func accountListFilter(r *http.Request) (string, []any) {
-	return ` WHERE deleted_at IS NULL AND name ILIKE $1 AND ($2='' OR platform=$2) AND ($3='' OR status=$3)`,
-		[]any{"%" + r.URL.Query().Get("search") + "%", r.URL.Query().Get("platform"), r.URL.Query().Get("status")}
+func accountListFilter(r *http.Request) (string, []any, error) {
+	q := r.URL.Query()
+	search := strings.TrimSpace(q.Get("search"))
+	if len([]rune(search)) > 100 {
+		return "", nil, bad("account search is too long")
+	}
+	escape := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	args := []any{"%" + escape.Replace(search) + "%", q.Get("platform"), q.Get("type")}
+	where := ` WHERE a.deleted_at IS NULL AND a.type='apikey'
+ AND a.platform IN ('openai','anthropic','gemini','grok','kimi','zhipu','deepseek','minimax')
+ AND COALESCE(a.credentials->>'account_mode','') IN ('','payg')
+ AND a.name ILIKE $1 AND ($2='' OR a.platform=$2) AND ($3='' OR a.type=$3)`
+	notLimited := " AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now())"
+	notTemporary := " AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now())"
+	switch status := q.Get("status"); status {
+	case "":
+	case "active":
+		where += " AND a.status='active' AND a.schedulable" + notLimited + notTemporary
+	case "rate_limited":
+		where += " AND a.status='active' AND a.rate_limit_reset_at>now()" + notTemporary
+	case "temp_unschedulable":
+		where += " AND a.status='active' AND a.temp_unschedulable_until>now()"
+	case "unschedulable":
+		where += " AND a.status='active' AND NOT a.schedulable" + notLimited + notTemporary
+	default:
+		args = append(args, status)
+		where += fmt.Sprintf(" AND a.status=$%d", len(args))
+	}
+	if group := strings.TrimSpace(q.Get("group")); group != "" {
+		if group == "ungrouped" {
+			where += " AND NOT EXISTS(SELECT 1 FROM account_groups ag WHERE ag.account_id=a.id)"
+		} else {
+			id, err := strconv.ParseInt(group, 10, 64)
+			if err != nil || id < 0 {
+				return "", nil, bad("invalid group filter")
+			}
+			if id > 0 {
+				args = append(args, id)
+				where += fmt.Sprintf(" AND EXISTS(SELECT 1 FROM account_groups ag WHERE ag.account_id=a.id AND ag.group_id=$%d)", len(args))
+			}
+		}
+	}
+	return where, args, nil
 }
 
 func validateProxyAssignment(ctx context.Context, tx *sql.Tx, id *int64) error {
