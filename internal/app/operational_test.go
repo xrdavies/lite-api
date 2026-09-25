@@ -416,6 +416,8 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 			t.Fatal("recovered attempt became final error", path, got)
 		}
 	}
+	manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": true})
+	defer manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": false})
 	if w := call("GET", fmt.Sprintf("/api/v1/usage/errors/%d", int64(attempts[0]["id"].(float64))), token, nil); w.Code != 404 {
 		t.Fatal("upstream diagnostic exposed as user error", w.Code, w.Body.String())
 	}

@@ -9,7 +9,7 @@ import (
 
 // Only implemented product settings are writable. Deployment secrets are never returned.
 func (a *App) settingsJSON(r *http.Request) (json.RawMessage, error) {
-	return jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT jsonb_build_object('site_name',COALESCE((SELECT value FROM settings WHERE key='site_name'),'lite-api'),'available_channels_enabled',EXISTS(SELECT 1 FROM settings WHERE key='available_channels_enabled' AND value='true'),'registration_enabled',false,'email_verify_enabled',false,'backend_mode_enabled',false,'model_plaza_enabled',EXISTS(SELECT 1 FROM settings WHERE key='model_plaza_enabled' AND value='true'),'model_plaza_require_auth',EXISTS(SELECT 1 FROM settings WHERE key='model_plaza_require_auth' AND value='true')) || CASE WHEN $1 THEN jsonb_build_object('model_plaza_description',COALESCE((SELECT value FROM settings WHERE key='model_plaza_description'),'')) ELSE '{}'::jsonb END`, strings.HasPrefix(r.URL.Path, "/api/v1/admin/")))
+	return jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT jsonb_build_object('site_name',COALESCE((SELECT value FROM settings WHERE key='site_name'),'lite-api'),'available_channels_enabled',EXISTS(SELECT 1 FROM settings WHERE key='available_channels_enabled' AND value='true'),'allow_user_view_error_requests',EXISTS(SELECT 1 FROM settings WHERE key='allow_user_view_error_requests' AND value='true'),'registration_enabled',false,'email_verify_enabled',false,'backend_mode_enabled',false,'model_plaza_enabled',EXISTS(SELECT 1 FROM settings WHERE key='model_plaza_enabled' AND value='true'),'model_plaza_require_auth',EXISTS(SELECT 1 FROM settings WHERE key='model_plaza_require_auth' AND value='true')) || CASE WHEN $1 THEN jsonb_build_object('model_plaza_description',COALESCE((SELECT value FROM settings WHERE key='model_plaza_description'),'')) ELSE '{}'::jsonb END`, strings.HasPrefix(r.URL.Path, "/api/v1/admin/")))
 }
 func (a *App) getSettings(w http.ResponseWriter, r *http.Request) error {
 	raw, err := a.settingsJSON(r)
@@ -42,6 +42,7 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		Name             *string             `json:"site_name"`
 		Available        *bool               `json:"available_channels_enabled"`
+		UserErrors       *bool               `json:"allow_user_view_error_requests"`
 		PlazaEnabled     *bool               `json:"model_plaza_enabled"`
 		PlazaRequireAuth *bool               `json:"model_plaza_require_auth"`
 		PlazaDescription *string             `json:"model_plaza_description"`
@@ -83,6 +84,9 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	if in.Available != nil {
 		values["available_channels_enabled"] = strconv.FormatBool(*in.Available)
 	}
+	if in.UserErrors != nil {
+		values["allow_user_view_error_requests"] = strconv.FormatBool(*in.UserErrors)
+	}
 	if in.PlazaEnabled != nil {
 		values["model_plaza_enabled"] = strconv.FormatBool(*in.PlazaEnabled)
 	}
@@ -95,7 +99,7 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
 		values[geminiQuotaSetting] = string(in.GeminiPolicy)
 	}
-	for _, key := range []string{"site_name", "available_channels_enabled", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting, fastPolicySetting} {
+	for _, key := range []string{"site_name", "available_channels_enabled", "allow_user_view_error_requests", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting, fastPolicySetting} {
 		value, ok := values[key]
 		if !ok {
 			continue

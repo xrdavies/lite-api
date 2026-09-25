@@ -356,27 +356,110 @@ func (a *App) accountWindowStats(ctx context.Context, id int64, start, end time.
  )s WHERE a.id=$1 AND a.deleted_at IS NULL`, id, start, end))
 }
 
+// Preserve the raw phase/type while classifying this gateway's final failures
+// for the same user-facing categories as native provider errors.
+const userErrorCategory = `CASE error_phase
+ WHEN 'auth' THEN 'auth' WHEN 'routing' THEN 'service_unavailable'
+ WHEN 'account_auth' THEN 'upstream' WHEN 'upstream' THEN 'upstream' WHEN 'network' THEN 'upstream'
+ WHEN 'internal' THEN 'internal'
+ WHEN 'request' THEN CASE error_type WHEN 'rate_limit_error' THEN 'rate_limit'
+ WHEN 'billing_error' THEN 'quota' WHEN 'subscription_error' THEN 'quota'
+ WHEN 'invalid_request_error' THEN 'invalid_request' ELSE 'other' END
+ WHEN 'gateway' THEN CASE status_code WHEN 401 THEN 'auth' WHEN 403 THEN 'auth'
+ WHEN 429 THEN 'rate_limit' WHEN 402 THEN 'quota' WHEN 400 THEN 'invalid_request'
+ WHEN 404 THEN 'invalid_request' WHEN 413 THEN 'invalid_request' WHEN 422 THEN 'invalid_request'
+ WHEN 503 THEN 'service_unavailable' WHEN 502 THEN 'upstream' WHEN 504 THEN 'upstream'
+ WHEN 500 THEN 'internal' ELSE 'other' END ELSE 'other' END`
+
 func (a *App) usageErrors(w http.ResponseWriter, r *http.Request) error {
-	uid := current(r).ID
-	page, size := pagination(r)
-	var total int
-	const where = " FROM ops_error_logs WHERE user_id=$1 AND status_code>=400 AND error_phase NOT IN ('upstream','account_auth')"
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*)"+where, uid).Scan(&total); err != nil {
-		return err
+	// Both entry points are opt-in. Missing, invalid or unreadable settings never
+	// expose records; do not reuse an administrator's monitoring permissions.
+	var allowed bool
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT EXISTS(SELECT 1 FROM settings WHERE key='allow_user_view_error_requests' AND value='true')").Scan(&allowed); err != nil || !allowed {
+		return &apiError{403, "error requests view is disabled"}
 	}
-	const columns = "id,request_id,api_key_id,model,request_path,stream,error_phase,error_type,status_code,error_message,is_business_limited,duration_ms,created_at"
+	args := []any{current(r).ID}
+	where := " FROM ops_error_logs e WHERE user_id=$1 AND status_code>=400 AND error_phase NOT IN ('upstream','account_auth') AND NOT is_count_tokens"
+	add := func(expression string, value any) {
+		args = append(args, value)
+		where += " AND " + fmt.Sprintf(expression, len(args))
+	}
+	// Provider diagnostics and bodies stay internal; only the normalized gateway
+	// message and the authenticated user's own request metadata are projected.
+	const columns = `id,request_id,api_key_id,` + usageRequestedModel + ` AS model,request_path,
+ stream,error_phase,error_type,status_code,error_message,is_business_limited,duration_ms,created_at,
+ ` + userErrorCategory + ` AS category,COALESCE(error_message,'') AS message,
+ COALESCE(NULLIF(inbound_endpoint,''),request_path,'') AS inbound_endpoint,platform,client_ip,request_type,user_agent,
+ COALESCE((SELECT k.name FROM api_keys k WHERE k.id=e.api_key_id AND k.user_id=e.user_id),'') AS key_name,
+ NOT EXISTS(SELECT 1 FROM api_keys k WHERE k.id=e.api_key_id AND k.user_id=e.user_id AND k.deleted_at IS NULL) AS key_deleted,
+ COALESCE((SELECT g.name FROM groups g WHERE g.id=e.group_id),'') AS group_name`
 	if r.PathValue("id") != "" {
 		id, err := pathID(r)
 		if err != nil {
 			return err
 		}
-		raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+where+" AND id=$2)e", uid, id))
+		raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(x) FROM(SELECT "+columns+where+" AND id=$2)x", current(r).ID, id))
 		if err != nil {
 			return err
 		}
 		return reply(w, raw)
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(e) FROM(SELECT "+columns+where+" ORDER BY id DESC LIMIT $2 OFFSET $3)e", uid, size, (page-1)*size)
+	q := r.URL.Query()
+	for _, field := range []string{"api_key_id", "status_code"} {
+		if raw := strings.TrimSpace(q.Get(field)); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value < 0 || field == "status_code" && value > 599 {
+				return bad("invalid " + field)
+			}
+			if field == "status_code" || value > 0 {
+				add(field+"=$%d", value)
+			}
+		}
+	}
+	if model := strings.TrimSpace(q.Get("model")); model != "" {
+		if len([]rune(model)) > 100 || strings.ContainsRune(model, 0) {
+			return bad("invalid model filter")
+		}
+		add("position(lower($%d) in lower("+usageRequestedModel+"))>0", model)
+	}
+	switch category := strings.TrimSpace(q.Get("category")); category {
+	case "auth", "service_unavailable", "upstream", "internal", "rate_limit", "quota", "invalid_request":
+		add("("+userErrorCategory+")=$%d", category)
+	}
+	start, end, err := usageFilterRange(r, false, time.Now())
+	if err != nil {
+		return err
+	}
+	if !start.IsZero() {
+		add("created_at>=$%d", start)
+	}
+	if !end.IsZero() {
+		add("created_at<$%d", end)
+	}
+	field := "created_at"
+	switch strings.ToLower(strings.TrimSpace(q.Get("sort_by"))) {
+	case "model":
+		field = usageRequestedModel
+	case "status_code":
+		field = "status_code"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(q.Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
+	page, size := pagination(r)
+	size = min(size, 100)
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var total int
+	if err = tx.QueryRowContext(r.Context(), "SELECT count(*)"+where, args...).Scan(&total); err != nil {
+		return err
+	}
+	args = append(args, size, (page-1)*size)
+	rows, err := tx.QueryContext(r.Context(), "SELECT to_jsonb(x) FROM(SELECT "+columns+where+" ORDER BY "+field+direction+",id"+direction+fmt.Sprintf(" LIMIT $%d OFFSET $%d)x", len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}

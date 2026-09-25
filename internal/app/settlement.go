@@ -448,7 +448,10 @@ func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelect
 		// provider body in operational diagnostics.
 		message = fmt.Sprintf("upstream returned HTTP %d (error rule applied)", passthrough.UpstreamStatus)
 	}
-	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms) VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, r.URL.Path, status, message, status == 429 || status == 402, time.Since(started).Milliseconds())
+	countOnly := strings.HasSuffix(r.URL.Path, "/count_tokens") || strings.HasSuffix(r.URL.Path, "/input_tokens") ||
+		strings.HasSuffix(r.URL.Path, ":countTokens") || strings.HasSuffix(r.URL.Path, "/countTokens")
+	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms,is_count_tokens,inbound_endpoint,client_ip,user_agent)
+ VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11,$12,$7,NULLIF($13,'')::inet,$14)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, r.URL.Path, status, message, status == 429 || status == 402, time.Since(started).Milliseconds(), countOnly, clientIP(r), truncate(r.UserAgent(), 512))
 	if err != nil {
 		slog.Error("gateway error record failed", "request_id", id)
 	}

@@ -187,6 +187,12 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 `PUT /api/v1/admin/settings` 支持 `site_name`、`available_channels_enabled` 及模型广场开关。可用渠道默认关闭，开启后用户可通过 `/api/v1/channels/available` 查询可访问分组下的具体模型和价格，包含映射别名和本人倍率；私有分组、其他平台模型、内部账号成本规则及映射目标不向无权限用户返回。
 
+管理员通过同一设置接口的 `allow_user_view_error_requests` 开启用户错误记录查询，默认关闭；省略/null 保持原值。公开设置返回此开关。`GET /api/v1/usage/errors` 及 `/{id}` 均需密码登录令牌，关闭、配置损坏或读取失败时返回 403，管理员访问这两个用户接口也受开关和本人归属限制；管理员运维接口保持独立权限。
+
+错误列表支持 `start_date/end_date/timezone`（同原始用量的日历范围）、`model`（客户端模型名，忽略大小写的字面子串）、`api_key_id`（0 不筛选）、`status_code` 和 `category`。分类支持 auth/service_unavailable/upstream/internal/rate_limit/quota/invalid_request；other 或未知分类沿用不筛选行为。`sort_by=created_at|model|status_code`、`sort_order=asc|desc` 在分页前执行，同值按 ID 排序，默认 created_at DESC，每页最多 100 条。列表总数与内容使用同一数据库快照。
+
+列表与详情只返回本人最终失败，排除上游重试和 token 计数记录；不返回上游正文、凭证前缀或内部账号信息。保留错误摘要及本人 IP、User-Agent、端点、分组和 Key 名称，删除 Key 后仍可查看历史；其他用户的 Key 筛选为空、详情为 404。分类是查询投影，旧 phase/type 与数据库内容保持原值；当前 gateway/request_failed 按最终 HTTP 状态粗分，不能据此推断供应商根因。尚未采集的模型或流式属性保持空值或原值，不从账号模型反推客户端请求。
+
 `GET /api/v1/model-plaza` 是分组模型价格目录，由 `model_plaza_enabled`（默认关闭）、`model_plaza_require_auth` 和 `model_plaza_description` 控制。匿名只见公开分组；使用登录令牌可查询已授权专属分组和本人的 `user_rate_multiplier`，受公开分组限制的用户仍需授权。无效令牌明确拒绝，API Key 不能代替登录。目录每个 IP 每分钟最多 60 次，响应禁止缓存；不调用上游或产生消费，也不保证列出的模型当前可调度。
 
 广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。OpenAI、Grok、Gemini 模型另返回按 1K/2K/4K 分档的 `image_pricing`，与图片结算共用价格解析；这是该模型用于图片请求时的价格，不是上游图片能力声明。明确的 token 价卡继续以 token 单价展示。

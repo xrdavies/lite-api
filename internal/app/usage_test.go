@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -10,6 +11,205 @@ import (
 	"testing"
 	"time"
 )
+
+func testUsageErrors(t *testing.T, a *App, admin, other string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.RemoteAddr = "192.0.2.242:1234"
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	manage := func(method, path, token string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, token, body)
+		var out struct{ Data map[string]any }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	if _, err := a.DB.Exec("DELETE FROM settings WHERE key='allow_user_view_error_requests'"); err != nil {
+		t.Fatal(err)
+	}
+	defer a.DB.Exec("DELETE FROM settings WHERE key='allow_user_view_error_requests'")
+	uid := int64(manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": "error-query@example.test", "password": "error-query-password"})["id"].(float64))
+	user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": "error-query@example.test", "password": "error-query-password"})["access_token"].(string)
+	key := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Error query"})
+	kid := int64(key["id"].(float64))
+	const root = "/api/v1/usage/errors"
+	for _, path := range []string{root, root + "/1"} {
+		for _, token := range []string{admin, user} {
+			if w := call("GET", path, token, nil); w.Code != 403 {
+				t.Fatal("missing setting opened errors", path, w.Code)
+			}
+		}
+	}
+	if manage("GET", "/api/v1/settings/public", "", nil)["allow_user_view_error_requests"] != false {
+		t.Fatal("public default")
+	}
+	if w := call("PUT", "/api/v1/admin/settings", user, map[string]any{"allow_user_view_error_requests": true}); w.Code != 403 {
+		t.Fatal("user enabled errors", w.Code)
+	}
+	if w := call("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": "true"}); w.Code != 400 {
+		t.Fatal("invalid setting accepted", w.Code)
+	}
+	manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": true})
+	if manage("GET", "/api/v1/settings/public", "", nil)["allow_user_view_error_requests"] != true {
+		t.Fatal("public setting not updated")
+	}
+	manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": nil})
+	at := time.Date(2026, 3, 8, 5, 0, 0, 0, time.UTC)
+	var ids []int64
+	for i, row := range []struct {
+		model, phase, kind string
+		status             int
+		at                 time.Time
+		count              bool
+	}{
+		{" Alpha%_ ", "request", "rate_limit_error", 429, at, false},
+		{"beta", "gateway", "request_failed", 402, at.Add(time.Hour), false},
+		{"alpha", "gateway", "request_failed", 503, at.Add(time.Hour), false},
+		{"gamma", "internal", "internal_error", 500, at.Add(22 * time.Hour), false},
+		{"before", "auth", "auth_error", 401, at.Add(-time.Second), false},
+		{"after", "network", "network_error", 502, at.Add(23 * time.Hour), false},
+		{"hidden-attempt", "upstream", "upstream_rejected", 503, at, false},
+		{"hidden-count", "request", "invalid_request_error", 400, at, true},
+		{"hidden-success", "gateway", "request_failed", 200, at, false},
+	} {
+		var id int64
+		err := a.DB.QueryRow(`INSERT INTO ops_error_logs(user_id,api_key_id,model,requested_model,error_phase,error_type,status_code,created_at,is_count_tokens,
+ request_id,request_path,error_message,error_body,upstream_error_message,upstream_endpoint,api_key_prefix,client_ip,user_agent)
+ VALUES($1,$2,'private-model',$3,$4,$5,$6,$7,$8,$9,'/v1/videos','safe summary','private-body','private-upstream','private-endpoint','private-prefix','192.0.2.242','test-client') RETURNING id`,
+			uid, kid, row.model, row.phase, row.kind, row.status, row.at, row.count, fmt.Sprintf("user-error-%d", i)).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	base := "start_date=2026-03-08&end_date=2026-03-08&timezone=America%2FNew_York"
+	check := func(query string, total int, want ...int) []map[string]any {
+		t.Helper()
+		data := manage("GET", root+"?"+query, user, nil)
+		rows := data["items"].([]any)
+		if data["total"] != float64(total) || len(rows) != len(want) {
+			t.Fatalf("error filter %s: %v", query, data)
+		}
+		out := []map[string]any{}
+		for i, v := range rows {
+			item := v.(map[string]any)
+			if item["id"] != float64(ids[want[i]]) {
+				t.Fatal("error sort", query, item, want)
+			}
+			out = append(out, item)
+		}
+		return out
+	}
+	check(base, 4, 3, 2, 1, 0)
+	check(base+"&sort_by=created_at&sort_order=asc&page_size=2&page=2", 4, 2, 3)
+	rows := check(base+"&sort_by=model&sort_order=asc", 4, 0, 2, 1, 3)
+	if rows[0]["model"] != "Alpha%_" || rows[0]["category"] != "rate_limit" || rows[1]["category"] != "service_unavailable" || rows[2]["category"] != "quota" {
+		t.Fatal("model/category projection", rows)
+	}
+	check(base+"&sort_by=status_code&sort_order=asc", 4, 1, 0, 3, 2)
+	check(base+"&model=%25_", 1, 0)
+	check(base+"&model=ALPHA", 2, 2, 0)
+	check(base+"&model=private-model", 0)
+	check(base+"&api_key_id="+fmt.Sprint(kid), 4, 3, 2, 1, 0)
+	check(base+"&api_key_id=0&category=other&sort_by=invalid", 4, 3, 2, 1, 0)
+	check(base+"&category=unknown&user_id=1&error_phase=upstream&view=all", 4, 3, 2, 1, 0)
+	check(base+"&category=quota&status_code=402", 1, 1)
+	check(base+"&category=service_unavailable", 1, 2)
+	check(base+"&category=upstream", 0)
+	check("category=upstream", 1, 5)
+	check("category=auth", 1, 4)
+	check(base+"&api_key_id=9223372036854775807", 0)
+	// Exercise the shared error writer, not only prebuilt database records.
+	g := &gatewayIdentity{UserID: uid, Key: gatewayKey{ID: kid}, Group: gatewayGroup{Platform: "openai"}}
+	for i, path := range []string{"/v1/messages/count_tokens", "/v1/responses/input_tokens", "/v1beta/models/test:countTokens", "/v1beta/models/test/countTokens", "/v1/videos"} {
+		r := httptest.NewRequest("POST", path, nil)
+		r.RemoteAddr = "192.0.2.242:1234"
+		r.Header.Set("User-Agent", "test-client")
+		requestID := fmt.Sprintf("error-query-writer-%d", i)
+		a.recordGatewayError(requestID, g, nil, r, &apiError{429, "rate limit exceeded"}, time.Now())
+		var id int64
+		if err := a.DB.QueryRow("SELECT id FROM ops_error_logs WHERE request_id=$1", requestID).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		w := call("GET", root+"/"+fmt.Sprint(id), user, nil)
+		if i < 4 {
+			if w.Code != 404 {
+				t.Fatal("count-only final error visible", path, w.Code)
+			}
+		} else {
+			detail := manage("GET", root+"/"+fmt.Sprint(id), user, nil)
+			if detail["category"] != "rate_limit" || detail["client_ip"] != "192.0.2.242" || detail["user_agent"] != "test-client" || detail["inbound_endpoint"] != path {
+				t.Fatal("recorded user error metadata", detail)
+			}
+		}
+	}
+	for _, query := range []string{"api_key_id=-1", "api_key_id=oops", "status_code=600", "status_code=-1", "start_date=bad", "timezone=invalid", "start_date=2026-04-01&end_date=2026-03-01", "model=" + strings.Repeat("x", 101)} {
+		if w := call("GET", root+"?"+query, user, nil); w.Code != 400 {
+			t.Fatal("invalid error query", query, w.Code)
+		}
+	}
+	if data := manage("GET", root+"?page_size=1000", user, nil); data["page_size"] != float64(100) {
+		t.Fatal("error pagination cap", data)
+	}
+	for _, path := range []string{root, root + "/" + fmt.Sprint(ids[0])} {
+		for _, credential := range []string{"", key["key"].(string)} {
+			if w := call("GET", path, credential, nil); w.Code != 401 {
+				t.Fatal("error authentication", path, w.Code)
+			}
+		}
+		w := call("GET", path, user, nil)
+		for _, secret := range []string{"private-", "upstream_error_message", "error_body", "upstream_endpoint", "api_key_prefix", "account_id"} {
+			if strings.Contains(w.Body.String(), secret) {
+				t.Fatal("error diagnostic exposed", path, secret)
+			}
+		}
+	}
+	for _, token := range []string{other, admin} {
+		if w := call("GET", root+"/"+fmt.Sprint(ids[0]), token, nil); w.Code != 404 {
+			t.Fatal("foreign error detail exposed", w.Code)
+		}
+		data := manage("GET", root+"?api_key_id="+fmt.Sprint(kid), token, nil)
+		if data["total"] != float64(0) {
+			t.Fatal("foreign Key filter escaped ownership", data)
+		}
+	}
+	for _, i := range []int{6, 7, 8} {
+		if w := call("GET", root+"/"+fmt.Sprint(ids[i]), user, nil); w.Code != 404 {
+			t.Fatal("hidden error detail exposed", i, w.Code)
+		}
+	}
+	manage("DELETE", "/api/v1/keys/"+fmt.Sprint(kid), user, nil)
+	detail := manage("GET", root+"/"+fmt.Sprint(ids[0]), user, nil)
+	if detail["key_deleted"] != true || detail["key_name"] != "Error query" || detail["message"] != "safe summary" || detail["inbound_endpoint"] != "/v1/videos" {
+		t.Fatal("deleted Key metadata", detail)
+	}
+	check(base+"&api_key_id="+fmt.Sprint(kid), 4, 3, 2, 1, 0)
+	manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": false})
+	for _, path := range []string{root, root + "/" + fmt.Sprint(ids[0])} {
+		if w := call("GET", path, user, nil); w.Code != 403 {
+			t.Fatal("disabled error view", w.Code)
+		}
+	}
+	if _, err := a.DB.Exec("UPDATE settings SET value='invalid' WHERE key='allow_user_view_error_requests'"); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("GET", root, user, nil); w.Code != 403 {
+		t.Fatal("corrupt setting opened errors", w.Code)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.usageErrors(httptest.NewRecorder(), httptest.NewRequest("GET", root, nil).WithContext(ctx)); err == nil || err.(*apiError).status != 403 {
+		t.Fatal("unreadable setting opened errors", err)
+	}
+}
 
 func TestUsageFilterRange(t *testing.T) {
 	now := time.Date(2026, 3, 9, 18, 0, 0, 0, time.UTC)
