@@ -221,8 +221,18 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	checkCost(finish(done, "user", uid, 200), "0.0400000000")
 	checkKey(0, true)
 	must("PUT", gp, admin, map[string]any{"model_pricing": price("0.001")})
+	checkUser := func(want int) {
+		t.Helper()
+		v := must("GET", "/api/v1/admin/users?search=queue@example.test", admin, nil)
+		items := v["items"].([]any)
+		if len(items) != 1 || id(items[0].(map[string]any)) != uid || items[0].(map[string]any)["current_concurrency"] != float64(want) {
+			t.Fatal("user list lost active concurrency")
+		}
+	}
+	checkUser(0)
 	done = begin("account", aid)
 	checkKey(1, true) // Waiting for the account still holds an admitted user slot.
+	checkUser(1)
 	for _, query := range []struct {
 		order string
 		page  int
@@ -258,6 +268,7 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 	}
 	checkCost(finish(done, "account", aid, 200), "0.0200000000")
 	checkKey(0, true)
+	checkUser(0)
 	for _, path := range []string{"/api/v1/admin/ops/concurrency", "/api/v1/admin/ops/user-concurrency"} {
 		if w := call("GET", path, user, nil); w.Code != 403 {
 			t.Fatal("user can access queue diagnostics", path, w.Code)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -27,7 +28,8 @@ func userView(admin bool) string {
 	if admin {
 		view += ` || jsonb_build_object(
  'last_used_at',(SELECT max(created_at) FROM usage_logs WHERE user_id=u.id),
- 'group_rates',COALESCE((SELECT jsonb_object_agg(group_id::text,rate_multiplier) FROM user_group_rate_multipliers WHERE user_id=u.id AND rate_multiplier IS NOT NULL),'{}'::jsonb))`
+ 'group_rates',COALESCE((SELECT jsonb_object_agg(group_id::text,rate_multiplier) FROM user_group_rate_multipliers WHERE user_id=u.id AND rate_multiplier IS NOT NULL),'{}'::jsonb))
+ || CASE WHEN u.deleted_at IS NOT NULL THEN jsonb_build_object('deleted_at',u.deleted_at) ELSE '{}'::jsonb END`
 	}
 	return view
 }
@@ -425,15 +427,66 @@ func (a *App) deleteUser(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) listUsers(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	search := "%" + r.URL.Query().Get("search") + "%"
+	search, group := strings.TrimSpace(r.URL.Query().Get("search")), strings.TrimSpace(r.URL.Query().Get("group_name"))
+	if len([]rune(search)) > 100 || len([]rune(group)) > 100 {
+		return bad("user search is too long")
+	}
+	escape := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	search, group = "%"+escape.Replace(search)+"%", "%"+escape.Replace(group)+"%"
 	status := r.URL.Query().Get("status")
 	role := r.URL.Query().Get("role")
-	where := ` WHERE deleted_at IS NULL AND (email ILIKE $1 OR username ILIKE $1) AND ($2='' OR status=$2) AND ($3='' OR role=$3)`
+	var gid int64
+	if raw := strings.TrimSpace(r.URL.Query().Get("api_key_group_id")); raw != "" {
+		var err error
+		gid, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || gid < 0 {
+			return bad("invalid api_key_group_id")
+		}
+	}
+	where := ` WHERE u.deleted_at IS NULL AND (u.email ILIKE $1 OR u.username ILIKE $1 OR u.notes ILIKE $1
+ OR EXISTS(SELECT 1 FROM api_keys k WHERE k.user_id=u.id AND k.deleted_at IS NULL AND k.key ILIKE $1))
+ AND ($2='' OR u.status=$2) AND ($3='' OR u.role=$3)
+ AND ($4='%%' OR EXISTS(SELECT 1 FROM user_allowed_groups ag JOIN groups g ON g.id=ag.group_id
+ WHERE ag.user_id=u.id AND g.deleted_at IS NULL AND g.name ILIKE $4))
+ AND ($5::bigint=0 OR EXISTS(SELECT 1 FROM api_keys k WHERE k.user_id=u.id AND k.group_id=$5 AND k.deleted_at IS NULL))`
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM users"+where, search, status, role).Scan(&total); err != nil {
+	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM users u"+where, search, status, role, group, gid).Scan(&total); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT "+userView(true)+" FROM users u"+where+" ORDER BY id DESC LIMIT $4 OFFSET $5", search, status, role, size, (page-1)*size)
+	field := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	switch field {
+	case "":
+		field = "created_at"
+	case "email", "username", "role", "balance", "concurrency", "status", "created_at", "last_active_at", "last_used_at":
+	default:
+		field = "id"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
+	order := "u." + field + direction
+	if field == "last_used_at" {
+		order = "(SELECT max(created_at) FROM usage_logs WHERE user_id=u.id)" + direction + " NULLS LAST"
+		if direction == " ASC" {
+			order = strings.TrimSuffix(order, "LAST") + "FIRST"
+		}
+	} else if field == "last_active_at" {
+		order += " NULLS LAST"
+	}
+	if field != "id" {
+		order += ",u.id" + direction
+	}
+	counts := map[string]int{}
+	a.gatewayMu.Lock()
+	for key, count := range a.gatewayActive {
+		if strings.HasPrefix(key, "user:") {
+			counts[strings.TrimPrefix(key, "user:")] = count
+		}
+	}
+	a.gatewayMu.Unlock()
+	snapshot, _ := json.Marshal(counts)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT "+userView(true)+` || jsonb_build_object('current_concurrency',COALESCE(($6::jsonb->>u.id::text)::int,0)) FROM users u`+where+" ORDER BY "+order+" LIMIT $7 OFFSET $8", search, status, role, group, gid, string(snapshot), size, (page-1)*size)
 	if err != nil {
 		return err
 	}
@@ -448,7 +501,7 @@ func (a *App) getUser(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	u, err := a.userJSON(r.Context(), a.DB, id, true)
+	u, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT "+userView(true)+" FROM users u WHERE id=$1 AND ($2 OR deleted_at IS NULL)", id, r.URL.Query().Get("include_deleted") == "true"))
 	if err != nil {
 		return err
 	}

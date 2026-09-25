@@ -41,6 +41,8 @@ Key 列表、详情和修改响应包含所属 `user` 和 `group`。用户关联
 
 `GET /api/v1/groups/available` 与 Key 中的分组返回基础 `rate_multiplier`；本人专属倍率通过 `/api/v1/groups/rates` 查询，实际扣费继续优先使用专属值。管理员用户列表及详情返回 `allowed_groups`、`group_rates` 和 `last_used_at`；最近消费时间来自原始用量，删除 Key 后仍保留，登录不算消费。`notes`、`restrict_public_groups`、`group_rates` 和用户级 `last_used_at` 不进入登录、个人资料或 Key 中的用户关联。
 
+管理员用户列表支持 `search`（邮箱、用户名、备注或未删除的 Key，按字面子串匹配）、`status`、`role`、`group_name`（授权分组名）及 `api_key_group_id`（未删除 Key 的实际分组，0 不筛选）。`search/group_name` 最多 100 个字符。`sort_by` 支持 id/email/username/role/balance/concurrency/status/created_at/last_active_at/last_used_at，默认 created_at，`sort_order=asc|desc` 默认 desc；同值按 ID 排序，筛选和排序先于分页。last_active_at 的空值始终在末尾，last_used_at 的空值在升序开头、降序末尾。`current_concurrency` 使用当前单实例已占用的用户请求槽位，包含等待上游账号的请求，结束后释放。列表只返回未删除用户；管理员详情可用 `include_deleted=true` 查询删除时间与历史资料，该参数不恢复登录、Key 或写入权限。
+
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
