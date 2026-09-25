@@ -413,6 +413,8 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 基础运行查询还包括 `/api/v1/admin/ops/account-availability`、`/realtime-traffic`、`/errors`、`/request-errors`、`/upstream-errors` 及错误详情。可用性检查状态、人工停调、期限、冷却和额度；具体模型和实时并发仍以派发检查为准。流量按原始用量及最终失败请求计算最近 1/5/30/60 分钟 QPS/TPS，重试及已有用量的失败请求不重复计数。HTTP 上游拒绝尝试只进入上游诊断，最终错误可通过 `/request-errors/{id}/upstream-errors` 关联查询；不保存上游错误正文或凭证。
 
+账号可用性只在有效限流/过载时返回截止时间及 `rate_limit_remaining_sec` / `overload_remaining_sec`；剩余秒按响应 `timestamp` 向下取整，不足一秒返回 null，状态仍保持受限。错误状态优先于这两种冷却显示，临时停调仍独立生效；到期的临时截止时间省略。`error_message` 返回脱敏且有界的原错误说明，空值为字符串。按分组筛选账号后，汇总保留这些账号的全部未删除分组关联。查询不清除存储的期限或错误，也不代表具体模型此刻一定可调度。
+
 错误列表支持身份/资源 ID、平台、客户端模型精确筛选，`phase`（兼容 `error_phase`）、`error_type`、`error_owner`、`error_source`、`category` 和 `resolved`（true/false/yes/no/1/0）。`view=errors` 默认排除业务限额记录，`excluded` 只返回这些记录，`all` 返回两者；未知视图使用默认值，未知分类不筛选。`q` 对请求 ID、客户端请求 ID、客户端模型和错误摘要作字面子串搜索，`user_query` 搜索用户邮箱；`request_id/client_request_id` 精确匹配。`status_codes=429,503` 按上游状态优先的有效状态筛选；兼容单值 `status_code` 在最终错误列表按客户端状态、在上游列表按有效状态筛选。多条件取交集。
 
 `sort_by=created_at|model|status_code`、`sort_order=asc|desc` 在分页前排序，同值按 ID 同方向排序，默认 created_at DESC；模型取客户端模型，状态取有效状态，每页最多 500 条。列表总数、关联 ID 和内容共用数据库快照。错误和入口拒绝列表默认近一小时，关联上游错误默认近 30 天且包含业务限额记录；`time_range=5m|30m|1h|6h|24h|7d|30d` 可改窗口。显式 RFC3339 `start_time/end_time` 优先，仅传 end 时从该时间向前取默认窗口；范围含起点不含终点，最长 30 天。查询不改写原始错误分类或消费记录。

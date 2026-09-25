@@ -60,6 +60,12 @@ func TestErrorRuleContracts(t *testing.T) {
 			t.Fatal("non-message error exposed")
 		}
 	}
+	if got := cleanErrorMessage("failure\nopaque/key? opaque%2Fkey%3F opaque%2Fkey%3F", "opaque/key?"); got != "failure [redacted] [redacted] [redacted]" {
+		t.Fatal("stored error credential or control character exposed", got)
+	}
+	if got := cleanErrorMessage(strings.Repeat("错", 5000), ""); got != strings.Repeat("错", 4096) {
+		t.Fatal("stored error not bounded on a character boundary")
+	}
 	wrapped := &passthroughError{&apiError{422, "mapped error"}, 400, true}
 	for _, protocol := range []string{"anthropic", "gemini", "chat_completions", "responses"} {
 		w := httptest.NewRecorder()

@@ -22,6 +22,7 @@ type operationalAccount struct {
 	Name        string                     `json:"name"`
 	Platform    string                     `json:"platform"`
 	Status      string                     `json:"status"`
+	Error       string                     `json:"error_message"`
 	Schedulable bool                       `json:"schedulable"`
 	Concurrency int                        `json:"concurrency"`
 	AutoPause   bool                       `json:"auto_pause_on_expired"`
@@ -58,33 +59,36 @@ func (a *App) operatingAccounts(r *http.Request) ([]operationalAccount, error) {
 		return nil, err
 	}
 	rows, err := a.DB.QueryContext(r.Context(), `SELECT jsonb_build_object(
- 'id',a.id,'name',a.name,'platform',a.platform,'status',a.status,'schedulable',a.schedulable,
+ 'id',a.id,'name',a.name,'platform',a.platform,'status',a.status,'error_message',a.error_message,'schedulable',a.schedulable,
  'concurrency',a.concurrency,'auto_pause_on_expired',a.auto_pause_on_expired,'expires_at',a.expires_at,
  'rate_limit_reset_at',a.rate_limit_reset_at,'overload_until',a.overload_until,
  'temp_unschedulable_until',a.temp_unschedulable_until,'extra',a.extra,
  'groups',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'platform',g.platform,'status',g.status) ORDER BY g.id)
- FROM account_groups ag JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=a.id AND g.deleted_at IS NULL),'[]'::jsonb))
+ FROM account_groups ag JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=a.id AND g.deleted_at IS NULL),'[]'::jsonb)),COALESCE(a.credentials->>'api_key','')
  FROM accounts a WHERE a.deleted_at IS NULL AND a.type='apikey'
  AND COALESCE(a.credentials->>'account_mode','') IN ('','payg') AND ($1='' OR a.platform=$1)
  AND ($2::bigint=0 OR EXISTS(SELECT 1 FROM account_groups ag WHERE ag.account_id=a.id AND ag.group_id=$2)) ORDER BY a.id`, platform, gid)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := jsonRows(rows)
-	if err != nil {
-		return nil, err
-	}
+	defer rows.Close()
 	result := []operationalAccount{}
-	for _, b := range raw {
+	for rows.Next() {
+		var b []byte
+		var key string
+		if err := rows.Scan(&b, &key); err != nil {
+			return nil, err
+		}
 		var acc operationalAccount
 		if err := json.Unmarshal(b, &acc); err != nil {
 			return nil, err
 		}
 		if supportedPlatform(acc.Platform) {
+			acc.Error = cleanErrorMessage(acc.Error, key)
 			result = append(result, acc)
 		}
 	}
-	return result, nil
+	return result, rows.Err()
 }
 func (u operationalAccount) available(now time.Time) bool {
 	return u.Status == "active" && u.Schedulable && u.Concurrency > 0 &&
@@ -114,11 +118,27 @@ func (a *App) accountAvailability(w http.ResponseWriter, r *http.Request) error 
 	platforms := map[string]*availabilityCount{}
 	for _, acc := range rows {
 		available, limited, hasError := acc.available(now), acc.Status != "error" && futureTime(acc.RateReset, now), acc.Status == "error"
+		overloaded := !hasError && futureTime(acc.Overload, now)
 		item := map[string]any{"account_id": acc.ID, "account_name": acc.Name, "platform": acc.Platform, "status": acc.Status,
 			"schedulable": acc.Schedulable, "is_available": available, "is_rate_limited": limited, "has_error": hasError,
-			"is_overloaded": acc.Status != "error" && futureTime(acc.Overload, now), "rate_limit_reset_at": acc.RateReset,
-			"overload_until": acc.Overload, "temp_unschedulable_until": acc.Temporary, "expires_at": acc.Expires,
+			"is_overloaded": overloaded, "rate_limit_reset_at": nil, "rate_limit_remaining_sec": nil,
+			"overload_until": nil, "overload_remaining_sec": nil, "expires_at": acc.Expires, "error_message": acc.Error,
 			"quota_available": accountQuotaAvailable(acc.Extra, now), "group_id": int64(0), "group_name": ""}
+		if limited {
+			item["rate_limit_reset_at"] = acc.RateReset
+			if seconds := int64(acc.RateReset.Sub(now) / time.Second); seconds > 0 {
+				item["rate_limit_remaining_sec"] = seconds
+			}
+		}
+		if overloaded {
+			item["overload_until"] = acc.Overload
+			if seconds := int64(acc.Overload.Sub(now) / time.Second); seconds > 0 {
+				item["overload_remaining_sec"] = seconds
+			}
+		}
+		if futureTime(acc.Temporary, now) {
+			item["temp_unschedulable_until"] = acc.Temporary
+		}
 		if len(acc.Groups) > 0 {
 			item["group_id"], item["group_name"] = acc.Groups[0].ID, acc.Groups[0].Name
 		}

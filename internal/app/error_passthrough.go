@@ -261,6 +261,10 @@ func upstreamErrorMessage(body []byte, key string) string {
 	if strings.TrimSpace(message) == "" {
 		message = credentialString(object, "message")
 	}
+	return cleanErrorMessage(message, key)
+}
+
+func cleanErrorMessage(message, key string) string {
 	if key != "" {
 		for _, value := range []string{key, url.QueryEscape(key), url.PathEscape(key)} {
 			message = strings.ReplaceAll(message, value, "[redacted]")

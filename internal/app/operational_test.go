@@ -554,6 +554,81 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 	if availability["platform"].(map[string]any)["openai"].(map[string]any)["total_accounts"] != float64(2) {
 		t.Fatal("account availability count is wrong")
 	}
+	// Cooldown projections use one response clock, never rewrite persisted state,
+	// and keep all memberships when filtering accounts by just one group.
+	checkAvailability := func(limited, failed, temporary bool, availableCount int) map[string]any {
+		t.Helper()
+		v := manage("GET", fmt.Sprintf("/api/v1/admin/ops/account-availability?group_id=%d&platform=openai", second), admin, nil)
+		rows := v["account"].(map[string]any)
+		if len(rows) != 1 {
+			t.Fatal("availability group filter", rows)
+		}
+		row := rows[fmt.Sprint(sharedAccount)].(map[string]any)
+		if row["is_rate_limited"] != limited || row["is_overloaded"] != limited || row["has_error"] != failed || row["is_available"] != (availableCount == 1) || row["group_id"] != float64(gid) {
+			t.Fatal("availability status or first group", row)
+		}
+		clock, err := time.Parse(time.RFC3339Nano, v["timestamp"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, names := range [][2]string{{"rate_limit_reset_at", "rate_limit_remaining_sec"}, {"overload_until", "overload_remaining_sec"}} {
+			until, present := row[names[0]]
+			seconds, remainingPresent := row[names[1]]
+			if !present || !remainingPresent {
+				t.Fatal("missing nullable cooldown fields", row)
+			}
+			if limited {
+				at, err := time.Parse(time.RFC3339Nano, until.(string))
+				if err != nil || seconds != float64(int64(at.Sub(clock)/time.Second)) || seconds.(float64) <= 0 {
+					t.Fatal("cooldown clock or seconds", row, err)
+				}
+			} else if until != nil || seconds != nil {
+				t.Fatal("inactive cooldown exposed", row)
+			}
+		}
+		if _, ok := row["temp_unschedulable_until"]; ok != temporary {
+			t.Fatal("temporary deadline presence", row)
+		}
+		count := map[string]any{"available_count": float64(availableCount), "rate_limit_count": float64(0), "error_count": float64(0), "total_accounts": float64(1)}
+		if limited {
+			count["rate_limit_count"] = float64(1)
+		}
+		if failed {
+			count["error_count"] = float64(1)
+		}
+		for _, summary := range []any{v["platform"].(map[string]any)["openai"], v["group"].(map[string]any)[fmt.Sprint(gid)], v["group"].(map[string]any)[fmt.Sprint(second)]} {
+			for field, want := range count {
+				if summary.(map[string]any)[field] != want {
+					t.Fatal("availability aggregate", field, summary)
+				}
+			}
+		}
+		return row
+	}
+	if row := checkAvailability(false, false, false, 1); row["error_message"] != "" {
+		t.Fatal("NULL error not exposed as empty string", row)
+	}
+	exec("UPDATE accounts SET rate_limit_reset_at=now()+interval '1 hour',overload_until=now()+interval '2 hours',temp_unschedulable_until=now()+interval '3 hours' WHERE id=$1", sharedAccount)
+	checkAvailability(true, false, true, 0)
+	message := "authentication rejected ops-shared-secret bearer hidden-secret password=private\n"
+	exec("UPDATE accounts SET status='error',error_message=$2 WHERE id=$1", sharedAccount, message)
+	if row := checkAvailability(false, true, true, 0); row["error_message"] != "authentication rejected [redacted] [redacted] [redacted] " {
+		t.Fatal("availability error not safely projected", row)
+	}
+	var retained bool
+	if err := a.DB.QueryRow("SELECT rate_limit_reset_at>now() AND overload_until>now() AND temp_unschedulable_until>now() AND error_message=$2 FROM accounts WHERE id=$1", sharedAccount, message).Scan(&retained); err != nil || !retained {
+		t.Fatal("availability read changed stored cooldowns or error", err)
+	}
+	exec("UPDATE accounts SET status='active',error_message=NULL,rate_limit_reset_at=now()-interval '1 second',overload_until=now()-interval '1 second',temp_unschedulable_until=now()-interval '1 second' WHERE id=$1", sharedAccount)
+	checkAvailability(false, false, false, 1)
+	if err := a.DB.QueryRow("SELECT rate_limit_reset_at IS NOT NULL AND overload_until IS NOT NULL AND temp_unschedulable_until IS NOT NULL FROM accounts WHERE id=$1", sharedAccount).Scan(&retained); err != nil || !retained {
+		t.Fatal("availability read cleared expired state", err)
+	}
+	exec(`UPDATE accounts SET extra=extra||'{"quota_limit":1,"quota_used":1}'::jsonb WHERE id=$1`, sharedAccount)
+	if row := checkAvailability(false, false, false, 0); row["quota_available"] != false {
+		t.Fatal("availability lost quota restriction", row)
+	}
+	exec("UPDATE accounts SET extra=extra-'quota_limit'-'quota_used',rate_limit_reset_at=NULL,overload_until=NULL,temp_unschedulable_until=NULL WHERE id=$1", sharedAccount)
 	if !a.takeSlot("account", sharedAccount, 3) {
 		t.Fatal("slot unavailable")
 	}
