@@ -264,6 +264,78 @@ func (o *textObservation) observeImages(raw []byte) error {
 	return nil
 }
 
+func (o *textObservation) observeImageStream(raw []byte) error {
+	var event map[string]json.RawMessage
+	invalid := func() error { return &apiError{502, "upstream image stream is invalid"} }
+	if json.Unmarshal(raw, &event) != nil || event == nil || event["error"] != nil && string(event["error"]) != "null" {
+		return invalid()
+	}
+	kind := credentialString(event, "type")
+	if kind != "image_generation.partial_image" && kind != "image_edit.partial_image" && kind != "image_generation.completed" && kind != "image_edit.completed" {
+		return invalid()
+	}
+	image := credentialString(event, "b64_json")
+	link := credentialString(event, "url")
+	if image == "" && !validAudioURL(link) {
+		return invalid()
+	}
+	if image != "" {
+		if data, err := base64.StdEncoding.DecodeString(image); err != nil || len(data) == 0 {
+			return invalid()
+		}
+	}
+	if strings.HasSuffix(kind, ".partial_image") {
+		var index int
+		if value := event["partial_image_index"]; value == nil || string(value) == "null" || json.Unmarshal(value, &index) != nil || index < 0 || index > 2 {
+			return invalid()
+		}
+		return nil
+	}
+	size := credentialString(event, "size")
+	id := credentialString(event, "id")
+	if len(size) > 32 || len(id) > 256 {
+		return invalid()
+	}
+	if id == "" {
+		id = digest(image + "\n" + link)
+	}
+	meter := o.ImageStream
+	if meter.seen == nil {
+		meter.seen = map[string]string{}
+	}
+	if previous, exists := meter.seen[id]; exists {
+		if previous == "" {
+			meter.seen[id] = size
+		}
+	} else {
+		if len(meter.seen) >= 10 {
+			return invalid()
+		}
+		meter.seen[id] = size
+		meter.order = append(meter.order, id)
+	}
+	// Observe completed output before parsing usage: a malformed later frame must
+	// not erase images already produced. Stream usage snapshots are cumulative.
+	input := o.Usage.ImageInputSize
+	meter.apply(&o.Usage, &responseImageConfig{Size: input})
+	o.Usage.ImageRequest, o.stopped = true, true
+	if model := credentialString(event, "model"); model != "" {
+		o.Model = model
+	}
+	if usage := event["usage"]; usage != nil && string(usage) != "null" {
+		normalized, _ := json.Marshal(map[string]any{"data": []map[string]json.RawMessage{event}, "usage": usage})
+		next := textObservation{Protocol: "images"}
+		if err := next.observeImages(normalized); err != nil {
+			return err
+		}
+		o.Usage.Input, o.Usage.Output = next.Usage.Input, next.Usage.Output
+		o.Usage.CacheRead, o.Usage.CacheWrite = next.Usage.CacheRead, next.Usage.CacheWrite
+		o.Usage.ImageInput, o.Usage.ImageOutput = next.Usage.ImageInput, next.Usage.ImageOutput
+		o.HasUsage = next.HasUsage
+	}
+	return nil
+}
+
 func imageSizeBreakdown(sizes [3]int64) any {
 	values := map[string]int64{}
 	for i, size := range []string{"1K", "2K", "4K"} {

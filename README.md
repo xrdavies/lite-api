@@ -157,7 +157,7 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 `GET/PUT /api/v1/admin/settings/stream-timeout` 配置流停顿后的账号处置，默认 `{"enabled":false,"action":"temp_unsched","temp_unsched_minutes":5,"threshold_count":3,"threshold_window_minutes":10}`。`action` 接受 `temp_unsched`、`error`、`none`，时间范围 1–60 分钟、阈值 1–10 次；PUT 提交完整对象。启用后，单账号在从首次超时起的固定窗口内累计到阈值时临时停调或标记错误；`none` 和禁用不累计。策略每次超时从数据库读取。管理员改账号、恢复或轮换凭证后重新累计，旧请求不能覆盖新状态；临时停调不会缩短已有更长的窗口，也不重置消费数据。配置读取失败不修改账号；Redis 不可用时按一次已确认超时判断，不虚构多次失败。
 
-超时检测独立于上述处置开关：`GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT` 默认 180 秒（允许 30–300），`GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT` 默认 900 秒（允许 60–1800），0 关闭对应间隔检测。适用于 Chat、Messages、Responses、Gemini SSE 及适用转换，Responses WebSocket 每轮采用文本间隔；Gemini 原生/转换图片流采用图片间隔。等待响应头仍受 30 秒传输限制；拿到成功响应头后，读取上游字节的等待超过间隔才算流超时。写入慢客户端的时间、客户端取消、正常 EOF、协议错误和请求总时限不计为账号流超时。SSE 与 Responses WS 单轮上限 30 分钟，其他同步请求仍为 5 分钟。超时返回 504，已开始的流发送错误事件，不发成功终止事件；已观察到的用量仍结算，不自动重发已接受的请求。Grok 双向语音会话继续使用自己的空闲策略。
+超时检测独立于上述处置开关：`GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT` 默认 180 秒（允许 30–300），`GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT` 默认 900 秒（允许 60–1800），0 关闭对应间隔检测。适用于 Chat、Messages、Responses、Gemini SSE 及适用转换，Responses WebSocket 每轮采用文本间隔；Gemini 原生/转换图片流及独立图片 SSE 采用图片间隔。等待响应头仍受 30 秒传输限制；拿到成功响应头后，读取上游字节的等待超过间隔才算流超时。写入慢客户端的时间、客户端取消、正常 EOF、协议错误和请求总时限不计为账号流超时。文本 SSE 与 Responses WS 单轮上限 30 分钟，独立图片 SSE 和其他同步请求为 5 分钟。超时返回 504，已开始的流发送错误事件，不发成功终止事件；已观察到的用量仍结算，不自动重发已接受的请求。Grok 双向语音会话继续使用自己的空闲策略。
 
 管理员通过 `/api/v1/admin/error-passthrough-rules` 的 GET/POST 和 `/{id}` 的 GET/PUT/DELETE 管理错误规则，沿用 `error_passthrough_rules` 表。`error_codes` 匹配原始 HTTP 状态，`keywords` 忽略大小写匹配正文前 8 KiB；`match_mode=any` 为任一类条件命中，`all` 要求所有已配置类别命中，每类内部任一项即可。`platforms:[]` 匹配全部支持平台。启用规则按 priority 升序、ID 升序取首个命中；最多 500 条。默认 enabled、passthrough_code、passthrough_body 为 true，match_mode 为 any，skip_monitoring 为 false。PUT 部分更新，省略/null 保持原值，空数组清空条件；至少保留一类条件。规则不缓存，下一次错误处理读取最新配置，数据库读取失败沿用原默认错误。
 
@@ -406,6 +406,12 @@ Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`ap
 计费尺寸优先采用图片项 `size`（省略时取响应顶层 `size`），多张图片按最大档位统一结算并记录各档数量；没有有效输出尺寸则取请求 `size`，再默认 2K。沿用最长边 ≤1024 为 1K、≤2048 为 2K、其余为 4K；输出元数据不通过额外下载或像素解码改写。原请求尺寸、输出尺寸、来源和档位分布写入用量。
 
 显式分组/渠道 token 价卡优先，必须有真实 token 用量并使用普通有效用户倍率；其他情况依次采用分组模型价卡、分组尺寸覆盖、渠道图片/按次价和固定兼容基线，使用有效用户倍率或已开启的图片独立倍率。Grok 已知图片族保留固定尺寸价（不是实时原厂报价），其余模型沿用参考按张价格或默认基线。请求开始后的改价不影响该次结算，异步 SQL 故障恢复使用原费用检查点；重复查询和幂等重放不重复扣费。
+
+`POST /v1/images/generations`、`/v1/images/edits` 及无 `/v1` 别名支持 `stream=true`，保持 OpenAI 原生 `image_generation` / `image_edit` 的 partial_image、completed 事件。JSON 与编辑 multipart 均保留 stream、partial_images、size 等生成参数；`partial_images` 为 0–3。预览不计费，完成图片按事件 ID 去重，没有 ID 时按内容摘要去重；每个请求最多 10 张完成图片。usage 采用上游最后一次有效的累计快照，不累加重复事件。协议参见 [图片生成](https://developers.openai.com/api/reference/resources/images/methods/generate)和[编辑](https://developers.openai.com/api/reference/resources/images/methods/edit)。
+
+原生流以完成图片后的正常 EOF 结束，兼容中转附加的 `[DONE]`；只有预览、非法事件、缺用量的 token 价卡或结算失败均不发布完成事件。单帧及暂存完成事件合计限 16 MiB。完成事件在结算成功后发送，断流已知消费继续记账；SQL 故障写入既有 Redis 待结算记录后恢复。客户端取消后继续读取已派发图片流，最长五分钟总期限且受图片空闲超时限制，避免客户端断开丢失随后返回的账务。上游未返回最终用量前的进程崩溃仍需核查。
+
+Grok 图片请求把 `size` 转成 `resolution`（1k/2k）和宽高比，显式 `resolution`、`aspect_ratio` 优先，随后移除 `size`；任意像素尺寸沿用最接近的已有宽高比，4K 输入转换到 2k，账务仍保留原请求/输出尺寸含义。生成、编辑、复合路由和限流换号共用转换，每次尝试均从原始客户端请求开始。参数依据 [xAI 图片生成](https://docs.x.ai/developers/model-capabilities/images/generation)；其当前原厂文档未声明图片 SSE，Grok 类型中转返回 OpenAI 格式 SSE 时可透传并计费，不能据此推定所有 Grok 上游支持流式。验证使用本地协议模拟和隔离数据库，真实图片上游联调仍待完成。
 
 ## 异步图片任务
 

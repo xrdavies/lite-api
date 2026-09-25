@@ -158,6 +158,10 @@ func (a *App) asyncImageTask(w http.ResponseWriter, r *http.Request) {
 		fail(err)
 		return
 	}
+	if in.Stream {
+		fail(bad("asynchronous image tasks do not accept streaming responses"))
+		return
+	}
 	if !g.Group.allows(in.Model) {
 		fail(denied())
 		return

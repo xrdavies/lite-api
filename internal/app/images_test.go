@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,6 +116,66 @@ func TestImagesToGrok(t *testing.T) {
 	var image map[string]any
 	if json.Unmarshal(out["image"], &image) != nil || image["type"] != "image_url" || image["url"] != "https://example.test/a.png" {
 		t.Fatalf("grok image shape: %s", out["image"])
+	}
+	for _, tc := range []struct{ body, resolution, aspect string }{
+		{`{"size":"1024x1024"}`, "1k", "1:1"},
+		{`{"size":"2048x1152"}`, "2k", "16:9"},
+		{`{"size":"2160x3840"}`, "2k", "9:16"},
+		{`{"size":"1672x941"}`, "2k", "16:9"},
+		{`{"size":"1K"}`, "1k", ""},
+		{`{"size":"auto"}`, "", ""},
+		{`{"size":"1024x1024","resolution":" 2K ","aspect_ratio":"auto"}`, "2k", "auto"},
+		{`{"size":"4096x2048","resolution":"1k","aspect_ratio":"21:9"}`, "1k", "21:9"},
+	} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(tc.body), &body)
+		out, err := imagesToGrok(body)
+		if err != nil || out["size"] != nil || credentialString(out, "resolution") != tc.resolution || credentialString(out, "aspect_ratio") != tc.aspect {
+			t.Fatal("Grok geometry", tc.body, out, err)
+		}
+	}
+	for _, raw := range []string{`{"resolution":"4k"}`, `{"resolution":1}`, `{"aspect_ratio":"2:0"}`, `{"aspect_ratio":2}`} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &body)
+		if _, err := imagesToGrok(body); err == nil {
+			t.Fatal("invalid Grok geometry", raw)
+		}
+	}
+}
+
+func TestImageStreamContracts(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(fmt.Sprintf(`{"model":"m","prompt":"draw","stream":%t,"partial_images":3}`, stream)), &body)
+		in, err := parseTextRequest(httptest.NewRequest("POST", "/v1/images/generations", nil), "images", body)
+		if err != nil || in.Stream != stream {
+			t.Fatal("image stream parsing", in, err)
+		}
+	}
+	for _, extra := range []string{`"stream":"true"`, `"partial_images":4`, `"partial_images":1.5`, `"partial_images":-1`} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"model":"m","prompt":"draw",`+extra+`}`), &body)
+		if _, err := parseTextRequest(httptest.NewRequest("POST", "/v1/images/generations", nil), "images", body); err == nil {
+			t.Fatal("invalid stream option", extra)
+		}
+	}
+	o := textObservation{Protocol: "images", ImageStream: &responseImageMeter{}, Usage: priceUsage{ImageInputSize: "1536x1024"}}
+	if err := o.observe([]byte(`{"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"eA=="}`)); err != nil || o.Usage.ImageCount != 0 || o.complete() {
+		t.Fatal("preview counted", o.Usage, err)
+	}
+	const completed = `{"type":"image_generation.completed","id":"image_1","b64_json":"eA==","size":"1024x1024","usage":{"input_tokens":10,"output_tokens":20,"output_tokens_details":{"image_tokens":15}}}`
+	for range 2 {
+		if err := o.observe([]byte(completed)); err != nil || o.Usage.ImageCount != 1 || o.Usage.Output != 20 || !o.HasUsage || !o.complete() {
+			t.Fatal("completion or duplicate", o.Usage, err)
+		}
+	}
+	if err := o.observe([]byte(`{"type":"image_edit.completed","b64_json":"eQ==","size":"3840x2160"}`)); err != nil || o.Usage.ImageCount != 2 || o.Usage.ImageSize != "4K" || o.Usage.Output != 20 || !o.HasUsage {
+		t.Fatal("multiple completed images", o.Usage, err)
+	}
+	for _, raw := range []string{`{"type":"error","message":"private"}`, `{"type":"image_generation.completed"}`, `{"type":"image_generation.completed","b64_json":"invalid!"}`, `{"type":"image_generation.partial_image","b64_json":"eA=="}`, `{"type":"image_generation.partial_image","b64_json":"eA==","partial_image_index":3}`} {
+		if err := o.observe([]byte(raw)); err == nil || o.Usage.ImageCount != 2 || o.Usage.Output != 20 {
+			t.Fatal("invalid event lost known usage", raw, o.Usage, err)
+		}
 	}
 }
 
@@ -461,6 +523,243 @@ func testDirectImageBilling(t *testing.T, a *App, admin string) {
 		w := call("POST", "/images/generations", key, body, "no-image-output")
 		if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", w.Header().Get("X-Request-ID")).Scan(&n); err != nil || w.Code != 502 || n != 0 {
 			t.Fatal("empty image result billed", w.Code, n, err)
+		}
+	}
+}
+
+func testImageStreams(t *testing.T, a *App, admin string) {
+	t.Helper()
+	defer pauseTestWorkers(a)()
+	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.191:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Idempotency-Key", idem)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	manage := func(method, path, token string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, token, body, "")
+		var out struct{ Data map[string]any }
+		if w.Code != 200 && w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	id := func(m map[string]any) int64 { return int64(m["id"].(float64)) }
+	for _, platform := range []string{"openai", "grok"} {
+		gid := id(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": platform + " image stream", "platform": platform, "allow_image_generation": true, "rate_multiplier": 2, "image_price_2k": "0.2", "image_rate_independent": true, "image_rate_multiplier": "0.5"}))
+		gpath := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
+		manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": platform + "-image-stream@example.test", "password": "image-stream-password", "balance": 100})
+		user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": platform + "-image-stream@example.test", "password": "image-stream-password"})["access_token"].(string)
+		key := manage("POST", "/api/v1/keys", user, map[string]any{"name": "stream", "group_id": gid, "quota": 100})["key"].(string)
+		var mode, calls atomic.Int32
+		var retryCalls atomic.Int32
+		drain := make(chan struct{})
+		var release sync.Once
+		defer release.Do(func() { close(drain) })
+		provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			var body map[string]json.RawMessage
+			if json.NewDecoder(r.Body).Decode(&body) != nil || credentialString(body, "model") != "upstream-stream-image" || r.Header.Get("Authorization") != "Bearer stream-image-provider" {
+				t.Error("image stream dispatch")
+			}
+			if platform == "grok" && (body["size"] != nil || credentialString(body, "resolution") != "2k" || credentialString(body, "aspect_ratio") != "16:9") {
+				t.Error("Grok geometry was not translated", body)
+			}
+			if platform == "openai" && (credentialString(body, "size") != "2048x1152" || body["resolution"] != nil) {
+				t.Error("OpenAI geometry changed")
+			}
+			if mode.Load() == 8 && retryCalls.Add(1) == 1 {
+				w.WriteHeader(429)
+				return
+			}
+			if mode.Load() == 5 {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"data":[{"b64_json":"eA=="}]}`)
+				return
+			}
+			if string(body["stream"]) != "true" || string(body["partial_images"]) != "1" {
+				t.Error("stream controls not forwarded", body)
+			}
+			if mode.Load() == 4 {
+				if _, err := a.DB.Exec("UPDATE groups SET image_price_2k=9,image_rate_multiplier=7 WHERE id=$1", gid); err != nil {
+					t.Error(err)
+				}
+			}
+			kind := "image_generation"
+			if strings.HasSuffix(r.URL.Path, "/edits") {
+				kind = "image_edit"
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "event: %s.partial_image\ndata: {\"type\":%q,\"b64_json\":\"cHJldmlldw==\",\"partial_image_index\":0}\n\n", kind, kind+".partial_image")
+			w.(http.Flusher).Flush()
+			if mode.Load() == 7 {
+				select {
+				case <-drain:
+				case <-r.Context().Done():
+					t.Error("image generation canceled before usage drain")
+					return
+				}
+			}
+			if mode.Load() == 2 {
+				return
+			}
+			data := "ZmluYWw="
+			if mode.Load() == 3 {
+				data = strings.Repeat("AAAA", 800000)
+			}
+			usage := `,"usage":{"input_tokens":10,"output_tokens":20,"output_tokens_details":{"image_tokens":15}}`
+			if mode.Load() == 6 {
+				usage = ""
+			}
+			completed := fmt.Sprintf("event: %s.completed\ndata: {\"type\":%q,\"id\":\"img_1\",\"b64_json\":%q,\"size\":\"2048x1152\"%s}\n\n", kind, kind+".completed", data, usage)
+			fmt.Fprint(w, completed)
+			if mode.Load() == 1 {
+				fmt.Fprint(w, "data: {\"type\":\"error\",\"message\":\"private-provider-error\"}\n\n")
+				return
+			}
+			if mode.Load() != 3 {
+				fmt.Fprint(w, completed)
+			} // Relay duplicate must not double bill.
+			// Native images finish at EOF; some relays append DONE.
+			if platform == "grok" {
+				fmt.Fprint(w, "data: [DONE]\n\n")
+			}
+		}))
+		defer provider.Close()
+		aid := id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": platform + " stream source", "platform": platform, "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "stream-image-provider", "base_url": provider.URL, "model_mapping": map[string]string{"stream-image": "upstream-stream-image"}}}))
+		body := map[string]any{"model": "stream-image", "prompt": "stream a lighthouse", "size": "2048x1152", "stream": true, "partial_images": 1}
+		checkBill := func(w *httptest.ResponseRecorder, count int, want string) {
+			t.Helper()
+			var n int
+			var cost string
+			if err := a.DB.QueryRow("SELECT count(*),COALESCE(sum(actual_cost),0)::text FROM usage_logs WHERE request_id=$1", w.Header().Get("X-Request-ID")).Scan(&n, &cost); err != nil || n != count || count > 0 && cost != want {
+				t.Fatal("stream billing", n, cost, err, w.Body.String())
+			}
+		}
+		first := call("POST", "/v1/images/generations", key, body, "stream-one")
+		if first.Code != 200 || !strings.Contains(first.Body.String(), "partial_image") || !strings.Contains(first.Body.String(), "completed") || strings.Contains(first.Body.String(), `"error"`) {
+			t.Fatal("image stream", first.Code, first.Body.String())
+		}
+		checkBill(first, 1, "0.1000000000")
+		replay := call("POST", "/images/generations", key, body, "stream-one")
+		if replay.Code != 200 || replay.Body.String() != first.Body.String() || replay.Header().Get("Content-Type") != "text/event-stream" || calls.Load() != 1 {
+			t.Fatal("image SSE replay", replay.Code, calls.Load())
+		}
+		for _, m := range []int32{1, 2, 3, 4} {
+			mode.Store(m)
+			w := call("POST", "/images/generations", key, body, fmt.Sprintf("image-stream-%d", m))
+			if m == 1 || m == 2 {
+				if !strings.Contains(w.Body.String(), `"error"`) || strings.Contains(w.Body.String(), ".completed") || strings.Contains(w.Body.String(), "private-provider-error") {
+					t.Fatal("failed stream reported completion", w.Code, w.Body.String())
+				}
+			}
+			if m == 2 {
+				checkBill(w, 0, "")
+			} else {
+				checkBill(w, 1, "0.1000000000")
+			}
+		}
+		manage("PUT", gpath, admin, map[string]any{"image_price_2k": "0.2", "image_rate_multiplier": "0.5"})
+		mode.Store(7)
+		gateway := httptest.NewServer(a.Handler())
+		ctx, cancel := context.WithCancel(context.Background())
+		raw, _ := json.Marshal(body)
+		request, _ := http.NewRequestWithContext(ctx, "POST", gateway.URL+"/images/generations", bytes.NewReader(raw))
+		request.Header.Set("Authorization", "Bearer "+key)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			cancel()
+			gateway.Close()
+			t.Fatal(err)
+		}
+		requestID := response.Header.Get("X-Request-ID")
+		cancel()
+		response.Body.Close()
+		release.Do(func() { close(drain) })
+		deadline := time.Now().Add(5 * time.Second)
+		var drained bool
+		for time.Now().Before(deadline) {
+			var cost string
+			if a.DB.QueryRow("SELECT actual_cost::text FROM usage_logs WHERE request_id=$1", requestID).Scan(&cost) == nil {
+				drained = cost == "0.1000000000"
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		gateway.Close()
+		if !drained {
+			t.Fatal("disconnected image stream lost consumption")
+		}
+		mode.Store(0)
+		// Multipart edits preserve stream and geometry controls.
+		var form bytes.Buffer
+		mw := multipart.NewWriter(&form)
+		for k, v := range map[string]string{"model": "stream-image", "prompt": "edit a lighthouse", "size": "2048x1152", "stream": "true", "partial_images": "1"} {
+			_ = mw.WriteField(k, v)
+		}
+		part, _ := mw.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="image"; filename="source.png"`}, "Content-Type": {"image/png"}})
+		_, _ = part.Write([]byte("source"))
+		_ = mw.Close()
+		r := httptest.NewRequest("POST", "/images/edits", &form)
+		r.RemoteAddr = "192.0.2.191:1234"
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		r.Header.Set("Authorization", "Bearer "+key)
+		edited := httptest.NewRecorder()
+		a.Handler().ServeHTTP(edited, r)
+		if edited.Code != 200 || !strings.Contains(edited.Body.String(), "image_edit.completed") {
+			t.Fatal("multipart image stream", edited.Code, edited.Body.String())
+		}
+		checkBill(edited, 1, "0.1000000000")
+		// Failed SQL stores a receipt before withholding completed output.
+		if _, err := a.DB.Exec(fmt.Sprintf("ALTER TABLE usage_logs ADD CONSTRAINT stream_image_bill_failure CHECK (account_id<>%d) NOT VALID", aid)); err != nil {
+			t.Fatal(err)
+		}
+		failed := call("POST", "/images/generations", key, body, "stream-sql-failure")
+		if !strings.Contains(failed.Body.String(), `"error"`) || strings.Contains(failed.Body.String(), ".completed") {
+			t.Fatal("unsettled final image exposed")
+		}
+		if _, err := a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT stream_image_bill_failure"); err != nil {
+			t.Fatal(err)
+		}
+		manage("PUT", gpath, admin, map[string]any{"image_price_2k": 9})
+		fresh := &App{DB: a.DB, Redis: a.Redis}
+		for range 2 {
+			if err := fresh.recoverReceipts(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		checkBill(failed, 1, "0.1000000000")
+		manage("PUT", gpath, admin, map[string]any{"image_price_2k": "0.2", "model_pricing": []any{map[string]any{"platform": platform, "models": []string{"stream-image"}, "billing_mode": "token", "input_price": "0.01", "output_price": "0.02", "image_output_price": "0.04"}}})
+		billed := call("POST", "/images/generations", key, body, "image-stream-tokens")
+		checkBill(billed, 1, "1.6000000000")
+		mode.Store(6)
+		missing := call("POST", "/images/generations", key, body, "image-stream-no-tokens")
+		checkBill(missing, 0, "")
+		if !strings.Contains(missing.Body.String(), `"error"`) || strings.Contains(missing.Body.String(), ".completed") {
+			t.Fatal("missing tokens published as success")
+		}
+		// Composite dispatch and synchronous generation use the same conversion.
+		mode.Store(5)
+		cgid := id(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": platform + " composite image stream", "platform": "composite", "allow_image_generation": true, "image_price_2k": "0.2"}))
+		manage("PUT", fmt.Sprintf("/api/v1/admin/accounts/%d", aid), admin, map[string]any{"group_ids": []int64{gid, cgid}})
+		manage("POST", fmt.Sprintf("/api/v1/admin/groups/%d/composite-routes", cgid), admin, map[string]any{"public_model": "stream-image", "match_type": "exact", "target_platform": platform, "upstream_model": "stream-image", "endpoint": "images", "enabled": true})
+		ckey := manage("POST", "/api/v1/keys", user, map[string]any{"name": "composite images", "group_id": cgid})["key"].(string)
+		body["stream"] = false
+		checkBill(call("POST", "/images/generations", ckey, body, "sync-geometry"), 1, "0.2000000000")
+		mode.Store(0)
+		body["stream"] = true
+		checkBill(call("POST", "/images/generations", ckey, body, "composite-stream"), 1, "0.2000000000")
+		manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": platform + " stream retry", "platform": platform, "type": "apikey", "priority": 100, "group_ids": []int64{cgid}, "credentials": map[string]any{"api_key": "stream-image-provider", "base_url": provider.URL, "model_mapping": map[string]string{"stream-image": "upstream-stream-image"}}})
+		mode.Store(8)
+		body["images"] = []any{map[string]any{"url": "https://example.test/input.png"}}
+		checkBill(call("POST", "/images/edits", ckey, body, "retry-stream-geometry"), 1, "0.2000000000")
+		if retryCalls.Load() != 2 {
+			t.Fatal("stream retry did not try both accounts", retryCalls.Load())
 		}
 	}
 }

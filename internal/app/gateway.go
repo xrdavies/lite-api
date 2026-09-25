@@ -644,7 +644,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				errorBody = map[string]any{"type": "error", "code": gatewayErrorType(err), "message": safeGatewayError(err), "param": nil}
 			}
 			data, _ := json.Marshal(errorBody)
-			if protocol == "anthropic" || protocol == "responses" {
+			if protocol == "anthropic" || protocol == "responses" || protocol == "images" {
 				_, _ = io.WriteString(w, "event: error\n")
 			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
@@ -1134,7 +1134,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			nested["model"], _ = json.Marshal("models/" + strings.TrimPrefix(selected.UpstreamModel, "models/"))
 			request["generateContentRequest"], _ = json.Marshal(nested)
 		}
-		if protocol == "images" && in.Action == "edits" && selected.Account.Platform == "grok" {
+		if protocol == "images" {
+			// Restore the client shape on retries before platform-specific edits.
+			request = nil
+			_ = json.Unmarshal(canonical, &request)
+			request["model"], _ = json.Marshal(selected.UpstreamModel)
+		}
+		if protocol == "images" && selected.Account.Platform == "grok" {
 			request, err = imagesToGrok(request)
 			if err != nil {
 				selected.Release()
@@ -1447,6 +1453,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
 		} else {
 			upstreamCtx, upstreamCancel := context.WithCancel(ctx)
+			if protocol == "images" && stream {
+				upstreamCancel()
+				// Generation may remain billable after the client disconnects.
+				// Drain for at most five minutes; retain the existing idle timeout.
+				upstreamCtx, upstreamCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+			}
 			defer upstreamCancel()
 			resp, err = a.upstreamRequestHeaders(upstreamCtx, selected.Account, "POST", path, upstreamBody, wireIn.Headers)
 			if err == nil && stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -1525,6 +1537,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	observation := textObservation{Protocol: wireIn.Protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action, Programmatic: in.NativeProgrammatic}
 	if wireIn.Protocol == "images" {
 		observation.Usage.ImageInputSize = wireIn.ImageInputSize
+		if stream {
+			observation.ImageStream = &responseImageMeter{}
+		}
 	}
 	upstreamID := resp.Header.Get("X-Request-ID")
 	if upstreamID == "" {
@@ -1659,12 +1674,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		w.Header().Set("X-Accel-Buffering", "no")
 		scanner := bufio.NewScanner(resp.Body)
 		frameLimit := 2 << 20
-		if wireIn.Protocol == "gemini" || in.ResponseImage != nil {
+		if wireIn.Protocol == "gemini" || wireIn.Protocol == "images" || in.ResponseImage != nil {
 			frameLimit = 16 << 20
 		}
 		scanner.Buffer(make([]byte, 4096), frameLimit)
 		frame := []string{}
 		var size int
+		var downstreamErr error
 		emit := func() error {
 			if len(frame) == 0 {
 				return nil
@@ -1676,6 +1692,14 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				}
 			}
 			data := strings.Join(dataLines, "\n")
+			if wireIn.Protocol == "images" && data == "[DONE]" {
+				if !observation.complete() {
+					return &apiError{502, "upstream image stream ended without a completed image"}
+				}
+				terminal += "data: [DONE]\n\n"
+				done = true
+				return nil
+			}
 			if wireIn.Protocol == "chat_completions" && data == "[DONE]" {
 				terminal = "data: [DONE]\n\n"
 				if messagesBridge != nil {
@@ -1848,11 +1872,23 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				done = wireIn.Protocol == "anthropic" || wireIn.Protocol == "responses"
 				return nil
 			}
+			if downstreamErr != nil {
+				return nil
+			}
 			committed = true
 			if _, err := io.WriteString(w, wire); err != nil {
+				if wireIn.Protocol == "images" {
+					downstreamErr = err
+					return nil
+				}
 				return err
 			}
-			return http.NewResponseController(w).Flush()
+			err := http.NewResponseController(w).Flush()
+			if err != nil && wireIn.Protocol == "images" {
+				downstreamErr = err
+				return nil
+			}
+			return err
 		}
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -1875,7 +1911,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				frame = append(frame, line)
 			}
 		}
-		if wireIn.Protocol == "gemini" && observation.complete() {
+		if (wireIn.Protocol == "gemini" || wireIn.Protocol == "images") && observation.complete() {
 			done = true
 		}
 		if forwardErr == nil {
@@ -1886,6 +1922,8 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				forwardErr = &apiError{502, "upstream stream interrupted"}
 			} else if !done {
 				forwardErr = &apiError{502, "upstream stream ended without completion"}
+			} else if downstreamErr != nil {
+				forwardErr = &apiError{499, "client disconnected; image consumption was retained"}
 			}
 		}
 		if forwardErr == nil && geminiBridge != nil {

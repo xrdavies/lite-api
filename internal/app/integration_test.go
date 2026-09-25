@@ -260,6 +260,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testImages(t, a, admin)
 	testGrokImages(t, a, admin)
 	testDirectImageBilling(t, a, admin)
+	testImageStreams(t, a, admin)
 	testGrokAudio(t, a, admin)
 	testGrokRealtime(t, a, admin)
 	testCustomVoices(t, a, admin)

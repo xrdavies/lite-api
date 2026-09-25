@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -93,8 +95,14 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 				return in, bad("invalid image response_format")
 			}
 		}
-		if raw := body["stream"]; raw != nil && string(raw) != "false" {
-			return in, bad("image generation does not stream")
+		if raw := body["stream"]; raw != nil && json.Unmarshal(raw, &in.Stream) != nil {
+			return in, bad("invalid image stream flag")
+		}
+		if raw := body["partial_images"]; raw != nil && string(raw) != "null" {
+			var n int
+			if json.Unmarshal(raw, &n) != nil || n < 0 || n > 3 {
+				return in, bad("partial_images must be between 0 and 3")
+			}
 		}
 		if raw := body["size"]; raw != nil && (json.Unmarshal(raw, &in.ImageInputSize) != nil || len(in.ImageInputSize) > 32 || in.ImageInputSize != "auto" && imageSizeTier(in.ImageInputSize) == "") {
 			return in, bad("invalid image size")
@@ -403,9 +411,12 @@ func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMe
 		}
 		value := strings.TrimSpace(string(data))
 		switch name {
-		case "model", "prompt", "response_format":
+		case "model", "prompt", "response_format", "size", "resolution", "aspect_ratio", "quality", "background", "output_format", "moderation", "input_fidelity", "style":
 			out[name] = json.RawMessage(fmt.Sprintf("%q", value))
-		case "n":
+		case "n", "stream", "partial_images", "output_compression":
+			if !json.Valid([]byte(value)) {
+				return nil, bad("invalid image edit " + name)
+			}
 			out[name] = json.RawMessage(value)
 		case "image":
 			if value != "" && validImageSource(value) {
@@ -421,9 +432,57 @@ func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMe
 }
 
 // imagesToGrok keeps the public OpenAI image contract while emitting the JSON
-// object shape used by the Grok image endpoint. Generation requests already
-// share the wire format; edits are the only incompatible part.
+// geometry and edit objects used by the Grok image endpoint.
 func imagesToGrok(body map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	size := credentialString(body, "size")
+	resolution := strings.ToLower(strings.TrimSpace(credentialString(body, "resolution")))
+	if raw := body["resolution"]; raw != nil && string(raw) != "null" && resolution != "1k" && resolution != "2k" {
+		return nil, bad("Grok image resolution must be 1k or 2k")
+	}
+	if resolution == "" {
+		if tier := imageSizeTier(size); tier != "" {
+			resolution = "2k"
+			if tier == "1K" {
+				resolution = "1k"
+			}
+		}
+	}
+	if resolution != "" {
+		body["resolution"], _ = json.Marshal(resolution)
+	}
+	// Preserve the established nearest-ratio mapping for arbitrary dimensions.
+	ratios := []string{"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
+	aspect := strings.TrimSpace(credentialString(body, "aspect_ratio"))
+	if raw := body["aspect_ratio"]; raw != nil && string(raw) != "null" && aspect == "" {
+		return nil, bad("invalid Grok image aspect_ratio")
+	}
+	if aspect != "" {
+		valid := aspect == "auto" || aspect == "21:9" || aspect == "5:2"
+		for _, ratio := range ratios {
+			valid = valid || aspect == ratio
+		}
+		if !valid {
+			return nil, bad("invalid Grok image aspect_ratio")
+		}
+	} else if width, height, ok := strings.Cut(strings.ToLower(strings.TrimSpace(size)), "x"); ok {
+		w, e1 := strconv.ParseFloat(width, 64)
+		h, e2 := strconv.ParseFloat(height, 64)
+		if e1 == nil && e2 == nil && w > 0 && h > 0 {
+			best := math.Inf(1)
+			for _, ratio := range ratios {
+				x, y, _ := strings.Cut(ratio, ":")
+				xn, _ := strconv.ParseFloat(x, 64)
+				yn, _ := strconv.ParseFloat(y, 64)
+				if delta := math.Abs(w/h - xn/yn); delta < best {
+					aspect, best = ratio, delta
+				}
+			}
+		}
+	}
+	if aspect != "" {
+		body["aspect_ratio"], _ = json.Marshal(aspect)
+	}
+	delete(body, "size")
 	if body["images"] == nil {
 		return body, nil
 	}
@@ -528,10 +587,11 @@ type textObservation struct {
 	blocked               bool
 	ImageRejected         bool
 	ImageCount            int64
+	ImageStream           *responseImageMeter
 }
 
 func (o *textObservation) complete() bool {
-	if o.Protocol == "anthropic" || o.Protocol == "responses" {
+	if o.Protocol == "anthropic" || o.Protocol == "responses" || o.Protocol == "images" {
 		return o.stopped
 	}
 	if o.blocked {
@@ -550,6 +610,9 @@ func (o *textObservation) complete() bool {
 
 func (o *textObservation) observe(data []byte) error {
 	if o.Protocol == "images" {
+		if o.ImageStream != nil {
+			return o.observeImageStream(data)
+		}
 		return o.observeImages(data)
 	}
 	if o.Protocol == "alpha_search" {
