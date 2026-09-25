@@ -117,18 +117,26 @@ class Provider(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
 
-def request(base, method, path, token="", body=None, idem=""):
+def request(base, method, path, token="", body=None, idem="", timings=None):
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + token}
     if idem:
         headers["Idempotency-Key"] = idem
     req = urllib.request.Request(base + path, method=method, headers=headers,
                                  data=None if body is None else json.dumps(body).encode())
+    started = time.perf_counter()
     try:
         response = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=45)
     except urllib.error.HTTPError as error:
         response = error
     with response:
-        return response.status, response.read(), response.headers
+        if timings is None:
+            return response.status, response.read(), response.headers
+        timings["headers_ms"] = (time.perf_counter() - started) * 1000
+        first = response.read(1)
+        timings["first_byte_ms"] = (time.perf_counter() - started) * 1000
+        data = first + response.read()
+        timings["total_ms"] = (time.perf_counter() - started) * 1000
+        return response.status, data, response.headers
 
 
 def eventually(check, label, timeout=60):
@@ -243,20 +251,49 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         api("POST", f"/api/v1/admin/users/{uid}/balance", admin, {"balance": 1, "operation": "add"}, "deploy-balance")
         print("Initialized; JSON/SSE, identity, balances and idempotency verified", flush=True)
 
-        def timed(base_url, credential):
-            start = time.perf_counter()
-            status, data, _ = request(base_url, "POST", "/v1/chat/completions", credential, body)
-            assert status == 200 and json.loads(data)["usage"]["total_tokens"] == 5
-            return (time.perf_counter() - start) * 1000
+        def timed(base_url, credential, stream):
+            timings = {"protocol": "sse" if stream else "json"}
+            status, data, _ = request(base_url, "POST", "/v1/chat/completions", credential,
+                                      streamed if stream else body, timings=timings)
+            assert status == 200
+            if stream:
+                events = [line[6:] for line in data.splitlines() if line.startswith(b"data: ")]
+                assert events[-1] == b"[DONE]" and json.loads(events[0])["usage"]["total_tokens"] == 5
+            else:
+                assert json.loads(data)["usage"]["total_tokens"] == 5
+            return timings
 
-        direct = [timed("http://127.0.0.1:" + str(provider.server_port), provider_key) for _ in range(20)]
+        def database_sample():
+            return json.loads(sql("""SELECT json_build_object('connections',numbackends,
+                'commits',xact_commit,'rollbacks',xact_rollback,'blocks_read',blks_read,'blocks_hit',blks_hit,
+                'rows_read',tup_returned+tup_fetched,'rows_inserted',tup_inserted,'rows_updated',tup_updated,
+                'deadlocks',deadlocks,'database_bytes',pg_database_size(datname))
+                FROM pg_stat_database WHERE datname=current_database()"""))
+
+        direct = [timed("http://127.0.0.1:" + str(provider.server_port), provider_key, i % 2 == 1) for i in range(20)]
+        pg_before = database_sample()
+        started = time.perf_counter()
         with ThreadPoolExecutor(max_workers=8) as pool:
-            latency = list(pool.map(lambda _: timed(base, key), range(40)))
-        p95 = sorted(latency)[37]
+            samples = list(pool.map(lambda i: timed(base, key, i % 2 == 1), range(40)))
+        elapsed = time.perf_counter() - started
         stats = json.loads(run(docker + ["stats", "--no-stream", "--format", "{{json .}}", container]).stdout)
-        print(json.dumps({"concurrency": 8, "requests": 40, "direct_p50_ms": round(statistics.median(direct), 2),
-                          "gateway_p50_ms": round(statistics.median(latency), 2), "gateway_p95_ms": round(p95, 2),
-                          "memory": stats["MemUsage"]}), flush=True)
+        pg_after = database_sample()
+        cpu = json.loads(run(docker + ["info", "--format", "{{json .NCPU}}"]).stdout)
+        memory = json.loads(run(docker + ["info", "--format", "{{json .MemTotal}}"]).stdout)
+        report = {"concurrency": 8, "requests": len(samples), "requests_per_second": round(len(samples) / elapsed, 2),
+                  "docker_cpus": cpu, "docker_memory_bytes": memory, "memory": stats["MemUsage"],
+                  "postgres_after": pg_after,
+                  "postgres_delta": {k: pg_after[k] - pg_before[k] for k in pg_before if k not in ("connections", "database_bytes")}}
+        for protocol in ("json", "sse"):
+            report[protocol] = {}
+            for kind, values in (("direct", direct), ("gateway", samples)):
+                selected = [v for v in values if v["protocol"] == protocol]
+                report[protocol][kind] = {metric: {"p50": round(statistics.median(v[metric] for v in selected), 2),
+                    "p95": round(sorted(v[metric] for v in selected)[(95 * len(selected) + 99) // 100 - 1], 2)}
+                    for metric in ("headers_ms", "first_byte_ms", "total_ms")}
+        assert pg_after["deadlocks"] == pg_before["deadlocks"], "database deadlock during concurrent requests"
+        assert all(int(redis("SCARD", name)) == 0 for name in ("gateway:video:pending", "gateway:background:pending", "image_tasks:pending"))
+        print(json.dumps(report), flush=True)
         status, raw, _ = request(base, "POST", "/v1/contents/generations/tasks", key,
                                 {"model": "deploy-video", "content": [{"type": "text", "text": "test"}]}, "deploy-video")
         assert status == 200
