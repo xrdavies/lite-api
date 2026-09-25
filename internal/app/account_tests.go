@@ -184,11 +184,13 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	var in accountTestInput
+	var in *accountTestInput
 	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&in); err != nil {
+	if err = decoder.Decode(&in); errors.Is(err, io.EOF) {
+		in = &accountTestInput{}
+	} else if err != nil || in == nil {
 		return bad("invalid account test JSON")
 	}
 	if decoder.Decode(new(any)) != io.EOF {
@@ -198,7 +200,7 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	mapped, _, err := prepareAccountTest(u, in)
+	mapped, _, err := prepareAccountTest(u, *in)
 	if err != nil {
 		return err
 	}
@@ -215,7 +217,7 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 	if err = send(map[string]any{"type": "test_start", "model": mapped}); err != nil {
 		return nil
 	}
-	result := a.runAccountTest(r.Context(), u, in)
+	result := a.runAccountTest(r.Context(), u, *in)
 	if result.Status == "success" {
 		if err = a.recoverTestAccount(r.Context(), u); err != nil {
 			_ = send(map[string]any{"type": "error", "error": "test succeeded but health state could not be saved"})

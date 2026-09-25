@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -75,6 +76,20 @@ func (a *App) saveTestPlan(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer tx.Rollback()
 	plan := testPlan{Enabled: true, MaxResults: 50}
+	if create {
+		if in.AccountID == nil || *in.AccountID <= 0 {
+			return bad("account_id is required")
+		}
+		plan.AccountID = *in.AccountID
+	} else if err = tx.QueryRowContext(r.Context(), "SELECT account_id FROM scheduled_test_plans WHERE id=$1", id).Scan(&plan.AccountID); err != nil {
+		return err
+	}
+	// Serialize with deletion and runner settlement, always account before plan.
+	// A separate non-transactional lookup can accept a soft-deleted account.
+	var lockedAccount int64
+	if err = tx.QueryRowContext(r.Context(), "SELECT id FROM accounts WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", plan.AccountID).Scan(&lockedAccount); err != nil {
+		return err
+	}
 	if !create {
 		raw, err := jsonRow(tx.QueryRowContext(r.Context(), "SELECT to_jsonb(p) FROM scheduled_test_plans p WHERE id=$1 FOR UPDATE", id))
 		if err != nil {
@@ -91,7 +106,7 @@ func (a *App) saveTestPlan(w http.ResponseWriter, r *http.Request) error {
 		plan.AccountID = *in.AccountID
 	}
 	if in.Model != nil {
-		plan.Model = *in.Model
+		plan.Model = strings.TrimSpace(*in.Model)
 	}
 	if in.Cron != nil {
 		plan.Cron = *in.Cron
@@ -101,14 +116,17 @@ func (a *App) saveTestPlan(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.Max != nil {
 		plan.MaxResults = *in.Max
+		if create && plan.MaxResults == 0 {
+			plan.MaxResults = 50
+		}
 	}
 	if in.Recover != nil {
 		plan.AutoRecover = *in.Recover
 	}
-	if plan.AccountID <= 0 || plan.Model == "" || len(plan.Model) > 100 || plan.MaxResults < 1 || plan.MaxResults > 1000 {
+	if plan.AccountID <= 0 || len(plan.Model) > 100 || plan.Model != "" && !validNativeModel(plan.Model) || plan.MaxResults < 1 || plan.MaxResults > 1000 {
 		return bad("invalid plan account, model_id or max_results")
 	}
-	if _, err = a.loadAccount(r.Context(), plan.AccountID); err != nil {
+	if _, err = loadAccountFrom(r.Context(), tx, plan.AccountID); err != nil {
 		return err
 	}
 	next, err := nextTestRun(plan.Cron, time.Now())

@@ -63,6 +63,19 @@ func prepareAccountTest(u *upstreamAccount, in accountTestInput) (string, string
 			}
 		} else if mode == "video" && u.Platform == "grok" {
 			model = "grok-imagine-video"
+		} else if mode == "" || mode == "default" || mode == "text" {
+			// Fixed compatibility defaults; availability still depends on the
+			// configured provider and the account's model mapping/allowlist.
+			switch {
+			case u.Platform == "gemini":
+				model = "gemini-2.0-flash"
+			case u.Platform == "grok":
+				model = "grok-4.5"
+			case u.protocol() == "anthropic" && u.Platform != "openai":
+				model = "claude-sonnet-4-5-20250929"
+			default:
+				model = "gpt-5.4"
+			}
 		}
 	}
 	if len(model) > 100 || !validNativeModel(model) {

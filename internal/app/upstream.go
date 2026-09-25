@@ -318,9 +318,13 @@ func (u *upstreamAccount) baseURL() (string, error) {
 	return "", bad("unsupported platform")
 }
 func (a *App) loadAccount(ctx context.Context, id int64) (*upstreamAccount, error) {
+	return loadAccountFrom(ctx, a.DB, id)
+}
+
+func loadAccountFrom(ctx context.Context, q queryer, id int64) (*upstreamAccount, error) {
 	u := &upstreamAccount{}
 	var credentials, extra []byte
-	err := a.DB.QueryRowContext(ctx, `SELECT id,name,platform,type,status,credentials,extra,proxy_id,schedulable,updated_at FROM accounts WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&u.ID, &u.Name, &u.Platform, &u.Type, &u.Status, &credentials, &extra, &u.ProxyID, &u.Schedulable, &u.UpdatedAt)
+	err := q.QueryRowContext(ctx, `SELECT id,name,platform,type,status,credentials,extra,proxy_id,schedulable,updated_at FROM accounts WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&u.ID, &u.Name, &u.Platform, &u.Type, &u.Status, &credentials, &extra, &u.ProxyID, &u.Schedulable, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
