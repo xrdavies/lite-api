@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type auditIdentityKey struct{}
@@ -130,6 +132,20 @@ func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) error {
 		clauses = append(clauses, strings.ReplaceAll(clause, "?", fmt.Sprintf("$%d", len(args))))
 	}
 	q := r.URL.Query()
+	for _, filter := range []struct {
+		key string
+		max int
+	}{
+		{"actor_user_id", 20}, {"start_time", 64}, {"end_time", 64},
+		{"actor_email", 255}, {"action", 128}, {"auth_method", 32},
+		{"method", 16}, {"client_ip", 64}, {"q", 512}, {"success", 5},
+	} {
+		value := strings.TrimSpace(q.Get(filter.key))
+		if !utf8.ValidString(value) || strings.ContainsRune(value, 0) || utf8.RuneCountInString(value) > filter.max {
+			return bad("invalid " + filter.key)
+		}
+		q.Set(filter.key, value)
+	}
 	if raw := q.Get("actor_user_id"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || id < 1 {
@@ -178,14 +194,19 @@ func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) error {
 		add("(status_code<400)=?", raw == "true")
 	}
 	where := " WHERE " + strings.Join(clauses, " AND ")
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var count int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM audit_logs"+where, args...).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(r.Context(), "SELECT count(*) FROM audit_logs"+where, args...).Scan(&count); err != nil {
 		return err
 	}
 	page, size := pagination(r)
 	size = min(size, 200)
 	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), fmt.Sprintf("SELECT to_jsonb(l) FROM audit_logs l%s ORDER BY id DESC LIMIT $%d OFFSET $%d", where, len(args)-1, len(args)), args...)
+	rows, err := tx.QueryContext(r.Context(), fmt.Sprintf("SELECT to_jsonb(l) || jsonb_build_object('request_body','') FROM audit_logs l%s ORDER BY created_at DESC,id DESC LIMIT $%d OFFSET $%d", where, len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}

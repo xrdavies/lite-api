@@ -439,7 +439,7 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`api_key_ids` 最多 100 个，只返回本人 Key）：`today_actual_cost` 为 Asia/Shanghai 当日费用，原 `total_actual_cost` 字段为近 30 天费用。`GET /api/v1/user/api-keys/{id}/usage/daily` 支持 1–90 天和显式 `timezone`，默认 30 天、Asia/Shanghai。金额直接在数据库精确汇总，不改变原始消费。
 
-管理员审计查询为 `/api/v1/admin/audit-logs` 和 `/{id}`，支持操作者、动作、方法、IP、RFC3339 时间、成功状态及关键词筛选；每页最多 200 条。查询不提供清空能力。`/api/v1/admin/usage/search-users` 与 `/search-api-keys` 为账务筛选提供用户/Key 简要信息，包含历史用户归属，不返回密码和 Key 原文。
+管理员审计查询为 `/api/v1/admin/audit-logs` 和 `/{id}`，支持操作者、动作、方法、IP、RFC3339 时间、成功状态及关键词筛选；按事件时间、ID 倒序，总数和分页内容使用同一数据库快照，每页最多 200 条。邮箱、动作和关键词按不区分大小写的字面子串匹配，时间上下界均包含；success 只接受 true/false。参数去除首尾空白，并按字段长度拒绝超长、非法 UTF-8 和空字符。列表将 request_body 置空，详情保留数据库原记录；当前写入不采集正文。查询不提供清空能力。`/api/v1/admin/usage/search-users` 与 `/search-api-keys` 为账务筛选提供用户/Key 简要信息，包含历史用户归属，不返回密码和 Key 原文。
 
 审计记录密码登录成功/失败、刷新失败、退出，以及已认证的管理/用户变更。成功刷新和普通 GET 不记录；管理员读取全局 Key 状态、用户 Key 列表和分组 Key 列表单独记录。登录只有成功校验后才关联用户，失败请求不据提交的邮箱或会话 ID 冒认身份；退出可通过已验证 JWT 或成功撤销的 refresh token 关联用户。动作采用 `auth.login`、`auth.token.refresh`、`admin.users.update` 等固定名称，已有记录不改写。记录请求 ID、实际 HTTP 状态、来源 IP、最多 512 字符的 User-Agent 和耗时，不采集正文、查询串或凭证。SSE 状态表示 HTTP 传输状态，测试结果仍以事件内容为准。客户端取消不取消审计写入；数据库写入失败只输出请求 ID 诊断，不改变已完成业务结果，也不承诺故障期间审计无丢失。
 

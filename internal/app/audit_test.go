@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,143 @@ func TestAuditContracts(t *testing.T) {
 	w := &auditResponseWriter{ResponseWriter: recorder}
 	if err := http.NewResponseController(w).Flush(); err != nil || !recorder.Flushed || w.status != 200 {
 		t.Fatal("audit wrapper blocked SSE flushing", err, w.status)
+	}
+}
+
+func testAuditQueries(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	const marker = "audit-query-contract"
+	const path = "/api/v1/admin/audit-logs"
+	call := func(suffix, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path+suffix, nil)
+		r.RemoteAddr = "192.0.2.207:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	type record struct {
+		ID   int64
+		Body string `json:"request_body"`
+	}
+	list := func(query string) ([]record, int) {
+		t.Helper()
+		w := call("?client_ip="+marker+"&"+query, admin)
+		var result struct {
+			Data struct {
+				Items []record
+				Total int
+			}
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+			t.Fatalf("audit list: %d %s", w.Code, w.Body.String())
+		}
+		for _, item := range result.Data.Items {
+			if item.Body != "" {
+				t.Fatal("audit list exposed stored request body")
+			}
+		}
+		return result.Data.Items, result.Data.Total
+	}
+	var actor int64
+	if err := a.DB.QueryRow("SELECT id FROM users WHERE email='admin@example.test'").Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	ids := []int64{}
+	for i, offset := range []time.Duration{2 * time.Hour, 0, 2 * time.Hour, time.Hour} {
+		var id int64
+		if err := a.DB.QueryRow(`INSERT INTO audit_logs(created_at,actor_user_id,actor_email,auth_method,action,method,path,client_ip,status_code,request_body)
+VALUES($1,$2,$3,'jwt',$4,'POST',$5,$6,$7,'previously redacted body') RETURNING id`, created.Add(offset), actor, fmt.Sprintf("Audit%%_%d@example.test", i), fmt.Sprintf("audit.action_%d", i), fmt.Sprintf("/audit/%%_/%d", i), marker, 200+i*100).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	defer a.DB.Exec("DELETE FROM audit_logs WHERE client_ip=$1", marker)
+	assertList := func(query string, wantTotal int, want ...int64) {
+		t.Helper()
+		items, total := list(query)
+		if total != wantTotal || len(items) != len(want) {
+			t.Fatalf("%s: total=%d items=%v want=%v", query, total, items, want)
+		}
+		for i, item := range items {
+			if item.ID != want[i] {
+				t.Fatalf("%s: IDs=%v want=%v", query, items, want)
+			}
+		}
+	}
+	assertList("page_size=2", 4, ids[2], ids[0])
+	assertList("page_size=2&page=2", 4, ids[3], ids[1])
+	assertList("page=9", 4)
+	assertList("actor_email="+url.QueryEscape(" AUDIT%_ "), 4, ids[2], ids[0], ids[3], ids[1])
+	assertList("q="+url.QueryEscape("%_"), 4, ids[2], ids[0], ids[3], ids[1])
+	assertList("q="+url.QueryEscape("' OR true --"), 0)
+	assertList("action=ACTION_2", 1, ids[2])
+	assertList("success="+url.QueryEscape(" true "), 2, ids[0], ids[1])
+	assertList("success=false", 2, ids[2], ids[3])
+	assertList("actor_user_id="+url.QueryEscape(fmt.Sprintf(" %d ", actor))+"&auth_method=jwt&method=post", 4, ids[2], ids[0], ids[3], ids[1])
+	assertList("start_time="+url.QueryEscape(" "+created.Add(2*time.Hour).Format(time.RFC3339)+" ")+"&end_time="+url.QueryEscape(created.Add(2*time.Hour).In(time.FixedZone("local", 9*3600)).Format(time.RFC3339)), 2, ids[2], ids[0])
+	for key, value := range map[string]string{
+		"actor_user_id": "0", "start_time": "yesterday", "end_time": "tomorrow", "success": "1",
+		"actor_email": strings.Repeat("界", 256), "action": strings.Repeat("x", 129), "auth_method": strings.Repeat("x", 33),
+		"method": strings.Repeat("x", 17), "client_ip": strings.Repeat("x", 65), "q": strings.Repeat("x", 513),
+	} {
+		if w := call("?"+key+"="+url.QueryEscape(value), admin); w.Code != 400 {
+			t.Fatalf("invalid %s: %d %s", key, w.Code, w.Body.String())
+		}
+	}
+	for _, query := range []string{"q=%00", "q=%FF", "start_time=2026-01-02T00:00:00Z&end_time=2026-01-01T00:00:00Z"} {
+		if w := call("?"+query, admin); w.Code != 400 {
+			t.Fatalf("invalid query %s: %d", query, w.Code)
+		}
+	}
+	detail := fmt.Sprintf("/%d", ids[0])
+	var result struct{ Data record }
+	w := call(detail, admin)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Data.ID != ids[0] || result.Data.Body != "previously redacted body" {
+		t.Fatal("audit detail lost stored data", w.Code, w.Body.String())
+	}
+	for _, suffix := range []string{"", detail} {
+		for _, auth := range []struct {
+			token string
+			code  int
+		}{{ordinary, 403}, {"", 401}} {
+			if w := call(suffix, auth.token); w.Code != auth.code {
+				t.Fatal("audit authorization", suffix, w.Code)
+			}
+		}
+	}
+	if w := call("/9223372036854775807", admin); w.Code != 404 {
+		t.Fatal("missing audit detail", w.Code)
+	}
+	// Count and rows must agree while another connection changes the match set.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		for ctx.Err() == nil {
+			var id int64
+			if err := a.DB.QueryRow("INSERT INTO audit_logs(client_ip) VALUES($1) RETURNING id", marker).Scan(&id); err != nil {
+				done <- err
+				return
+			}
+			if _, err := a.DB.Exec("DELETE FROM audit_logs WHERE id=$1", id); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	for range 24 {
+		items, total := list("page_size=200")
+		if total != len(items) || total < 4 || total > 5 {
+			t.Fatal("audit count and page used different snapshots", total, len(items))
+		}
 	}
 }
 

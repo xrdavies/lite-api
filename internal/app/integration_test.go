@@ -112,6 +112,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	userToken := tokens["access_token"].(string)
 	refresh := tokens["refresh_token"].(string)
 	otherToken := login("another@example.test", "correct-password")["access_token"].(string)
+	testAuditQueries(t, a, admin, userToken)
 	testKeyManagement(t, a, admin)
 	testUserQueries(t, a, admin)
 	group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Private team", "platform": "openai", "is_exclusive": true})
