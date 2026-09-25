@@ -558,22 +558,52 @@ func (a *App) accountState(w http.ResponseWriter, r *http.Request) error {
 		if in.Schedulable == nil {
 			return bad("schedulable is required")
 		}
-		if _, err = a.DB.ExecContext(r.Context(), "UPDATE accounts SET schedulable=$1,updated_at=now() WHERE id=$2", *in.Schedulable, id); err != nil {
+		if _, err = a.DB.ExecContext(r.Context(), "UPDATE accounts SET schedulable=$1,updated_at=now() WHERE id=$2 AND deleted_at IS NULL", *in.Schedulable, id); err != nil {
 			return err
 		}
 		return a.getAccount(w, r)
 	case strings.HasSuffix(r.URL.Path, "/temp-unschedulable") && r.Method == "GET":
-		raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT jsonb_build_object('temp_unschedulable_until',temp_unschedulable_until,'temp_unschedulable_reason',temp_unschedulable_reason) FROM accounts WHERE id=$1", id))
+		var until *time.Time
+		var reason, key string
+		err := a.DB.QueryRowContext(r.Context(), "SELECT temp_unschedulable_until,COALESCE(temp_unschedulable_reason,''),COALESCE(credentials->>'api_key','') FROM accounts WHERE id=$1 AND deleted_at IS NULL", id).Scan(&until, &reason, &key)
 		if err != nil {
 			return err
 		}
-		return reply(w, raw)
+		if until == nil || !until.After(time.Now()) {
+			return reply(w, map[string]bool{"active": false})
+		}
+		type tempState struct {
+			UntilUnix            int64  `json:"until_unix"`
+			TriggeredAtUnix      int64  `json:"triggered_at_unix"`
+			StatusCode           int    `json:"status_code"`
+			MatchedKeyword       string `json:"matched_keyword"`
+			RuleIndex            int    `json:"rule_index"`
+			ErrorMessage         string `json:"error_message"`
+			TriggerCount         int64  `json:"trigger_count,omitempty"`
+			TriggerThreshold     int    `json:"trigger_threshold,omitempty"`
+			TriggerWindowMinutes int    `json:"trigger_window_minutes,omitempty"`
+		}
+		var state tempState
+		if json.Unmarshal([]byte(reason), &state) != nil {
+			state = tempState{ErrorMessage: reason}
+		}
+		if state.UntilUnix == 0 {
+			state.UntilUnix = until.Unix()
+		}
+		if state.UntilUnix <= time.Now().Unix() {
+			return reply(w, map[string]bool{"active": false})
+		}
+		if key != "" {
+			state.ErrorMessage = strings.ReplaceAll(state.ErrorMessage, key, "[REDACTED]")
+			state.MatchedKeyword = strings.ReplaceAll(state.MatchedKeyword, key, "[REDACTED]")
+		}
+		return reply(w, map[string]any{"active": true, "state": state})
 	case strings.HasSuffix(r.URL.Path, "/temp-unschedulable"):
 		clause = "temp_unschedulable_until=NULL,temp_unschedulable_reason=NULL,extra=extra - 'model_rate_limits'"
 	case strings.HasSuffix(r.URL.Path, "/clear-rate-limit"):
 		clause = "rate_limited_at=NULL,rate_limit_reset_at=NULL,overload_until=NULL,temp_unschedulable_until=NULL,temp_unschedulable_reason=NULL,extra=extra - 'model_rate_limits'"
 	case strings.HasSuffix(r.URL.Path, "/reset-quota"):
-		clause = `extra=(extra || '{"quota_used":0,"quota_daily_used":0,"quota_weekly_used":0}'::jsonb) - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at'`
+		clause = `extra=(extra || '{"quota_used":0,"quota_daily_used":0,"quota_weekly_used":0}'::jsonb) - 'quota_daily_start' - 'quota_weekly_start' - 'quota_daily_reset_at' - 'quota_weekly_reset_at',rate_limited_at=NULL,rate_limit_reset_at=NULL`
 	case strings.HasSuffix(r.URL.Path, "/clear-error"):
 		clause = "status=CASE WHEN status='error' THEN 'active' ELSE status END,error_message=NULL"
 	default:

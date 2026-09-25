@@ -478,6 +478,14 @@ func testGateway(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow("SELECT extra->>'quota_daily_used' FROM accounts WHERE id=$1", aid).Scan(&account); err != nil || account != "0.00003125" {
 		t.Fatal("account day reset", account, err)
 	}
+	// Explicit quota reset must clear the quota-related account cooldown as well
+	// as consumption; otherwise the only account remains unavailable to clients.
+	if _, err := a.DB.Exec(`UPDATE accounts SET rate_limited_at=now(),rate_limit_reset_at=now()+interval '1 hour',extra=extra||'{"quota_daily_used":1,"quota_daily_start":"2099-01-01T00:00:00Z"}' WHERE id=$1`, aid); err != nil {
+		t.Fatal(err)
+	}
+	expect(503, key, request(false))
+	must("POST", accountPath+"/reset-quota", admin, nil)
+	expect(200, key, request(false))
 
 	// No key limit configured means the legacy counters remain inactive.
 	noLimit := must("POST", "/api/v1/keys", token, map[string]any{"name": "unlimited counters", "group_id": gid})

@@ -316,6 +316,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAnthropicPolicy(t, a, admin, otherToken)
 	testBillingProbes(t, a, admin, otherToken)
 	testAccountQueries(t, a, admin, otherToken)
+	testAccountState(t, a, admin, otherToken)
 	testPlanLifecycle(t, a, admin, otherToken)
 	testProxyFallback(t, a, admin, otherToken)
 	testProxyQuality(t, a, admin, otherToken)

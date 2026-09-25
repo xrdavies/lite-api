@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testAccountQueries(t *testing.T, a *App, admin, ordinary string) {
@@ -120,5 +121,106 @@ func testAccountQueries(t *testing.T, a *App, admin, ordinary string) {
 	defer exec("UPDATE accounts SET deleted_at=NULL WHERE id=$1", ids[4])
 	for _, path := range []string{root, root + "/upstream-billing-rates"} {
 		check(path, "sort_by=id", 2, ids[0], ids[5])
+	}
+}
+
+func testAccountState(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.RemoteAddr = "192.0.2.229:1234"
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	must := func(method, path string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, admin, body)
+		var out struct{ Data map[string]any }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("account state %s %s: %d %s", method, path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id := int64(must("POST", "/api/v1/admin/accounts", map[string]any{"name": "State controls", "platform": "openai", "type": "apikey", "credentials": map[string]any{"api_key": "state-test-secret"}})["id"].(float64))
+	path := fmt.Sprintf("/api/v1/admin/accounts/%d", id)
+	defer a.DB.Exec("UPDATE accounts SET deleted_at=now(),status='inactive',schedulable=false WHERE id=$1", id)
+	if v := must("GET", path+"/temp-unschedulable", nil); v["active"] != false || v["state"] != nil {
+		t.Fatal("empty temporary status", v)
+	}
+	until := time.Now().Add(time.Hour).Truncate(time.Second)
+	for _, reason := range []string{"plain state-test-secret", `{"error_message":"state-test-secret","matched_keyword":"state-test-secret","status_code":429,"rule_index":2,"trigger_count":3,"trigger_threshold":3,"trigger_window_minutes":5,"unknown":"hidden"}`, `{"until_unix":1,"status_code":"invalid"}`} {
+		exec("UPDATE accounts SET temp_unschedulable_until=$2,temp_unschedulable_reason=$3 WHERE id=$1", id, until, reason)
+		v := must("GET", path+"/temp-unschedulable", nil)
+		state, ok := v["state"].(map[string]any)
+		raw, _ := json.Marshal(v)
+		if v["active"] != true || !ok || state["until_unix"] != float64(until.Unix()) || strings.Contains(string(raw), "state-test-secret") || state["unknown"] != nil {
+			t.Fatal("temporary status projection", string(raw))
+		}
+		if strings.Contains(reason, "trigger_count") && (state["trigger_count"] != float64(3) || state["status_code"] != float64(429) || state["matched_keyword"] != "[REDACTED]") {
+			t.Fatal("structured temporary state lost fields", state)
+		}
+	}
+	exec("UPDATE accounts SET temp_unschedulable_until=now()-interval '1 minute' WHERE id=$1", id)
+	if v := must("GET", path+"/temp-unschedulable", nil); v["active"] != false {
+		t.Fatal("expired temporary block reported active", v)
+	}
+	var retained bool
+	if err := a.DB.QueryRow("SELECT temp_unschedulable_until IS NOT NULL FROM accounts WHERE id=$1", id).Scan(&retained); err != nil || !retained {
+		t.Fatal("status read rewrote persisted state", err)
+	}
+	seed := func() {
+		exec(`UPDATE accounts SET status='error',schedulable=false,error_message='keep',rate_limited_at=now(),rate_limit_reset_at=now()+interval '1 hour',overload_until=now()+interval '1 hour',temp_unschedulable_until=now()+interval '1 hour',temp_unschedulable_reason='keep',extra=extra||'{"quota_limit":10,"quota_used":9,"quota_daily_used":8,"quota_weekly_used":7,"quota_daily_start":"2026-01-01","quota_weekly_start":"2026-01-01","quota_daily_reset_at":"2026-01-02","quota_weekly_reset_at":"2026-01-08","model_rate_limits":{"m":1},"unknown":{"keep":true}}'::jsonb WHERE id=$1`, id)
+	}
+	seed()
+	for _, endpoint := range []struct{ method, path string }{{"POST", path + "/reset-quota"}, {"GET", path + "/temp-unschedulable"}, {"DELETE", path + "/temp-unschedulable"}} {
+		if w := call(endpoint.method, endpoint.path, ordinary, nil); w.Code != 403 {
+			t.Fatal("ordinary user can manage account state", w.Code)
+		}
+	}
+	// One failing UPDATE cannot partially reset counters or scheduler state.
+	exec(fmt.Sprintf(`CREATE FUNCTION reject_state_reset() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id=%d THEN RAISE EXCEPTION 'injected state reset failure'; END IF; RETURN NEW; END $$`, id))
+	exec("CREATE TRIGGER reject_state_reset BEFORE UPDATE ON accounts FOR EACH ROW EXECUTE FUNCTION reject_state_reset()")
+	defer a.DB.Exec("DROP TRIGGER IF EXISTS reject_state_reset ON accounts; DROP FUNCTION IF EXISTS reject_state_reset()")
+	if w := call("POST", path+"/reset-quota", admin, nil); w.Code != 500 {
+		t.Fatal("failed quota reset returned success", w.Code)
+	}
+	if err := a.DB.QueryRow("SELECT extra->>'quota_used'='9' AND rate_limit_reset_at IS NOT NULL FROM accounts WHERE id=$1", id).Scan(&retained); err != nil || !retained {
+		t.Fatal("quota reset partially committed", err)
+	}
+	exec("DROP TRIGGER reject_state_reset ON accounts; DROP FUNCTION reject_state_reset()")
+	v := must("POST", path+"/reset-quota", nil)
+	extra := v["extra"].(map[string]any)
+	if v["rate_limited_at"] != nil || v["rate_limit_reset_at"] != nil || v["overload_until"] == nil || v["temp_unschedulable_until"] == nil || v["status"] != "error" || v["schedulable"] != false || v["error_message"] != "keep" || extra["quota_limit"] != float64(10) || extra["unknown"] == nil || extra["model_rate_limits"] == nil {
+		t.Fatal("quota reset changed unrelated account state")
+	}
+	for _, name := range []string{"quota_used", "quota_daily_used", "quota_weekly_used"} {
+		if extra[name] != float64(0) {
+			t.Fatal("quota counter not reset", name)
+		}
+	}
+	for _, name := range []string{"quota_daily_start", "quota_weekly_start", "quota_daily_reset_at", "quota_weekly_reset_at"} {
+		if extra[name] != nil {
+			t.Fatal("quota window not cleared", name)
+		}
+	}
+	seed()
+	v = must("DELETE", path+"/temp-unschedulable", nil)
+	if v["temp_unschedulable_until"] != nil || v["temp_unschedulable_reason"] != nil || v["rate_limit_reset_at"] == nil || v["overload_until"] == nil || v["status"] != "error" || v["schedulable"] != false || v["extra"].(map[string]any)["quota_used"] != float64(9) || v["extra"].(map[string]any)["model_rate_limits"] != nil {
+		t.Fatal("clearing temporary state changed unrelated blocks/counters")
+	}
+	must("DELETE", path, nil)
+	for _, endpoint := range []struct{ method, path string }{{"POST", path + "/reset-quota"}, {"GET", path + "/temp-unschedulable"}, {"DELETE", path + "/temp-unschedulable"}} {
+		if w := call(endpoint.method, endpoint.path, admin, nil); w.Code != 404 {
+			t.Fatal("deleted account state accessible", w.Code)
+		}
 	}
 }
