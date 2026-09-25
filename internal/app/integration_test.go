@@ -325,6 +325,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testPlanLifecycle(t, a, admin, otherToken)
 	testProxyFallback(t, a, admin, otherToken)
 	testProxyQuality(t, a, admin, otherToken)
+	testProxyQueries(t, a, admin, otherToken)
 	testAccountUsage(t, a, admin, otherToken)
 	testErrorPassthrough(t, a, admin, otherToken)
 	testTLSProfiles(t, a, admin, otherToken)

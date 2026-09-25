@@ -125,6 +125,8 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 管理员先续期并激活原代理，再调用 `POST /api/v1/admin/accounts/{id}/revert-proxy-fallback` 还原，成功返回 `{"message":"reverted"}`；续期本身不移动账号。未处于回退状态或原代理不可用返回 409，账号不存在返回 404。手工设置账号 `proxy_id`（包括 0 直连）清除原代理记录；仍被账号当前绑定、原代理记录或备用链引用的代理不能删除。代理编辑、到期处理、账号指派和还原共用事务锁，避免并发续期被旧结果覆盖。代理及其备用链变更会清除受影响账号的倍率/模型快照并更新版本，消费累计和其他 JSON 保持；已通过路由选择的在途请求可以完成，新请求使用当前配置。
 
+管理员代理列表支持 `search/status/protocol`，search 是忽略大小写的名称字面子串，去除首尾空白、最多 100 字符。`sort_by` 支持 id/name/protocol/status/created_at/expiry/account_count，`sort_order=asc|desc`，默认 ID 降序；排序先于分页，总数与结果使用同一数据库快照。普通排序同值按 ID 同方向，account_count 同值始终按 ID 降序；expiry 升序时永不过期项在最后，降序时在最前。`/api/v1/admin/proxies/all` 返回所有匹配的 active 代理，按创建时间降序；软删除代理始终排除。account_count 统计未删除的关联账号，包括停用账号。`/{id}/accounts` 返回 ID 降序的账号概要，包含 type/notes，不返回凭证；代理密码只显示 has_password，查询不触发网络探测。
+
 `POST /api/v1/admin/proxies/{id}/quality-check` 检查指定代理的基础出口连通及 OpenAI、Anthropic、Gemini、Grok 四个固定目标，不发送上游 API Key、管理员凭证或 Cookie，也不允许请求指定检测 URL。原 `/test` 使用相同基础检查。两者都直接检测指定代理，即使它已停用/到期也不使用备用代理或直连；它们不会改变代理/账号的调度或到期状态。基础检查须获得合法出口 IP；失败时停止后续目标检测。各目标允许的未鉴权状态代表可达，不证明模型调用权限；429 记 warn，挑战页记 challenge，其他非预期状态记 fail。挑战识别参考 [Cloudflare cf-mitigated 说明](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)，并保留 403/429 HTML 特征检测，不尝试绕过挑战。
 
 质量响应包含 items、各类计数、score、grade、summary 和 checked_at；分数为 `max(0,100−10×warn−22×fail−30×challenge)`，90/75/60/40 分分别为 A/B/C/D，其余 F。基础连通失败可能仍有数值 B，实际可用性以逐项状态和 `quality_status` 为准。每目标最多 15 秒、总计 80 秒，响应头最多 64 KiB，正文只读取 8 KiB 分类前缀（基础 trace 必须完整且不超限）；不重试、不跟随重定向，继续校验 DNS、私网范围和 TLS 证书。单代理只允许一个检查，全局最多四个并发。诊断只保留固定摘要、出口 IP/国家代码/机房和格式有效的 cf-ray，不保存目标正文或代理密码。

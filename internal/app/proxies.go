@@ -1,6 +1,7 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -211,28 +212,58 @@ func (a *App) getProxy(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) listProxies(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	search, status, protocol := "%"+r.URL.Query().Get("search")+"%", r.URL.Query().Get("status"), r.URL.Query().Get("protocol")
+	q := r.URL.Query()
+	search, status, protocol := strings.TrimSpace(q.Get("search")), q.Get("status"), q.Get("protocol")
+	if len([]rune(search)) > 100 || strings.ContainsRune(search, 0) {
+		return bad("invalid proxy search (maximum 100 characters)")
+	}
+	field := strings.ToLower(strings.TrimSpace(q.Get("sort_by")))
+	switch field {
+	case "name", "protocol", "status", "created_at", "account_count":
+	case "expiry":
+		field = "expires_at"
+	default:
+		field = "id"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(q.Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
 	all := strings.HasSuffix(r.URL.Path, "/all")
 	if all {
 		status = "active"
+		field, direction = "created_at", " DESC"
 	}
-	where := ` WHERE deleted_at IS NULL AND name ILIKE $1 AND ($2='' OR status=$2) AND ($3='' OR protocol=$3)`
-	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM proxies"+where, search, status, protocol).Scan(&total); err != nil {
+	where := ` WHERE p.deleted_at IS NULL AND position(lower($1) in lower(p.name))>0 AND ($2='' OR p.status=$2) AND ($3='' OR p.protocol=$3)`
+	order := "p." + field + direction + ",p.id" + direction
+	const accountCount = "(SELECT count(*) FROM accounts WHERE proxy_id=p.id AND deleted_at IS NULL)"
+	if field == "account_count" {
+		order = accountCount + direction + ",p.id DESC"
+	}
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return err
 	}
-	query := "SELECT " + proxyProjection + " || jsonb_build_object('account_count',(SELECT count(*) FROM accounts WHERE proxy_id=p.id AND deleted_at IS NULL)) FROM proxies p" + where + " ORDER BY id DESC"
+	defer tx.Rollback()
+	var total int
+	if err = tx.QueryRowContext(r.Context(), "SELECT count(*) FROM proxies p"+where, search, status, protocol).Scan(&total); err != nil {
+		return err
+	}
+	query := "SELECT " + proxyProjection + " || jsonb_build_object('account_count'," + accountCount + ") FROM proxies p" + where + " ORDER BY " + order
 	args := []any{search, status, protocol}
 	if !all {
 		query += " LIMIT $4 OFFSET $5"
 		args = append(args, size, (page-1)*size)
 	}
-	rows, err := a.DB.QueryContext(r.Context(), query, args...)
+	rows, err := tx.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		return err
 	}
 	items, err := jsonRows(rows)
 	if err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
 		return err
 	}
 	items = a.attachProxyChecks(r.Context(), items)
@@ -291,7 +322,7 @@ func (a *App) proxyAccounts(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT jsonb_build_object('id',id,'name',name,'platform',platform,'status',status) FROM accounts WHERE proxy_id=$1 AND deleted_at IS NULL ORDER BY id", id)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT jsonb_build_object('id',id,'name',name,'platform',platform,'status',status,'type',type,'notes',notes) FROM accounts WHERE proxy_id=$1 AND deleted_at IS NULL ORDER BY id DESC", id)
 	if err != nil {
 		return err
 	}
