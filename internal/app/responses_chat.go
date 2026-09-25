@@ -31,6 +31,7 @@ type convertedChatMessage struct {
 	Calls       []convertedChatTool          `json:"tool_calls,omitempty"`
 	CallID      string                       `json:"tool_call_id,omitempty"`
 	Discoveries []map[string]json.RawMessage `json:"discovered_tools,omitempty"`
+	ToolMedia   []any                        `json:"tool_output_media,omitempty"`
 	// Only authenticated encrypted history contains native blocks; client input cannot set these.
 	Anthropic     []map[string]json.RawMessage `json:"anthropic_content,omitempty"`
 	ResponseInput json.RawMessage              `json:"response_input,omitempty"`
@@ -214,11 +215,11 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			if raw == nil {
 				return nil, bad("tool search output requires output or tools")
 			}
-			var text string
-			if json.Unmarshal(raw, &text) != nil {
-				text = string(raw)
+			text, media, err := convertedToolOutput(raw)
+			if err != nil {
+				return nil, err
 			}
-			out.Messages = append(out.Messages, convertedChatMessage{Role: "tool", CallID: credentialString(item, "call_id"), Content: text, Discoveries: discovered})
+			out.Messages = append(out.Messages, convertedChatMessage{Role: "tool", CallID: credentialString(item, "call_id"), Content: text, Discoveries: discovered, ToolMedia: media})
 		case "function_call", "custom_tool_call":
 			name, callID := credentialString(item, "name"), credentialString(item, "call_id")
 			if name == "" || callID == "" {
@@ -256,11 +257,11 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 			if callID == "" {
 				return nil, bad("tool output requires a call ID")
 			}
-			content, err := responsesChatContent(item["output"], "tool")
+			content, media, err := convertedToolOutput(item["output"])
 			if err != nil {
 				return nil, err
 			}
-			out.Messages = append(out.Messages, convertedChatMessage{Role: "tool", CallID: callID, Content: content})
+			out.Messages = append(out.Messages, convertedChatMessage{Role: "tool", CallID: callID, Content: content, ToolMedia: media})
 		case "", "message":
 			role := credentialString(item, "role")
 			if role != "user" && role != "assistant" && role != "system" && role != "developer" {
@@ -291,6 +292,10 @@ func responsesToChatRequest(body map[string]json.RawMessage, history []converted
 	// Only top-level instructions are replaced on continuation. Input messages,
 	// including their system/developer roles, remain part of the conversation.
 	out.History = append([]convertedChatMessage(nil), out.Messages[historyStart:]...)
+	out.Messages, err = convertedToolMediaMessages(out.Messages)
+	if err != nil {
+		return nil, err
+	}
 	// History retains original tool identities. Only wire messages use flat names.
 	for _, message := range out.Messages {
 		for _, call := range message.Calls {

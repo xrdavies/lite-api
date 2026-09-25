@@ -287,6 +287,17 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 			return
 		}
 		gotMessages.Store(string(body["messages"]))
+		if strings.Contains(string(body["messages"]), "Tool output media for call call_convert") {
+			var messages []map[string]any
+			if json.Unmarshal(body["messages"], &messages) != nil || len(messages) < 4 {
+				t.Error("invalid lifted tool image messages")
+			} else {
+				last := messages[len(messages)-1]
+				if last["role"] != "user" || !strings.Contains(fmt.Sprint(last["content"]), "data:image/png;base64,YQ==") || !strings.Contains(fmt.Sprint(last["content"]), `detail:high`) {
+					t.Error("tool output image was not attributed in Chat request", last)
+				}
+			}
+		}
 		w.Header().Set("X-Request-ID", "chat-upstream-request")
 		finish := "tool_calls"
 		if mode.Load() == 1 {
@@ -390,11 +401,17 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	continued := body(false)
 	continued["previous_response_id"] = result.ID
 	continued["instructions"] = "replacement rules"
-	continued["input"] = []any{map[string]any{"type": "function_call_output", "call_id": "call_convert", "output": "tool result"}}
+	continued["input"] = []any{map[string]any{"type": "function_call_output", "call_id": "call_convert", "output": []any{
+		map[string]string{"type": "input_text", "text": "tool result"},
+		map[string]string{"type": "input_image", "image_url": "data:image/png;base64,YQ==", "detail": "high"},
+	}}}
 	check(call("POST", "/responses", key, continued, ""))
 	messages := gotMessages.Load().(string)
 	if !strings.Contains(messages, "private query") || !strings.Contains(messages, "converted thought") || !strings.Contains(messages, "tool result") || !strings.Contains(messages, "replacement rules") || strings.Contains(messages, "current rules") {
 		t.Fatal("continuation history", messages)
+	}
+	if strings.Count(messages, "data:image/png;base64,YQ==") != 1 || !strings.Contains(messages, "Tool output media for call call_convert") || !strings.Contains(messages, `"detail":"high"`) || strings.Contains(messages, "tool_output_media") {
+		t.Fatal("tool image continuation", messages)
 	}
 	withSystem := body(false)
 	withSystem["input"] = []any{map[string]any{"role": "system", "content": "persistent rule"}, map[string]any{"role": "user", "content": "remember me"}}
