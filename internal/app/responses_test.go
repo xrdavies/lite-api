@@ -20,7 +20,7 @@ func TestResponsesCompactionSubpaths(t *testing.T) {
 		return parseResponsesRequest(r, textRequest{Protocol: "responses", Stream: stream}, map[string]json.RawMessage{"input": json.RawMessage(`"compact me"`)})
 	}
 	maxSegment := 128 - len("/backend-api/codex/responses/compact/")
-	for _, action := range []string{"compact", "compact/", "compact/detail", "compact/a-b_C.1/detail/", "compact/" + strings.Repeat("a", maxSegment), "compact/a/b/c/d/e/f/g", "input_tokens/"} {
+	for _, action := range []string{"compact", "compact/", "compact/detail", "compact/a-b_C.1/detail/", "compact/" + strings.Repeat("a", maxSegment), "compact/a/b/c/d/e/f/g", "input_tokens/", "resp_owned/compact", "resp_owned/compact/detail/"} {
 		in, err := parse(action, false)
 		want := "/" + strings.TrimRight(action, "/")
 		path, pathErr := in.upstreamPath("model")
@@ -38,7 +38,7 @@ func TestResponsesCompactionSubpaths(t *testing.T) {
 			t.Fatal("compaction extension result", action, o, err)
 		}
 	}
-	for _, action := range []string{"compact//detail", "compact/.", "compact/..", "compact/...", "compact/%2e%2e", "compact/x?y", "compact/x#y", `compact/x\y`, "compact/中文", "compact/" + strings.Repeat("a", maxSegment+1), "compact/a/b/c/d/e/f/g/h", "compact-other", "resp_foreign/compact", "input_tokens/detail"} {
+	for _, action := range []string{"compact//detail", "compact/.", "compact/..", "compact/...", "compact/%2e%2e", "compact/x?y", "compact/x#y", `compact/x\y`, "compact/中文", "compact/" + strings.Repeat("a", maxSegment+1), "compact/a/b/c/d/e/f/g/h", "compact-other", "resp_foreign/unknown", "input_tokens/detail", "input_tokens/compact", "resp_1/compact/..", "resp_1//compact", "resp.1/compact"} {
 		if _, err := parse(action, false); err == nil {
 			t.Fatal("unsafe or unknown operation accepted", action)
 		}
@@ -48,6 +48,35 @@ func TestResponsesCompactionSubpaths(t *testing.T) {
 	other, _ := parse("compact/detail.v2", false)
 	if first.Scope != alias.Scope || first.Scope == other.Scope {
 		t.Fatal("compaction extension replay scope collision")
+	}
+	r := httptest.NewRequest("POST", "/responses/resp_owned/compact", nil)
+	r.SetPathValue("action", "resp_owned/compact")
+	body := map[string]json.RawMessage{"previous_response_id": json.RawMessage(`"resp_previous"`)}
+	in, err := parseResponsesRequest(r, textRequest{Protocol: "responses"}, body)
+	if err != nil || in.ResponseResource != "resp_owned" || in.Previous != "resp_previous" || len(body) != 1 {
+		t.Fatal("resource path replaced or injected body history", in, body, err)
+	}
+	delete(body, "previous_response_id")
+	if _, err = parseResponsesRequest(r, textRequest{Protocol: "responses"}, body); err != nil {
+		t.Fatal("owned path should provide resource context", err)
+	}
+}
+
+func TestMergeResponseSources(t *testing.T) {
+	previous := &responseBinding{AccountID: 1, Target: "source", MCPTool: true, FileIDs: []string{"file_previous"}, SkillIDs: []string{"skill_previous"}}
+	resource := &responseBinding{AccountID: 1, Target: "source", CodeTool: true, Containers: []string{"cntr_resource"}, VectorStores: []string{"vs_resource"}, Items: []string{"msg_resource"}}
+	merged, err := mergeResponseSources(previous, resource)
+	if err != nil || !merged.MCPTool || !merged.CodeTool || len(merged.FileIDs) != 1 || len(merged.SkillIDs) != 1 || len(merged.VectorStores) != 1 || len(merged.Containers) != 1 || len(merged.Items) != 0 || len(resource.FileIDs) != 0 || previous.CodeTool {
+		t.Fatal("response resource permissions lost or inputs mutated", merged, err)
+	}
+	for _, source := range []responseBinding{{AccountID: 2, Target: "source"}, {AccountID: 1, Target: "rotated"}, {AccountID: 1, Target: "source", History: "converted"}} {
+		if _, err := mergeResponseSources(previous, &source); err == nil {
+			t.Fatal("incompatible source accepted", source)
+		}
+	}
+	previous.History = "converted"
+	if _, err := mergeResponseSources(previous, resource); err == nil {
+		t.Fatal("converted previous response accepted")
 	}
 }
 
@@ -181,7 +210,17 @@ func testResponses(t *testing.T, a *App, admin string) {
 			_, _ = fmt.Fprint(w, `{"object":"response.input_tokens","input_tokens":20}`)
 			return
 		}
-		if r.URL.Path == "/v1/responses/compact" || r.URL.Path == "/v1/responses/compact/detail.v2" {
+		resourceCompact := r.URL.Path == "/v1/responses/resp_1/compact" || r.URL.Path == "/v1/responses/resp_1/compact/detail.v2" || r.URL.Path == "/v1/responses/resp_owned_alias/compact"
+		if resourceCompact {
+			want := ""
+			if credentialString(body, "instructions") == "explicit previous" {
+				want = "resp_1"
+			}
+			if credentialString(body, "previous_response_id") != want {
+				t.Error("resource path changed previous_response_id")
+			}
+		}
+		if resourceCompact || r.URL.Path == "/v1/responses/compact" || r.URL.Path == "/v1/responses/compact/detail.v2" {
 			_, _ = fmt.Fprint(w, `{"object":"response.compaction","id":"cmp_test","output":[{"type":"compaction","encrypted_content":"opaque-content"}],`+responseUsage+`}`)
 			return
 		}
@@ -497,6 +536,92 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resourceBody := map[string]any{"model": "client-response"}
+	beforeResource := calls.Load()
+	for _, prefix := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		for _, suffix := range []string{"/resp_1/compact/detail.v2", "/resp_1/compact/detail.v2/"} {
+			if w := call(prefix+suffix, key, resourceBody, "resource-compaction"); w.Code != 200 || !strings.Contains(w.Body.String(), "opaque-content") || calls.Load() != beforeResource+1 || otherCalls.Load() != 0 {
+				t.Fatal("resource compaction source/path/alias/replay", w.Code, w.Body.String())
+			}
+		}
+	}
+	if err := a.DB.QueryRow(`SELECT count(*),min(actual_cost)::text,min(upstream_endpoint) FROM usage_logs WHERE api_key_id=$1 AND inbound_endpoint='/v1/responses/resp_1/compact/detail.v2'`, kid).Scan(&logs, &compactCost, &upstreamEndpoint); err != nil || logs != 1 || compactCost != "0.0000375000" || upstreamEndpoint != "/v1/responses/resp_1/compact/detail.v2" {
+		t.Fatal("resource compaction accounting", logs, compactCost, upstreamEndpoint, err)
+	}
+	for _, credential := range []string{otherKey, foreign} {
+		if w := call("/responses/resp_1/compact", credential, resourceBody, ""); w.Code != 404 || calls.Load() != beforeResource+1 || otherCalls.Load() != 0 {
+			t.Fatal("cross-Key resource compact", w.Code, w.Body.String())
+		}
+	}
+	for _, field := range []string{"previous_response_id", "input", "stream", "background"} {
+		resourceBody[field] = map[string]any{"previous_response_id": foreignResponse, "input": []any{map[string]any{"type": "item_reference", "id": foreignItem}}, "stream": true, "background": true}[field]
+		w := call("/responses/resp_1/compact", key, resourceBody, "")
+		delete(resourceBody, field)
+		if (w.Code != 400 && w.Code != 404) || calls.Load() != beforeResource+1 || otherCalls.Load() != 0 {
+			t.Fatal("resource compaction bypassed body authorization", field, w.Code)
+		}
+	}
+	if err := a.bindResponse(t.Context(), identity, original, "resp_owned_alias"); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"/resp_owned_alias/compact", "/resp_1/compact"} {
+		if w := call("/responses"+suffix, key, resourceBody, "resource-compaction"); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "" || otherCalls.Load() != 0 {
+			t.Fatal("different resource or action shared replay", suffix, w.Code, w.Body.String())
+		}
+	}
+	resourceBody["previous_response_id"], resourceBody["instructions"] = "resp_1", "explicit previous"
+	if w := call("/responses/resp_owned_alias/compact", key, resourceBody, ""); w.Code != 200 || otherCalls.Load() != 0 {
+		t.Fatal("owned resource with same-source previous response", w.Code, w.Body.String())
+	}
+	delete(resourceBody, "previous_response_id")
+	delete(resourceBody, "instructions")
+	beforeResource = calls.Load()
+	for name, source := range map[string]responseBinding{
+		"resp_converted_resource": {AccountID: aid, Target: responseTarget(original), History: "converted"},
+		"resp_revoked_file":       {AccountID: aid, Target: responseTarget(original), FileIDs: []string{"file_revoked"}},
+		"resp_other_account":      {AccountID: aid + 999, Target: "other-source"},
+	} {
+		if err := a.storeResponseBinding(t.Context(), identity, name, source); err != nil {
+			t.Fatal(err)
+		}
+		resourceBody["previous_response_id"] = name
+		w := call("/responses/resp_1/compact", key, resourceBody, "")
+		delete(resourceBody, "previous_response_id")
+		if w.Code < 400 || calls.Load() != beforeResource || otherCalls.Load() != 0 {
+			t.Fatal("resource compaction lost source restrictions", name, w.Code)
+		}
+		if w := call("/responses/"+name+"/compact", key, resourceBody, ""); w.Code < 400 || calls.Load() != beforeResource || otherCalls.Load() != 0 {
+			t.Fatal("resource path bypassed source restrictions", name, w.Code)
+		}
+	}
+	if err := a.Redis.Set(t.Context(), responseDeletionKey(identity, "resp_owned_alias"), "deleted", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("/responses/resp_owned_alias/compact", key, resourceBody, ""); w.Code != 404 || calls.Load() != beforeResource {
+		t.Fatal("deleted resource compact dispatched", w.Code)
+	}
+	if _, err := a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_resource_compact CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID"); err != nil {
+		t.Fatal(err)
+	}
+	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_resource_compact")
+	failedResource := call("/responses/resp_1/compact", key, resourceBody, "resource-recovery")
+	if failedResource.Code != 503 || strings.Contains(failedResource.Body.String(), "opaque-content") {
+		t.Fatal("resource compact escaped failed settlement", failedResource.Code)
+	}
+	if _, err := a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT test_resource_compact"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := a.recoverReceipts(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text FROM usage_logs WHERE request_id=$1", failedResource.Header().Get("X-Request-ID")).Scan(&logs, &compactCost); err != nil || logs != 1 || compactCost != "0.0000375000" {
+		t.Fatal("resource compaction recovery billed incorrectly", logs, compactCost, err)
+	}
+	if w := call("/backend-api/codex/responses/resp_1/compact", key, resourceBody, "resource-recovery"); w.Code != 503 || w.Header().Get("Idempotency-Replayed") != "true" || calls.Load() != beforeResource+1 {
+		t.Fatal("failed resource compact was regenerated", w.Code)
+	}
 	referenced["input"] = []any{map[string]any{"id": "fc_1", "type": nil}}
 	delete(referenced, "previous_response_id")
 	if w := call("/responses", key, referenced, ""); w.Code != 200 || otherCalls.Load() != 0 {
@@ -552,6 +677,9 @@ func testResponses(t *testing.T, a *App, admin string) {
 		t.Fatal(err)
 	}
 	before = calls.Load()
+	if w := call("/responses/resp_1/compact", key, resourceBody, ""); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
+		t.Fatal("resource compaction survived key rotation", w.Code)
+	}
 	if w := call("/responses/compact/detail.v2", key, compactBody, ""); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
 		t.Fatal("compaction extension survived upstream key rotation", w.Code)
 	}

@@ -927,6 +927,13 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
+	if err == nil && in.ResponseResource != "" {
+		var resource *responseBinding
+		resource, err = a.previousResponse(ctx, g, in.ResponseResource)
+		if err == nil {
+			binding, err = mergeResponseSources(binding, resource)
+		}
+	}
 	if err == nil {
 		binding, err = a.responseItemSource(ctx, g, in.ItemReferences, binding)
 	}

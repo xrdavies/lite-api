@@ -20,9 +20,10 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		}
 	}
 	action := strings.TrimRight(r.PathValue("action"), "/")
+	resource, compact := responseCompactionPath("/" + action)
 	switch {
 	case action == "":
-	case action == "compact", action == "input_tokens", strings.HasPrefix(action, "compact/"):
+	case compact, action == "input_tokens":
 		// Both endpoints are persisted in the existing VARCHAR(128) columns.
 		if len(r.URL.Path) > 128 || len("/backend-api/codex/responses/")+len(action) > 128 {
 			return in, missing()
@@ -48,6 +49,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		}
 		in.CountOnly = action == "input_tokens"
 		in.Action = "/" + action
+		in.ResponseResource = resource
 		if in.Stream {
 			return in, bad("this Responses operation does not stream")
 		}
@@ -223,7 +225,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 				body["input"], _ = json.Marshal(items)
 			}
 		}
-	} else if in.Previous == "" && body["prompt"] == nil && !in.CountOnly {
+	} else if in.Previous == "" && in.ResponseResource == "" && body["prompt"] == nil && !in.CountOnly {
 		return in, bad("input or previous_response_id is required")
 	}
 	// Hosted tools require their own meters and platform admission.
@@ -402,6 +404,20 @@ func validResponseID(id string) bool {
 	return true
 }
 
+// Resource compaction is a relay extension. Its first segment is an owned
+// response ID, never a scheduling hint or a replacement for body history.
+func responseCompactionPath(action string) (string, bool) {
+	path := strings.TrimPrefix(action, "/")
+	if path == "compact" || strings.HasPrefix(path, "compact/") {
+		return "", true
+	}
+	id, suffix, found := strings.Cut(path, "/")
+	if found && id != "input_tokens" && validResponseID(id) && (suffix == "compact" || strings.HasPrefix(suffix, "compact/")) {
+		return id, true
+	}
+	return "", false
+}
+
 func (o *textObservation) observeResponses(data []byte) error {
 	var event struct {
 		Type, Object, ID, Model, Status string
@@ -469,7 +485,8 @@ func (o *textObservation) observeResponses(data []byte) error {
 	if event.Type == "error" || event.Error != nil && string(event.Error) != "null" || event.Status == "failed" || event.Status == "cancelled" {
 		return &apiError{502, "upstream response failed"}
 	}
-	if event.Object != "response" && !((o.Action == "/compact" || strings.HasPrefix(o.Action, "/compact/")) && event.Object == "response.compaction") {
+	_, compact := responseCompactionPath(o.Action)
+	if event.Object != "response" && !(compact && event.Object == "response.compaction") {
 		return &apiError{502, "upstream returned an invalid response object"}
 	}
 	if !validResponseID(event.ID) || o.ResponseID != "" && o.ResponseID != event.ID {
@@ -652,36 +669,40 @@ func (a *App) responseItemSource(ctx context.Context, g *gatewayIdentity, ids []
 				return nil, &apiError{503, "response item affinity is invalid"}
 			}
 		}
-		if binding != nil && (binding.AccountID != source.AccountID || binding.Target != source.Target) {
-			return nil, bad("response items must share the previous response upstream source")
+		binding, err = mergeResponseSources(binding, &source)
+		if err != nil {
+			return nil, err
 		}
-		imageTool := source.ImageTool || binding != nil && binding.ImageTool
-		programmaticTool := source.ProgrammaticTool || binding != nil && binding.ProgrammaticTool
-		mcpTool := source.MCPTool || binding != nil && binding.MCPTool
-		codeTool := source.CodeTool || binding != nil && binding.CodeTool
-		containers := source.Containers
-		stores := source.VectorStores
-		files := source.FileIDs
-		skills := source.SkillIDs
-		if binding != nil {
-			skills, err = mergeResponseResources(binding.SkillIDs, skills)
-			if err != nil {
-				return nil, err
-			}
-			files, err = mergeResponseResources(binding.FileIDs, files)
-			if err != nil {
-				return nil, err
-			}
-			stores, err = mergeResponseResources(binding.VectorStores, stores)
-			if err != nil {
-				return nil, err
-			}
-			containers, err = mergeResponseContainers(binding.Containers, containers)
-			if err != nil {
-				return nil, err
-			}
-		}
-		binding = &responseBinding{AccountID: source.AccountID, Target: source.Target, ImageTool: imageTool, ProgrammaticTool: programmaticTool, MCPTool: mcpTool, CodeTool: codeTool, Containers: containers, VectorStores: stores, FileIDs: files, SkillIDs: skills}
 	}
 	return binding, nil
+}
+
+func mergeResponseSources(binding, source *responseBinding) (*responseBinding, error) {
+	if source.History != "" || binding != nil && binding.History != "" {
+		return nil, bad("resource references require a native Responses account")
+	}
+	if binding != nil && (binding.AccountID != source.AccountID || binding.Target != source.Target) {
+		return nil, bad("response references must share one upstream source")
+	}
+	merged := *source
+	merged.Items = nil
+	if binding == nil {
+		return &merged, nil
+	}
+	merged.ImageTool = merged.ImageTool || binding.ImageTool
+	merged.ProgrammaticTool = merged.ProgrammaticTool || binding.ProgrammaticTool
+	merged.MCPTool = merged.MCPTool || binding.MCPTool
+	merged.CodeTool = merged.CodeTool || binding.CodeTool
+	var err error
+	merged.SkillIDs, err = mergeResponseResources(binding.SkillIDs, merged.SkillIDs)
+	if err == nil {
+		merged.FileIDs, err = mergeResponseResources(binding.FileIDs, merged.FileIDs)
+	}
+	if err == nil {
+		merged.VectorStores, err = mergeResponseResources(binding.VectorStores, merged.VectorStores)
+	}
+	if err == nil {
+		merged.Containers, err = mergeResponseContainers(binding.Containers, merged.Containers)
+	}
+	return &merged, err
 }

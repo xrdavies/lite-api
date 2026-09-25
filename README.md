@@ -253,7 +253,9 @@ OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址�
 
 协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。计数可只提供 instructions 或工具声明，并支持已授权的托管工具及完整工具历史。`previous_response_id`、`item_reference`、服务端 prompt 或加密历史仍发往原来源解析，404 明确返回不支持，不以缺失上下文估算；跨 Key/未知引用仍拒绝。资源授权、容器归属和分组图片开关继续生效。
 
-三个前缀也支持兼容上游的 `/compact/{subpath...}`，例如 `/compact/detail`；上游须返回可验证的 Responses 或 compaction 对象及用量。子路径最多 8 段（含 compact），只接受 ASCII 字母、数字、`-_.`，拒绝空段和全点段；按最长前缀计算的路径及实际入口均不得超过账务字段的 128 字节。压缩和计数可带尾部斜杠，转发时去掉，别名共享幂等结果，不同压缩子路径分别计费和去重。压缩扩展仍只用原生 Responses 账号、不支持流式或后台；历史引用继续验证当前 Key、分组与原账号来源，SQL 故障通过已有账务恢复链只结算一次。普通响应 ID 操作仍通过独立的归属接口，其他未知子路径拒绝转发。
+三个前缀也支持兼容上游的 `/compact/{subpath...}`，例如 `/compact/detail`；上游须返回可验证的 Responses 或 compaction 对象及用量。子路径最多 8 段（含 compact），只接受 ASCII 字母、数字、`-_.`，拒绝空段和全点段；按最长前缀计算的路径及实际入口均不得超过账务字段的 128 字节。压缩和计数可带尾部斜杠，转发时去掉，别名共享幂等结果，不同压缩子路径分别计费和去重。压缩扩展仍只用原生 Responses 账号、不支持流式或后台；历史引用继续验证当前 Key、分组与原账号来源，SQL 故障通过已有账务恢复链只结算一次。
+
+兼容扩展 `/{response_id}/compact` 及其子路径也使用上述压缩链，先验证路径中的资源属于当前 Key/分组，再绑定原生上游来源。模型必填；路径提供资源上下文时 input 可省略，不自动添加或覆盖正文的 `previous_response_id`。正文历史与路径资源分别鉴权，必须属于同一上游，并合并文件、工具和容器限制；未知/已删除/转换生成的资源、跨 Key 引用或凭证轮换均拒绝。资源和子路径分别隔离幂等结果，重复恢复只扣费一次。[官方压缩接口](https://developers.openai.com/api/reference/resources/responses/methods/compact) 是 `/responses/compact`；资源压缩和嵌套后缀须由中转上游另行支持，当前以本地模拟验证。读取、删除和取消仍使用各自资源接口，其他未知子路径拒绝转发。
 
 原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。
 
