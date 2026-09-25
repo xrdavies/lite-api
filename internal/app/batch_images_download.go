@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,18 +17,21 @@ func (a *App) batchItems(w http.ResponseWriter, r *http.Request, g *gatewayIdent
 	if err != nil {
 		return err
 	}
-	n, offset, err := batchPagination(r)
+	n, offset, err := batchPagination(r, 100, 500)
 	if err != nil {
 		return err
 	}
-	status := r.URL.Query().Get("status")
-	if status == "succeeded" {
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	switch status {
+	case "succeeded":
 		status = "success"
-	}
-	if status == "all" {
+	case "all":
 		status = ""
+	case "", "pending", "success", "failed":
+	default:
+		return bad("invalid batch item status")
 	}
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT jsonb_build_object('custom_id',custom_id,'status',CASE WHEN status='success' THEN 'succeeded' ELSE status END,'prompt_preview',prompt_preview,'mime_type',mime_type,'file_extension',file_extension,'image_count',image_count,'error',CASE WHEN error_code IS NULL THEN NULL ELSE jsonb_build_object('code',error_code,'message',error_message) END) FROM batch_image_items WHERE job_id=$1 AND ($2='' OR status=$2) ORDER BY id LIMIT $3 OFFSET $4`, j.ID, status, n+1, offset)
+	rows, err := a.DB.QueryContext(r.Context(), `SELECT jsonb_build_object('custom_id',custom_id,'status',CASE WHEN status='success' THEN 'succeeded' ELSE status END,'prompt_preview',prompt_preview,'mime_type',mime_type,'file_extension',file_extension,'image_count',image_count,'error',CASE WHEN status<>'failed' THEN NULL ELSE jsonb_build_object('code',COALESCE(error_code,''),'message',COALESCE(error_message,''),'source',CASE WHEN error_code IS NULL THEN '' WHEN COALESCE(provider_source_object,'')<>'' THEN 'provider' WHEN btrim(error_code) IN ('EMPTY_IMAGE_OUTPUT','PROVIDER_ITEM_FAILED') THEN 'provider' WHEN btrim(error_code) IN ('INDEX_OUTPUT_MISSING','INDEX_PARSE_FAILED','DUPLICATE_CUSTOM_ID_IN_OUTPUT') THEN 'system' ELSE '' END) END) FROM batch_image_items WHERE job_id=$1 AND ($2='' OR status=$2) ORDER BY id LIMIT $3 OFFSET $4`, j.ID, status, n+1, offset)
 	if err != nil {
 		return err
 	}
@@ -38,6 +42,36 @@ func (a *App) batchItems(w http.ResponseWriter, r *http.Request, g *gatewayIdent
 	more := len(items) > n
 	if more {
 		items = items[:n]
+	}
+	for i, raw := range items {
+		var item map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &item); err != nil {
+			return err
+		}
+		var failure map[string]string
+		if err = json.Unmarshal(item["error"], &failure); err != nil {
+			return err
+		}
+		if failure == nil {
+			continue
+		}
+		message := strings.TrimSpace(failure["message"])
+		for _, marker := range []string{"gs://", "files/", "projects/"} {
+			if strings.Contains(message, marker) {
+				message = "upstream provider operation failed"
+				break
+			}
+		}
+		message = cleanErrorMessage(message, "")
+		failure["message"] = strings.ToValidUTF8(message[:min(len(message), 500)], "")
+		if failure["source"] == "" {
+			delete(failure, "source")
+		}
+		item["error"], _ = json.Marshal(failure)
+		items[i], err = json.Marshal(item)
+		if err != nil {
+			return err
+		}
 	}
 	return json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": items, "has_more": more})
 }

@@ -524,7 +524,9 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-integration.py
 
 Gemini API Key 分组可启用 `allow_batch_image_generation`，通过 `POST /v1/images/batches` 提交 `model`、`items`（`custom_id`、`prompt`、可选 `output_count` 和 `reference_images`）。当前支持 1K PNG，每项输出 1–4 张，展开后最多 200 项；支持原厂或兼容中转的原生批量接口，不使用 Vertex 身份。上游文件和任务协议依据 [Gemini Batch API](https://ai.google.dev/gemini-api/docs/batch-api)，本地 HTTP 模拟与 Docker 数据库已验证，尚未使用真实批量图片凭证联调。
 
-同一路径 GET 列出任务，`/models` 列出候选模型；`/{id}` 查询或 DELETE 隐藏终态记录，`/{id}/items` 查询条目，POST `/{id}/cancel` 请求取消，GET `/{id}/items/{custom_id}/content` 下载单图，GET `/{id}/download` 下载 ZIP，DELETE `/{id}/outputs` 删除上游结果。同一 Key 的 `Idempotency-Key` 重放原任务，改变请求返回 409；跨 Key 或用登录令牌访问拒绝。列表支持 `limit` 和数值 `cursor` 偏移，条目支持状态筛选。
+同一路径 GET 列出任务，`/models` 列出候选模型；`/{id}` 查询或 DELETE 隐藏终态记录，`/{id}/items` 查询条目，POST `/{id}/cancel` 请求取消，GET `/{id}/items/{custom_id}/content` 下载单图，GET `/{id}/download` 下载 ZIP，DELETE `/{id}/outputs` 删除上游结果。同一 Key 的 `Idempotency-Key` 重放原任务，改变请求返回 409；跨 Key 或用登录令牌访问拒绝。
+
+任务列表支持 `status`、`task_name`（不区分大小写的 SQL LIKE 匹配）、`downloaded` 和 `from/to` 交集筛选。`downloaded` 接受 true/1/yes/downloaded、false/0/no/not_downloaded，空或 all 不筛选；时间接受正 Unix 秒、RFC3339 或 UTC 日期，起点包含、终点排除。任务 `limit` 默认 20、最大 100；条目默认 100、最大 500；数值 `cursor` 为 0–1000000 的偏移，`has_more` 通过额外读取一条判断。非法日期、倒置时间范围、非法分页和条目状态返回 400。条目状态接受 pending、success/succeeded、failed，空或 all 不筛选；失败条目保留脱敏、有界的错误摘要，并在可确定时返回 `error.source=provider/system`，不公开上游文件路径。
 
 提交时将可用余额转入 `frozen_balance`；单价快照按 `image_price_1k`（缺省取每图价卡）、有效图片倍率、账号倍率以及 `batch_image_discount_multiplier` 计算，冻结使用 `batch_image_hold_multiplier`，后者不得小于折扣。结果按成功条目结算并释放差额，失败和确认取消释放全部冻结；余额变化、去重、用量和终态在同一事务中写入。批量账务沿用独立冻结语义，不再按同步调用累加 Key/账号消费计数。
 

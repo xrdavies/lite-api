@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type batchGroupInput struct {
@@ -408,17 +409,16 @@ func batchBalance(ctx context.Context, tx *sql.Tx, j batchImageJob, operation, a
 	return err
 }
 
-func batchPagination(r *http.Request) (int, int, error) {
-	n := 100
+func batchPagination(r *http.Request, n, maximum int) (int, int, error) {
 	offset := 0
 	var err error
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
 		n, err = strconv.Atoi(v)
-		if err != nil || n < 1 || n > 200 {
+		if err != nil || n < 1 || n > maximum {
 			return 0, 0, bad("invalid limit")
 		}
 	}
-	if v := r.URL.Query().Get("cursor"); v != "" {
+	if v := strings.TrimSpace(r.URL.Query().Get("cursor")); v != "" {
 		offset, err = strconv.Atoi(v)
 		if err != nil || offset < 0 || offset > 1000000 {
 			return 0, 0, bad("invalid cursor")
@@ -426,17 +426,69 @@ func batchPagination(r *http.Request) (int, int, error) {
 	}
 	return n, offset, nil
 }
+
+func batchListTime(raw string) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds > 0 && seconds <= 253402300799 {
+		at := time.Unix(seconds, 0).UTC()
+		return &at, nil
+	}
+	for _, layout := range []string{time.RFC3339, time.DateOnly} {
+		if at, err := time.Parse(layout, raw); err == nil && at.Year() >= 1 {
+			return &at, nil
+		}
+	}
+	return nil, bad("invalid batch time; use positive Unix seconds, RFC3339 or YYYY-MM-DD")
+}
+
 func (a *App) listBatchImages(w http.ResponseWriter, r *http.Request, g *gatewayIdentity) error {
-	n, offset, err := batchPagination(r)
+	n, offset, err := batchPagination(r, 20, 100)
 	if err != nil {
 		return err
 	}
 	query := r.URL.Query()
-	status := query.Get("status")
+	status := strings.TrimSpace(query.Get("status"))
 	if status == "all" {
 		status = ""
 	}
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(j) FROM batch_image_jobs j WHERE user_id=$1 AND api_key_id=$2 AND user_deleted_at IS NULL AND ($3='' OR status=$3 OR $3='queued' AND status IN ('created','uploading','submitted') OR $3='processing_results' AND status='indexing') AND ($4='' OR task_name ILIKE '%'||$4||'%') ORDER BY created_at DESC,id DESC LIMIT $5 OFFSET $6`, g.UserID, g.Key.ID, status, query.Get("task_name"), n+1, offset)
+	name := strings.TrimSpace(query.Get("task_name"))
+	if !utf8.ValidString(name+status) || strings.ContainsRune(name+status, 0) || len(name) > 1020 || len(status) > 32 {
+		return bad("invalid batch filter")
+	}
+	var downloaded *bool
+	switch strings.ToLower(strings.TrimSpace(query.Get("downloaded"))) {
+	case "", "all":
+	case "true", "1", "yes", "downloaded":
+		value := true
+		downloaded = &value
+	case "false", "0", "no", "not_downloaded":
+		value := false
+		downloaded = &value
+	default:
+		return bad("invalid downloaded filter")
+	}
+	from, err := batchListTime(query.Get("from"))
+	if err != nil {
+		return err
+	}
+	to, err := batchListTime(query.Get("to"))
+	if err != nil {
+		return err
+	}
+	if from != nil && to != nil && from.After(*to) {
+		return bad("batch from must not be after to")
+	}
+	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(j) FROM batch_image_jobs j
+		WHERE user_id=$1 AND api_key_id=$2 AND user_deleted_at IS NULL
+		AND ($3='' OR status=$3 OR $3='queued' AND status IN ('created','uploading','submitted') OR $3='processing_results' AND status='indexing')
+		AND ($4='' OR task_name ILIKE '%'||$4||'%')
+		AND ($5::boolean IS NULL OR (downloaded_at IS NOT NULL)=$5)
+		AND ($6::timestamptz IS NULL OR created_at >= $6)
+		AND ($7::timestamptz IS NULL OR created_at < $7)
+		ORDER BY created_at DESC,id DESC LIMIT $8 OFFSET $9`, g.UserID, g.Key.ID, status, name, downloaded, from, to, n+1, offset)
 	if err != nil {
 		return err
 	}

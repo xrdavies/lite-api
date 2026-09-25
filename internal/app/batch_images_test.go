@@ -9,9 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestBatchImageInputAndEnvelope(t *testing.T) {
@@ -388,6 +391,9 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 	if w := call("GET", path+"/items?limit=0", key, nil, ""); w.Code != 400 {
 		t.Fatal("invalid pagination", w.Code)
 	}
+	if w := must("GET", path+"/items?status=failed", key, nil, ""); !strings.Contains(w.Body.String(), `"source":"provider"`) || strings.Contains(w.Body.String(), "private upstream error") {
+		t.Fatal("indexed provider error source", w.Body.String())
+	}
 	// A changed provider result must never silently become an empty successful ZIP.
 	changedOutput = true
 	for _, suffix := range []string{"/download", "/items/one_01/content"} {
@@ -485,5 +491,174 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 	balances("10.00000000", "0.00000000")
 	if uploads != 3 || creates != 3 || cancels != 2 || deletes < 4 || downloads < 3 {
 		t.Fatal("provider lifecycle", uploads, creates, cancels, deletes, downloads)
+	}
+	testBatchImageQueries(t, b, uid, kid, key, other, user)
+}
+
+func testBatchImageQueries(t *testing.T, a *App, uid, kid int64, key, other, login string) {
+	t.Helper()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix := fmt.Sprintf("imgbatch_query_%d_", kid)
+	defer func() {
+		exec("DELETE FROM batch_image_items WHERE job_id LIKE $1", prefix+"%")
+		exec("DELETE FROM batch_image_jobs WHERE batch_id LIKE $1", prefix+"%")
+	}()
+	at := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	exec(`INSERT INTO batch_image_jobs(batch_id,user_id,api_key_id,provider,model,status,item_count,task_name,created_at,downloaded_at,settled_at)
+		SELECT $3||n,$1,$2,'gemini_api','team-image',CASE n WHEN 1 THEN 'created' WHEN 2 THEN 'uploading' WHEN 3 THEN 'submitted' WHEN 4 THEN 'indexing' ELSE 'completed' END,0,'Query fixture', $4::timestamptz + (n/2)*interval '1 second', CASE WHEN n%2=0 THEN $4::timestamptz END,$4 FROM generate_series(0,104) n`, uid, kid, prefix, at)
+	// Hidden and foreign-key jobs must stay out of filtered pages, including has_more.
+	exec(`INSERT INTO batch_image_jobs(batch_id,user_id,api_key_id,provider,model,status,item_count,task_name,created_at,user_deleted_at)
+		VALUES($3||'hidden',$1,$2,'gemini_api','team-image','completed',0,'Query fixture',$4,$4),
+		($3||'foreign',$1,(SELECT id FROM api_keys WHERE key=$5),'gemini_api','team-image','completed',0,'Query fixture',$4,NULL)`, uid, kid, prefix, at, other)
+	job := prefix + "0"
+	exec(`INSERT INTO batch_image_items(job_id,custom_id,status,error_code,error_message,provider_source_object)
+		SELECT $1,'item_'||n,CASE WHEN n<=7 THEN 'failed' WHEN n=8 THEN 'pending' ELSE 'success' END,
+		CASE n WHEN 0 THEN 'PRIVATE_PROVIDER_ERROR' WHEN 1 THEN 'EMPTY_IMAGE_OUTPUT' WHEN 2 THEN ' PROVIDER_ITEM_FAILED ' WHEN 3 THEN 'INDEX_OUTPUT_MISSING' WHEN 4 THEN 'INDEX_PARSE_FAILED' WHEN 5 THEN 'DUPLICATE_CUSTOM_ID_IN_OUTPUT' WHEN 6 THEN 'UNCLASSIFIED' ELSE NULL END,
+		CASE n WHEN 0 THEN 'failed at files/private-output' WHEN 1 THEN 'api_key=private-provider-credential' WHEN 2 THEN repeat('猫',200) ELSE NULL END,
+		CASE WHEN n=0 THEN 'files/private-output' WHEN n=7 THEN 'files/no-code' ELSE NULL END
+		FROM generate_series(0,500) n`, job)
+	type item struct {
+		Error *struct{ Code, Message, Source string }
+	}
+	type page struct {
+		Object  string
+		Data    []map[string]json.RawMessage
+		HasMore bool `json:"has_more"`
+	}
+	request := func(path, token string, want int) page {
+		t.Helper()
+		r := httptest.NewRequest("GET", path, nil)
+		r.RemoteAddr = "192.0.2.189:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s: %d want %d: %s", path, w.Code, want, w.Body.String())
+		}
+		var out page
+		if want == 200 {
+			if json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Object != "list" || out.Data == nil {
+				t.Fatal("invalid batch list", w.Body.String())
+			}
+			for _, field := range []string{"provider_source_object", "provider_job_name", "user_id", "api_key_id", "account_id", "billed_amount", "request_hash", "private-provider-credential", "files/private-output"} {
+				if strings.Contains(w.Body.String(), field) {
+					t.Fatal("internal batch data exposed", field)
+				}
+			}
+		}
+		return out
+	}
+	jobs := "/v1/images/batches?task_name=" + url.QueryEscape("  qUeRy fiX  ")
+	assertJobs := func(query string, want []string, more bool) {
+		t.Helper()
+		out := request(jobs+query, key, 200)
+		ids := []string{}
+		for _, row := range out.Data {
+			ids = append(ids, credentialString(row, "id"))
+		}
+		if strings.Join(ids, ",") != strings.Join(want, ",") || out.HasMore != more {
+			t.Fatal("batch filter", query, ids, out.HasMore, want, more)
+		}
+	}
+	financial := func() string {
+		t.Helper()
+		var snapshot string
+		if err := a.DB.QueryRow(`SELECT jsonb_build_array(u.balance::text,u.frozen_balance::text,k.quota_used::text,(SELECT count(*) FROM usage_logs WHERE api_key_id=k.id),(SELECT count(*) FROM usage_billing_dedup WHERE api_key_id=k.id))::text FROM users u JOIN api_keys k ON k.user_id=u.id WHERE k.id=$1`, kid).Scan(&snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	before := financial()
+	out := request(jobs, key, 200)
+	if len(out.Data) != 20 || !out.HasMore || credentialString(out.Data[0], "id") != prefix+"104" || credentialString(out.Data[19], "id") != prefix+"85" {
+		t.Fatal("job default pagination", out)
+	}
+	out = request(jobs+"&limit=100", key, 200)
+	if len(out.Data) != 100 || !out.HasMore {
+		t.Fatal("job maximum page", out)
+	}
+	assertJobs("&limit=5&cursor=100", []string{prefix + "4", prefix + "3", prefix + "2", prefix + "1", prefix + "0"}, false)
+	assertJobs("&limit=%205%20&cursor=%20100%20", []string{prefix + "4", prefix + "3", prefix + "2", prefix + "1", prefix + "0"}, false)
+	assertJobs("&status=%20queued%20", []string{prefix + "3", prefix + "2", prefix + "1"}, false)
+	assertJobs("&status=processing_results", []string{prefix + "4"}, false)
+	assertJobs("&status=unknown", nil, false)
+	for _, value := range []string{"true", "1", "yes", "downloaded", " YES "} {
+		assertJobs("&status=queued&downloaded="+url.QueryEscape(value), []string{prefix + "2"}, false)
+	}
+	for _, value := range []string{"false", "0", "no", "not_downloaded", " No "} {
+		assertJobs("&status=queued&downloaded="+url.QueryEscape(value), []string{prefix + "3", prefix + "1"}, false)
+	}
+	for _, value := range []string{"", "all", " ALL "} {
+		assertJobs("&status=queued&downloaded="+url.QueryEscape(value), []string{prefix + "3", prefix + "2", prefix + "1"}, false)
+	}
+	for _, from := range []string{fmt.Sprint(at.Unix()), at.Format(time.RFC3339), "2026-09-01", "2026-09-01T09:00:00+09:00"} {
+		for _, to := range []string{fmt.Sprint(at.Add(time.Second).Unix()), "2026-09-01T00:00:01Z"} {
+			assertJobs("&from="+url.QueryEscape(from)+"&to="+url.QueryEscape(to), []string{prefix + "1", prefix + "0"}, false)
+		}
+	}
+	assertJobs("&from=2026-09-01&to=2026-09-01", nil, false)
+	assertJobs("&to=2026-09-01", nil, false)
+	assertJobs("&from=2026-09-01T00:00:00.000001Z&to=2026-09-01T00:00:02Z", []string{prefix + "3", prefix + "2"}, false)
+	assertJobs("&from=2026-09-01&to=2026-09-01T00:00:01Z&downloaded=true&status=completed", []string{job}, false)
+	assertJobs("&cursor=1000000", nil, false)
+	for _, query := range []string{"downloaded=maybe", "from=bad", "to=2026-02-30", "from=0", "from=-1", "from=9223372036854775807", "from=253402300800", "from=2026-09-02&to=2026-09-01", "limit=0", "limit=101", "limit=1.5", "cursor=-1", "cursor=1000001", "cursor=no", "task_name=%00", "status=%FF"} {
+		request("/v1/images/batches?"+query, key, 400)
+	}
+	itemsPath := "/v1/images/batches/" + job + "/items"
+	out = request(itemsPath, key, 200)
+	if len(out.Data) != 100 || !out.HasMore || credentialString(out.Data[0], "custom_id") != "item_0" {
+		t.Fatal("item default pagination", out)
+	}
+	for i, source := range []string{"provider", "provider", "provider", "system", "system", "system", "", ""} {
+		var failure item
+		encoded, _ := json.Marshal(out.Data[i])
+		if json.Unmarshal(encoded, &failure) != nil || failure.Error == nil || failure.Error.Source != source {
+			t.Fatal("item error source", i, string(encoded))
+		}
+		if len(failure.Error.Message) > 500 || !utf8.ValidString(failure.Error.Message) {
+			t.Fatal("unsafe error message", i)
+		}
+		if i == 0 && failure.Error.Message != "upstream provider operation failed" || i == 1 && !strings.Contains(failure.Error.Message, "[redacted]") {
+			t.Fatal("error message redaction", i)
+		}
+	}
+	if string(out.Data[8]["error"]) != "null" || string(out.Data[9]["error"]) != "null" {
+		t.Fatal("pending or successful item exposed failure")
+	}
+	out = request(itemsPath+"?limit=500", key, 200)
+	if len(out.Data) != 500 || !out.HasMore {
+		t.Fatal("item maximum page", len(out.Data), out.HasMore)
+	}
+	out = request(itemsPath+"?limit=500&cursor=500", key, 200)
+	if len(out.Data) != 1 || out.HasMore || credentialString(out.Data[0], "custom_id") != "item_500" {
+		t.Fatal("item last page", out)
+	}
+	for status, count := range map[string]int{"success": 492, "succeeded": 492, " pending ": 1, "failed": 8, "all": 500} {
+		out = request(itemsPath+"?limit=500&status="+url.QueryEscape(status), key, 200)
+		if len(out.Data) != count || out.HasMore != (status == "all") {
+			t.Fatal("item status filter", status, len(out.Data), out.HasMore)
+		}
+	}
+	out = request(itemsPath+"?status=failed&cursor=8", key, 200)
+	if len(out.Data) != 0 || out.HasMore {
+		t.Fatal("empty item page", out)
+	}
+	for _, query := range []string{"limit=501", "limit=0", "status=unknown", "status=SUCCESS", "cursor=-1"} {
+		request(itemsPath+"?"+query, key, 400)
+	}
+	request(itemsPath, other, 404)
+	request(itemsPath, login, 401)
+	request(jobs, login, 401)
+	out = request(jobs, other, 200)
+	if len(out.Data) != 1 || out.HasMore || credentialString(out.Data[0], "id") != prefix+"foreign" {
+		t.Fatal("cross-key job list", out)
+	}
+	if after := financial(); after != before {
+		t.Fatal("query changed billing", before, after)
 	}
 }
