@@ -96,16 +96,24 @@ func (a *App) saveProxy(w http.ResponseWriter, r *http.Request) error {
 	if err = in.validate(create); err != nil {
 		return err
 	}
-	if in.Host != nil {
-		if _, err = a.resolveUpstream(r.Context(), *in.Host); err != nil {
-			return err
-		}
-	}
 	tx, err := a.DB.BeginTx(r.Context(), nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var finish func(json.RawMessage) error
+	if create {
+		var replayed bool
+		finish, replayed, err = writeIdempotency(w, r, tx, "admin.proxies.create", fmt.Sprintf("admin:%d", current(r).ID), in)
+		if err != nil || replayed {
+			return err
+		}
+	}
+	if in.Host != nil {
+		if _, err = a.resolveUpstream(r.Context(), *in.Host); err != nil {
+			return err
+		}
+	}
 	// Serialize graph edits so two administrators cannot create a fallback cycle.
 	if _, err = tx.ExecContext(r.Context(), "SELECT pg_advisory_xact_lock(720034)"); err != nil {
 		return err
@@ -189,8 +197,23 @@ func (a *App) saveProxy(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
+	var raw json.RawMessage
+	if create {
+		raw, err = jsonRow(tx.QueryRowContext(r.Context(), "SELECT "+proxyProjection+" FROM proxies p WHERE id=$1", id))
+		if err != nil {
+			return err
+		}
+		if finish != nil {
+			if err = finish(raw); err != nil {
+				return err
+			}
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return err
+	}
+	if create {
+		return reply(w, raw)
 	}
 	r.SetPathValue("id", strconv.FormatInt(id, 10))
 	return a.getProxy(w, r)

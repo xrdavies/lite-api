@@ -223,6 +223,17 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	if u.Platform != "gemini" && in.Credentials["tier_id"] != nil {
 		return bad("tier_id requires a Gemini account")
 	}
+	tx, err := a.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	finish, replayed, err := writeIdempotency(w, r, tx, "admin.accounts.create", fmt.Sprintf("admin:%d", current(r).ID), in)
+	if err != nil || replayed {
+		return err
+	}
+	// A committed replay needs neither a reachable upstream nor a still-active
+	// proxy. New writes retain destination validation and graph locking.
 	base, err := u.baseURL()
 	if err != nil {
 		return err
@@ -232,8 +243,14 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	}
 	var proxy, expiry, load any
 	if in.ProxyID != nil && *in.ProxyID > 0 {
-		if _, err = a.resolveProxy(r.Context(), *in.ProxyID); err != nil {
+		p, err := resolveProxyTarget(r.Context(), tx, *in.ProxyID, time.Now())
+		if err != nil {
 			return err
+		}
+		if p != nil {
+			if _, err = a.proxyURL(r.Context(), p); err != nil {
+				return err
+			}
 		}
 		proxy = *in.ProxyID
 	}
@@ -267,11 +284,6 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	if in.Extra != nil {
 		extra, _ = json.Marshal(in.Extra)
 	}
-	tx, err := a.DB.BeginTx(r.Context(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	if err = validateProxyAssignment(r.Context(), tx, in.ProxyID); err != nil {
 		return err
 	}
@@ -288,6 +300,11 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	raw, err := accountJSON(r.Context(), tx, id)
 	if err != nil {
 		return err
+	}
+	if finish != nil {
+		if err = finish(raw); err != nil {
+			return err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return err
