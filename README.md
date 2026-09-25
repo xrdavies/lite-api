@@ -4,7 +4,9 @@
 
 本期不提供提示词审计、内容风控、合规确认产品及 Grok OAuth 环境诊断，也不开放对应接口或启用开关。保留管理员操作审计、账号健康测试、代理诊断，以及实际调度所需的限流、额度和状态检查。
 
-目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本/图片/视频手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 原生同步/流式及批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务；托管工具及其余扩展运行功能仍在开发中。
+目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本/图片/视频手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 原生同步/流式及批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务、文件/文件搜索、MCP、代码工具、托管 Shell、计算机工具、工具搜索、后台 Responses、Responses 资源与扩展路径。上游是否提供某项能力仍由实际账号和模型决定，网关会按能力配置和协议明确放行或拒绝。
+
+保留范围已经完成 Go 后端实现。完整本地验证覆盖空库初始化、权限、API Key、路由、协议转换、媒体任务、持久恢复、计费幂等、Redis/PostgreSQL 故障、单实例部署、强杀恢复和版本回退；首个真实上游 `buyonce.xyz/gpt-5.6-luna` 已通过 Chat Completions 与 Responses 的 JSON/SSE 以及用量、余额和 Key 额度对账。本文中的“尚未真实联调”表示未对某个外部供应商组合发起验证，不表示对应网关代码缺失。
 
 ## 本地运行
 
@@ -55,7 +57,7 @@ Key 列表、详情和修改响应包含所属 `user` 和 `group`。用户关联
 
 复合分组使用 `platform=composite`，可关联八种已支持平台的 API Key 账号。管理员通过 `/api/v1/admin/groups/{id}/composite-routes` 的 GET/POST 和 `/{route_id}` 的 PUT/DELETE 管理路由，POST 成功返回 201，PUT 为整条替换；`/preview` 接受 `model`、`endpoint`，只预览配置决策，不代表上游当前可用。路由包含 `public_model`、`match_type=exact|prefix`、`target_platform`、`upstream_model`、`endpoint`、`priority`、`enabled`、`notes`；endpoint 支持 any/messages/count_tokens/responses/chat_completions/embeddings/images/gemini；images 可调度 OpenAI 或 Grok API Key 图片生成/编辑，Grok 编辑请求会转换为其原生 JSON 图片对象。
 
-复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。当前覆盖已有原生文本/Responses、计数及 Embedding 路径；协议转换与媒体继续开发。
+复合路由按精确匹配、指定端点、最长前缀、priority 升序、ID 升序选择。空 `upstream_model` 在 exact 时采用 public_model，prefix 时透传具体请求模型。无显式命中时，先使用账号精确模型映射确定归属，多平台争用同一别名则拒绝；再识别已知厂商模型前缀，未知名称拒绝。路由选择平台后，依次应用渠道和账号模型映射。客户端白名单在改写前校验，requested 计价和日志保留公共模型名；平台额度按解析出的具体平台检查、结算。不会跨平台重试，Responses 续接仍绑定原账号和上游来源。原生文本、Responses、计数、Embedding、协议转换和媒体路径均已实现，并由本地协议、数据库和恢复测试覆盖。
 
 分组可配置 `claude_code_only` 和 `fallback_group_id`。Messages 使用 CLI User-Agent、必要请求头、system 特征和 metadata 识别客户端，兼容单 token 探测及 count_tokens 辅助请求。这是客户端分类规则，所有请求仍必须通过 API Key 鉴权。非匹配客户端在配置 fallback 时使用目标组账号，未配置返回 403；Chat、Responses、Embedding 入口在开启限制时直接拒绝。模型发现和用量查询仍属于原 Key 分组。
 
