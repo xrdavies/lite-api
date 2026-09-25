@@ -65,7 +65,7 @@ func responseResourceQuery(r *http.Request) (url.Values, error) {
 
 // The caller has authenticated the Key and resolved ownership before this read.
 // Retrieval is not a new generation and never creates another billing receipt.
-func (a *App) readResponseResource(w http.ResponseWriter, r *http.Request, u *upstreamAccount, id string, query url.Values) error {
+func (a *App) readResponseResource(w http.ResponseWriter, r *http.Request, u *upstreamAccount, id string, query url.Values, settled json.RawMessage) error {
 	release, err := a.acquireAccountSlot(r.Context(), u.ID)
 	if err != nil {
 		return err
@@ -94,55 +94,74 @@ func (a *App) readResponseResource(w http.ResponseWriter, r *http.Request, u *up
 	if err != nil || len(raw) > 16<<20 {
 		return &apiError{502, "response resource interrupted or oversized"}
 	}
-	if err = validateResponseResource(raw, id, items); err != nil {
-		return err
-	}
-	raw, err = sanitizeResponseTools(raw)
+	raw, err = prepareResponseResource(raw, id, items, settled)
 	if err != nil {
 		return err
 	}
 	return rawReply(w, json.RawMessage(raw))
 }
 
-func validateResponseResource(raw []byte, id string, items bool) error {
+func prepareResponseResource(raw []byte, id string, items bool, settled json.RawMessage) ([]byte, error) {
 	invalid := &apiError{502, "invalid upstream response resource"}
 	var result map[string]json.RawMessage
-	if json.Unmarshal(raw, &result) != nil || result == nil || result["error"] != nil && string(result["error"]) != "null" {
-		return invalid
+	if json.Unmarshal(raw, &result) != nil || result == nil {
+		return nil, invalid
 	}
 	if !items {
 		if credentialString(result, "id") != id || credentialString(result, "object") != "response" {
-			return invalid
+			return nil, invalid
 		}
 		// This path is only for already settled synchronous or background work.
-		switch credentialString(result, "status") {
-		case "completed", "incomplete":
-			return nil
-		default:
-			return invalid
+		status := credentialString(result, "status")
+		if settled != nil {
+			var original struct{ ID, Status string }
+			if json.Unmarshal(settled, &original) != nil || original.ID != id || original.Status != status {
+				return nil, invalid
+			}
 		}
+		switch status {
+		case "completed", "incomplete":
+			if result["error"] != nil && string(result["error"]) != "null" {
+				return nil, invalid
+			}
+		case "failed", "cancelled":
+			if settled == nil {
+				return nil, invalid
+			}
+			// Return the durable, sanitized failure without discarding include fields.
+			var original map[string]json.RawMessage
+			_ = json.Unmarshal(settled, &original)
+			result["error"] = original["error"]
+			raw, _ = json.Marshal(result)
+		default:
+			return nil, invalid
+		}
+		return sanitizeResponseTools(raw)
+	}
+	if result["error"] != nil && string(result["error"]) != "null" {
+		return nil, invalid
 	}
 	var data []map[string]json.RawMessage
 	var more *bool
 	if credentialString(result, "object") != "list" || json.Unmarshal(result["data"], &data) != nil || data == nil || len(data) > 100 || json.Unmarshal(result["has_more"], &more) != nil || more == nil {
-		return invalid
+		return nil, invalid
 	}
 	seen := map[string]bool{}
 	for _, item := range data {
 		id := credentialString(item, "id")
 		if !validResponseID(id) || seen[id] || credentialString(item, "type") == "" {
-			return invalid
+			return nil, invalid
 		}
 		seen[id] = true
 	}
 	if len(data) > 0 {
 		if credentialString(result, "first_id") != credentialString(data[0], "id") || credentialString(result, "last_id") != credentialString(data[len(data)-1], "id") {
-			return invalid
+			return nil, invalid
 		}
 	} else if *more || credentialString(result, "first_id") != "" || credentialString(result, "last_id") != "" {
-		return invalid
+		return nil, invalid
 	}
-	return nil
+	return sanitizeResponseTools(raw)
 }
 
 func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *gatewayIdentity, id string, query url.Values) error {
@@ -174,5 +193,5 @@ func (a *App) storedResponseLookup(w http.ResponseWriter, r *http.Request, g *ga
 	}
 	defer a.releaseSlot("user", g.UserID)
 	defer a.trackKeySlot(g.Key.ID)()
-	return a.readResponseResource(w, r, u, id, query)
+	return a.readResponseResource(w, r, u, id, query, nil)
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,43 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSettledResponseResources(t *testing.T) {
+	for _, status := range []string{"completed", "incomplete", "failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			settled := json.RawMessage(fmt.Sprintf(`{"id":"resp_owned","status":%q,"error":{"message":"safe failure"}}`, status))
+			raw := []byte(fmt.Sprintf(`{"id":"resp_owned","object":"response","status":%q,"output":[{"type":"reasoning","encrypted_content":"include","n":9007199254740993}]}`, status))
+			if status == "failed" || status == "cancelled" {
+				raw = bytes.Replace(raw, []byte(`"output":`), []byte(`"error":{"message":"upstream-secret"},"output":`), 1)
+			}
+			clean, err := prepareResponseResource(raw, "resp_owned", false, settled)
+			if err != nil || bytes.Contains(clean, []byte("upstream-secret")) || !bytes.Contains(clean, []byte("9007199254740993")) || !bytes.Contains(clean, []byte("include")) {
+				t.Fatal("settled resource projection", string(clean), err)
+			}
+			for _, bad := range [][]byte{
+				bytes.Replace(raw, []byte("resp_owned"), []byte("resp_foreign"), 1),
+				bytes.Replace(raw, []byte(`"object":"response"`), []byte(`"object":"list"`), 1),
+				bytes.Replace(raw, []byte(status), []byte("in_progress"), 1),
+			} {
+				if _, err := prepareResponseResource(bad, "resp_owned", false, settled); err == nil {
+					t.Fatal("invalid settled response accepted", string(bad))
+				}
+			}
+			if _, err := prepareResponseResource(raw, "resp_owned", false, nil); (err != nil) != (status == "failed" || status == "cancelled") {
+				t.Fatal("unproven failure accepted", err)
+			}
+			// A terminal stream reread must use this response's include projection,
+			// not replace it with the less detailed durable result or bill it again.
+			task := &backgroundResponse{videoTask: videoTask{UpstreamID: "resp_owned", Stage: "terminal", Result: settled}}
+			wire := fmt.Sprintf("data: {\"type\":\"response.%s\",\"response\":%s}\n\n", status, raw)
+			response := &http.Response{Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(wire))}
+			w := httptest.NewRecorder()
+			if err := (&App{}).streamBackgroundResponse(w, httptest.NewRequest("GET", "/responses/resp_owned", nil), task, response); err != nil || !strings.Contains(w.Body.String(), "include") || !strings.Contains(w.Body.String(), "9007199254740993") || strings.Contains(w.Body.String(), "upstream-secret") || !bytes.Equal(task.Result, settled) {
+				t.Fatal("terminal stream projection", err, w.Body.String())
+			}
+		})
+	}
+}
 
 func testResponseResources(t *testing.T, a *App, admin string) {
 	t.Helper()

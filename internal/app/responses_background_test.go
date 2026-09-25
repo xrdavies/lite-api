@@ -157,6 +157,10 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			if status == "failed" {
 				out["error"] = map[string]string{"message": "provider-secret"}
 			}
+			if r.URL.Query().Get("include") == "reasoning.encrypted_content" || r.URL.Query().Get("include[]") == "reasoning.encrypted_content" {
+				out["output"] = []any{map[string]any{"type": "reasoning", "id": "rs_" + native, "encrypted_content": "included-reasoning", "native_number": json.Number("9007199254740993")}}
+				out["tools"] = []any{map[string]any{"type": "mcp", "server_label": "test", "authorization": "included-secret", "headers": map[string]string{"secret": "included-secret"}}}
+			}
 			return out
 		}
 		if !stream {
@@ -348,10 +352,15 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 		if w := call("GET", prefix+first+"/input_items?limit=1&order=asc", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private background input") {
 			t.Fatal("background input items alias", w.Code, w.Body.String())
 		}
-		if w := call("GET", prefix+first+"?include=reasoning.encrypted_content", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private generated text") {
+		if w := call("GET", prefix+first+"?include=reasoning.encrypted_content", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "included-reasoning") || strings.Contains(w.Body.String(), "included-secret") {
 			t.Fatal("background include query", w.Code, w.Body.String())
 		}
 	}
+	set(first, "incomplete")
+	if w := call("GET", "/responses/"+first+"?include=reasoning.encrypted_content", key, nil, ""); w.Code != 502 || strings.Contains(w.Body.String(), "included-reasoning") {
+		t.Fatal("settled resource changed terminal state", w.Code, w.Body.String())
+	}
+	set(first, "completed")
 	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", task.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatal("background resource read charged twice", count, err)
 	}
@@ -426,6 +435,30 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	if load(failed).Receipt == nil {
 		t.Fatal("known failed usage discarded")
 	}
+	for _, item := range []struct{ id, status string }{{queued, "cancelled"}, {failed, "failed"}} {
+		task := load(item.id)
+		for _, prefix := range []string{"/responses/", "/v1/responses/", "/backend-api/codex/responses/"} {
+			w := call("GET", prefix+item.id+"?include[]=reasoning.encrypted_content", key, nil, "")
+			var result struct{ Status string }
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Status != item.status || !strings.Contains(w.Body.String(), "included-reasoning") || !strings.Contains(w.Body.String(), "9007199254740993") || strings.Contains(w.Body.String(), "provider-secret") || strings.Contains(w.Body.String(), "included-secret") {
+				t.Fatal("failed/cancelled response include", w.Code, w.Body.String())
+			}
+			if w := call("GET", prefix+item.id+"?include=reasoning.encrypted_content", other, nil, ""); w.Code != 404 {
+				t.Fatal("foreign failed response include", w.Code)
+			}
+			if w := call("GET", prefix+item.id+"/input_items", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "private background input") {
+				t.Fatal("failed/cancelled input items", w.Code, w.Body.String())
+			}
+		}
+		var got int
+		want := 0
+		if task.Receipt != nil {
+			want = 1
+		}
+		if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", task.ID).Scan(&got); err != nil || got != want || !bytes.Equal(load(item.id).Result, task.Result) {
+			t.Fatal("include reads changed settlement or stored result", got, err)
+		}
+	}
 	noUsage := create("failed-no-usage-bg")
 	set(noUsage, "failed")
 	if w := call("GET", "/responses/"+noUsage, key, nil, ""); w.Code != 502 || load(noUsage).Stage != "pending" {
@@ -490,6 +523,17 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	mu.Unlock()
 	if query != "starting_after=0&stream=true" {
 		t.Fatal("resume cursor lost", query)
+	}
+	settledBefore := load(streamID)
+	for _, prefix := range []string{"/responses/", "/v1/responses/", "/backend-api/codex/responses/"} {
+		w := call("GET", prefix+streamID+"?stream=true&starting_after=0&include=reasoning.encrypted_content&include_obfuscation=false", key, nil, "")
+		terminal := strings.Split(w.Body.String(), "event: response.completed\ndata: ")
+		if w.Code != 200 || len(terminal) != 2 || !strings.Contains(terminal[1], "included-reasoning") || !strings.Contains(terminal[1], "9007199254740993") || strings.Contains(w.Body.String(), "included-secret") {
+			t.Fatal("settled stream lost include fields or leaked secrets", w.Code, w.Body.String())
+		}
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", settledBefore.ID).Scan(&count); err != nil || count != 1 || !bytes.Equal(load(streamID).Result, settledBefore.Result) {
+		t.Fatal("stream reread changed settlement or stored result", count, err)
 	}
 	mu.Lock()
 	states[streamID] = "failed"

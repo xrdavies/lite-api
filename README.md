@@ -333,6 +333,8 @@ HTTP Responses 支持 `background=true`，只调度原生 Responses API Key 账�
 
 支持 `background=true,stream=true` 原生 SSE，以及 `GET /responses/{id}?stream=true&starting_after=N` 原生恢复，保留事件类型和序号；只有创建时设置了 `stream=true` 的任务可以恢复流，终态事件等待结算成功。断流后任务继续由 worker 查询，不重发创建，恢复是否可用取决于上游流保留期。流式读取共用既有空闲超时与账号健康规则。取消可以与生成完成竞争，以提供方返回的实际状态和用量结算；重复取消终态任务只读本地结果。背景执行定义见 [OpenAI 后台模式](https://developers.openai.com/api/docs/guides/background)。
 
+已结算后台任务的 `include` 查询和流式重读保留本次上游补充字段，包括加密思考与原生整数；响应 ID 和终态必须与已保存结果一致。failed/cancelled 任务也能查询扩展字段和输入条目，错误说明使用已保存的安全摘要，MCP/容器密钥继续清理。重读不覆盖原结果或重算费用，上游改写终态返回错误。查询参数依据 [Responses 读取定义](https://developers.openai.com/api/reference/resources/responses/methods/retrieve)。
+
 后台请求只有显式 `store=true` 才保存 30 天结果和续接关联；省略/false 的终态结果本地保留十分钟，不建立续接关联。未完成/待结算任务不自动过期。创建结果不明确或 ID 尚未成功保存时，任务和幂等记录保持待核查，不自动重发；须保留 Redis 持久卷及原 JWT_SECRET。后台 WebSocket、compact/input_tokens 不适用。当前为本地协议、数据库和恢复测试，真实上游后台模式仍未联调。
 
 三个 Responses 前缀的 GET 支持 WebSocket 升级。账号需使用 Responses 协议、OpenAI/Grok 平台，并设置 `extra.openai_apikey_responses_websockets_v2_mode="passthrough"`；默认关闭，`openai_ws_force_http=true` 禁止该路径。复合分组按实际目标平台检查。连接私有且逐轮重新鉴权，每个 `response.create` 复用 HTTP 的额度、路由、计价及结算；同一连接串行执行，可用 `stream_id` 关联客户端事件。`generate=false` 无 usage 的预热不扣费，`store=false` 的续接仅在本连接保留。每 Key 最多 4 条连接、进程 128 条；连接上限一小时，客户端空闲五分钟关闭。连接不接受请求幂等头；已发送的轮次不自动重试。下游断开后最多等待 15 秒收取已产生用量，数据库失败仍由待结算记录恢复。原厂 WebSocket 尚无真实凭证验证，当前验证使用本地协议服务。

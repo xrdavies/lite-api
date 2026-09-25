@@ -463,7 +463,7 @@ func (a *App) backgroundResponseLookup(w http.ResponseWriter, r *http.Request) {
 			}
 			u, err := a.backgroundSource(ctx, t)
 			if err == nil {
-				err = a.readResponseResource(w, r, u, id, query)
+				err = a.readResponseResource(w, r, u, id, query, t.Result)
 			}
 			if err != nil {
 				fail(err)
@@ -589,8 +589,12 @@ func (a *App) streamBackgroundResponse(w http.ResponseWriter, r *http.Request, t
 			}
 			switch kind {
 			case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
+				clean, err := prepareResponseResource(response, t.UpstreamID, false, t.Result)
+				if err != nil {
+					return err
+				}
 				done = true
-				event["response"] = t.Result
+				event["response"] = clean
 			}
 		}
 		if t.UpstreamID == "" {
