@@ -210,15 +210,46 @@ func usageOrder(r *http.Request) string {
 }
 
 // User views expose usage and price snapshots, not upstream account/channel identities.
-const userUsageColumns = `native_compaction_v2,ip_address,inbound_endpoint,user_agent,session_id,cache_ttl_overridden,long_context_billing_applied,openai_ws_mode,id,request_id,api_key_id,model,requested_model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,rate_multiplier,stream,duration_ms,first_token_ms,created_at,group_id,billing_type,billing_mode,request_type,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,service_tier,reasoning_effort,requested_reasoning_effort,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size,image_output_size,image_size_breakdown`
+const userUsageColumns = `user_id,native_compaction_v2,ip_address,inbound_endpoint,user_agent,session_id,cache_ttl_overridden,long_context_billing_applied,openai_ws_mode,id,request_id,api_key_id,model,requested_model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,rate_multiplier,stream,duration_ms,first_token_ms,created_at,group_id,billing_type,billing_mode,request_type,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,service_tier,reasoning_effort,requested_reasoning_effort,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size,image_output_size,image_size_breakdown`
 
 // Public fields describe the client's request; stored model and request_type
 // retain their billing and numeric meanings in the database.
-const usageView = `to_jsonb(u) || jsonb_build_object('model',` + usageRequestedModel + `,
+const usageView = `to_jsonb(l) || jsonb_build_object('model',` + usageRequestedModel + `,
  'request_type',CASE request_type WHEN 1 THEN 'sync' WHEN 2 THEN 'stream' WHEN 3 THEN 'ws_v2'
  WHEN 4 THEN 'cyber' WHEN 5 THEN 'live' ELSE CASE WHEN openai_ws_mode THEN 'ws_v2' WHEN stream THEN 'stream' ELSE 'sync' END END,
  'stream',CASE request_type WHEN 1 THEN false WHEN 2 THEN true WHEN 3 THEN true ELSE stream END,
  'openai_ws_mode',CASE request_type WHEN 1 THEN false WHEN 2 THEN false WHEN 3 THEN true ELSE openai_ws_mode END)`
+
+// Usage binds relations to the historical row, not the Key's current group.
+// Profiles are public projections; credentials never belong in a usage report.
+func usageRelations(admin bool) string {
+	view := `jsonb_build_object(
+ 'user',(SELECT ` + userView(false) + ` || CASE WHEN u.deleted_at IS NOT NULL THEN jsonb_build_object('deleted_at',u.deleted_at) ELSE '{}'::jsonb END FROM users u WHERE u.id=l.user_id),
+ 'api_key',(SELECT (` + keyView + `)-'key' FROM api_keys k WHERE k.id=l.api_key_id AND k.user_id=l.user_id AND k.deleted_at IS NULL),
+ 'group',(SELECT ` + publicGroupView + ` FROM groups g WHERE g.id=l.group_id AND g.deleted_at IS NULL))`
+	if admin {
+		view += ` || jsonb_build_object('account',(SELECT jsonb_build_object('id',a.id,'name',a.name) FROM accounts a WHERE a.id=l.account_id AND a.deleted_at IS NULL))`
+	}
+	return view
+}
+
+func usageEffortView(raw json.RawMessage, admin bool) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	forwarded := credentialString(fields, "reasoning_effort")
+	requested := strings.TrimSpace(credentialString(fields, "requested_reasoning_effort"))
+	if requested == "" {
+		requested = forwarded
+	} else {
+		fields["reasoning_effort"], _ = json.Marshal(requested)
+	}
+	if effective := strings.TrimSpace(forwarded); admin && effective != "" && canonicalEffort(effective) != canonicalEffort(requested) {
+		fields["upstream_reasoning_effort"], _ = json.Marshal(effective)
+	}
+	return json.Marshal(fields)
+}
 
 func (a *App) listUsage(w http.ResponseWriter, r *http.Request) error {
 	where, args, err := a.usageFilters(r)
@@ -236,17 +267,23 @@ func (a *App) listUsage(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	columns := userUsageColumns
-	if current(r).Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+	admin := current(r).Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/v1/admin/")
+	if admin {
 		columns = "*"
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := tx.QueryContext(r.Context(), "SELECT "+usageView+" FROM(SELECT "+columns+" FROM usage_logs"+where+" ORDER BY "+usageOrder(r)+fmt.Sprintf(" LIMIT $%d OFFSET $%d)u", len(args)-1, len(args)), args...)
+	rows, err := tx.QueryContext(r.Context(), "SELECT "+usageView+" || "+usageRelations(admin)+" FROM(SELECT "+columns+" FROM usage_logs"+where+" ORDER BY "+usageOrder(r)+fmt.Sprintf(" LIMIT $%d OFFSET $%d)l", len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}
 	items, err := jsonRows(rows)
 	if err != nil {
 		return err
+	}
+	for i := range items {
+		if items[i], err = usageEffortView(items[i], admin); err != nil {
+			return err
+		}
 	}
 	return pageReply(w, items, total, page, size)
 }
@@ -255,7 +292,11 @@ func (a *App) getUsage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT "+usageView+" FROM(SELECT "+userUsageColumns+" FROM usage_logs WHERE id=$1 AND user_id=$2)u", id, current(r).ID))
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT "+usageView+" || "+usageRelations(false)+" FROM(SELECT "+userUsageColumns+" FROM usage_logs WHERE id=$1 AND user_id=$2)l", id, current(r).ID))
+	if err != nil {
+		return err
+	}
+	raw, err = usageEffortView(raw, false)
 	if err != nil {
 		return err
 	}

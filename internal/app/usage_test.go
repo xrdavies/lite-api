@@ -7,10 +7,37 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestUsageEffortView(t *testing.T) {
+	for _, row := range []struct {
+		requested, forwarded, want string
+		different                  bool
+	}{
+		{" max ", "high", "max", true}, {"extra-high", "xhigh", "extra-high", false},
+		{" HIGH ", "high", "HIGH", false}, {"", "low", "low", false},
+		{"   ", "medium", "medium", false}, {"max", "", "max", false},
+	} {
+		for _, admin := range []bool{false, true} {
+			raw, _ := json.Marshal(map[string]any{"requested_reasoning_effort": row.requested, "reasoning_effort": row.forwarded, "actual_cost": json.Number("1234567890.1234567890")})
+			out, err := usageEffortView(raw, admin)
+			var fields map[string]json.RawMessage
+			if err != nil || json.Unmarshal(out, &fields) != nil || credentialString(fields, "reasoning_effort") != row.want || string(fields["actual_cost"]) != "1234567890.1234567890" {
+				t.Fatal("usage effort or decimal projection", string(out), err)
+			}
+			if _, exists := fields["upstream_reasoning_effort"]; exists != (admin && row.different) {
+				t.Fatal("upstream effort visibility", string(out), admin)
+			}
+		}
+	}
+	if _, err := usageEffortView(json.RawMessage(`invalid`), true); err == nil {
+		t.Fatal("invalid usage JSON accepted")
+	}
+}
 
 func testUsageErrors(t *testing.T, a *App, admin, other string) {
 	t.Helper()
@@ -444,6 +471,44 @@ func testUsageQueries(t *testing.T, a *App, admin, other string) {
 	if w := call("GET", "/api/v1/usage/"+fmt.Sprint(ids[0]), other, nil); w.Code != 404 {
 		t.Fatal("foreign usage detail", w.Code)
 	}
+	// Relations are scoped from usage, and preserve client/effective effort separately.
+	if _, err := a.DB.Exec("UPDATE usage_logs SET requested_reasoning_effort=' max ',reasoning_effort='high' WHERE id=$1", ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	manage("PUT", fmt.Sprintf("/api/v1/admin/users/%d", uid), admin, map[string]any{"notes": "private usage note"})
+	manage("PUT", fmt.Sprintf("/api/v1/keys/%d", kid), user, map[string]any{"group_id": gid2})
+	for _, who := range []struct{ root, token, query string }{{"/api/v1/usage", user, base}, {"/api/v1/admin/usage", admin, scoped}} {
+		page := check(who.root, who.token, who.query+"&sort_by=id&sort_order=asc", 0, 1, 2, 5, 6)
+		row := page.Items[0]
+		var profile, apiKey, group, account map[string]any
+		json.Unmarshal(row["user"], &profile)
+		json.Unmarshal(row["api_key"], &apiKey)
+		json.Unmarshal(row["group"], &group)
+		if profile["id"] != float64(uid) || profile["email"] != "usage-queries@example.test" || profile["notes"] != nil || profile["password_hash"] != nil ||
+			apiKey["id"] != float64(kid) || apiKey["name"] != "usage queries" || apiKey["group_id"] != float64(gid2) || apiKey["key"] != nil || group["id"] != float64(gid) ||
+			string(row["reasoning_effort"]) != `"max"` || group["model_routing"] != nil || group["account_count"] != nil {
+			t.Fatal("usage relations or effort", row)
+		}
+		if who.root == "/api/v1/admin/usage" {
+			json.Unmarshal(row["account"], &account)
+			if len(account) != 2 || account["id"] != float64(aid) || account["name"] != "Usage query source" || string(row["upstream_reasoning_effort"]) != `"high"` {
+				t.Fatal("administrator usage metadata", row)
+			}
+		} else {
+			if row["account"] != nil || row["upstream_reasoning_effort"] != nil {
+				t.Fatal("user saw upstream effort or account")
+			}
+			w := call("GET", fmt.Sprintf("/api/v1/usage/%d", ids[0]), user, nil)
+			var detail struct{ Data map[string]json.RawMessage }
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil || !reflect.DeepEqual(row, detail.Data) {
+				t.Fatal("usage list/detail relations diverged", w.Code)
+			}
+		}
+	}
+	var originalEffort bool
+	if err := a.DB.QueryRow("SELECT requested_reasoning_effort=' max ' AND reasoning_effort='high' FROM usage_logs WHERE id=$1", ids[0]).Scan(&originalEffort); err != nil || !originalEffort {
+		t.Fatal("usage projection rewrote effort", err)
+	}
 	var unchanged bool
 	if err := a.DB.QueryRow("SELECT model='billed-z' AND request_type=3 AND requested_model=' alpha ' FROM usage_logs WHERE id=$1", ids[5]).Scan(&unchanged); err != nil || !unchanged {
 		t.Fatal("query rewrote raw usage", err)
@@ -451,9 +516,23 @@ func testUsageQueries(t *testing.T, a *App, admin, other string) {
 	// Soft deletion leaves raw account/Key usage queryable by its owner and administrators.
 	manage("DELETE", "/api/v1/keys/"+fmt.Sprint(kid), user, nil)
 	manage("DELETE", "/api/v1/admin/accounts/"+fmt.Sprint(aid), admin, nil)
-	check("/api/v1/usage", user, base+"&sort_by=id&sort_order=asc", 0, 1, 2, 5, 6)
-	check("/api/v1/admin/usage", admin, scoped+fmt.Sprintf("&api_key_id=%d&account_id=%d", kid, aid), 0, 2, 5)
+	manage("DELETE", "/api/v1/admin/groups/"+fmt.Sprint(gid), admin, nil)
+	page := check("/api/v1/usage", user, base+"&sort_by=id&sort_order=asc", 0, 1, 2, 5, 6)
+	if string(page.Items[0]["api_key"]) != "null" || string(page.Items[0]["group"]) != "null" {
+		t.Fatal("deleted Key/group relationship retained", page.Items[0])
+	}
+	page = check("/api/v1/admin/usage", admin, scoped+fmt.Sprintf("&api_key_id=%d&account_id=%d", kid, aid), 0, 2, 5)
+	if string(page.Items[0]["account"]) != "null" || string(page.Items[0]["group_id"]) != fmt.Sprint(gid) || string(page.Items[0]["api_key_id"]) != fmt.Sprint(kid) {
+		t.Fatal("deleted account or historical identity", page.Items[0])
+	}
 	if w := call("GET", "/api/v1/usage?api_key_id="+fmt.Sprint(kid), user, nil); w.Code != 404 {
 		t.Fatal("deleted Key explicit lookup", w.Code)
+	}
+	manage("DELETE", "/api/v1/admin/users/"+fmt.Sprint(uid), admin, nil)
+	page = check("/api/v1/admin/usage", admin, scoped+fmt.Sprintf("&api_key_id=%d", kid), 0, 2, 5)
+	var deletedUser map[string]any
+	json.Unmarshal(page.Items[0]["user"], &deletedUser)
+	if deletedUser["id"] != float64(uid) || deletedUser["deleted_at"] == nil || deletedUser["notes"] != nil {
+		t.Fatal("deleted usage owner metadata", deletedUser)
 	}
 }

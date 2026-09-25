@@ -415,6 +415,10 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 列表和详情的 `model` 返回客户端模型名，`request_type` 返回 sync/stream/ws_v2 等字符串；旧记录由 stream/openai_ws_mode 推导类型，显式类型优先决定两个兼容布尔字段。用户视图包含本人 IP、客户端端点、User-Agent、会话标识、缓存/长上下文标志和原生压缩标志；上游模型、账号成本及渠道信息仅在管理视图返回。查询不改写数据库中的计费模型、数字类型或消费记录。
 
+列表和详情同时返回 `user`、`api_key`、`group` 关联信息；分组按消费发生时的 `group_id` 关联，Key 后续改组不改变历史归属。关联信息不含 Key 原文、密码或管理员备注；管理员另可查看仅含 ID 和名称的 `account`。已删除 Key、分组和账号的关联返回 null，原始消费及其 ID 保留；已删除用户的基础资料包含 `deleted_at`，供管理员追溯。
+
+`reasoning_effort` 优先展示客户端请求值，历史记录缺少请求值时回落到实际转发值。两者经别名规范化后不同时，管理员另收到 `upstream_reasoning_effort`；普通用户不返回该字段。展示转换保留金额精度，不修改数据库内的请求值、转发值和计费结果。
+
 列表 `sort_by` 支持 created_at（默认）、model、id，未知字段回落 id；`sort_order=asc|desc` 默认 desc，同值按 ID 同序。筛选、排序先于分页，总数和记录使用同一数据库快照；管理员 `exact_total` 接受布尔值，当前始终返回精确总数。request_type 优先于 stream，接受 sync/stream/ws_v2/unknown/cyber/live；后两项仅识别原数据类型，不开放对应业务。旧 request_type=0 记录按 stream/openai_ws_mode 兼容筛选；缺少 billing_mode 时沿用图片数量区分 token/image。
 
 日期支持 `YYYY-MM-DD` 和 RFC3339。日历日期默认 Asia/Shanghai，可通过 `timezone` 指定 IANA 时区，结束日期包含全天并按夏令时计算；时间戳采用精确的半开区间。列表缺省不限制日期；用户汇总默认从七天前零点到明日零点，管理员汇总默认今日零点到当前时间，`period=today|week|month` 可指定范围，显式日期优先。汇总返回 total_requests、total_*_tokens、total_cost、total_actual_cost、average_duration_ms，并保留已有简短字段别名；账号历史成本仅在管理入口返回。金额由 PostgreSQL 精确求和，不读取上游或产生消费。
