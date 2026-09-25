@@ -31,6 +31,8 @@ go build -o bin/lite-api ./cmd/lite-api
 
 用户/管理 API 使用 `{code,message,data}` 响应格式。登录为 `POST /api/v1/auth/login`（`email`、`password`）；其他管理请求使用返回的 Bearer access token。access token 有效期 15 分钟，会话最多 30 天；refresh token 每次刷新后失效。客户端 API Key 不能用作管理面登录凭证。管理员余额调整可通过 `Idempotency-Key` 防止重复提交，金额计算在 PostgreSQL NUMERIC 中完成。
 
+管理员通过 `GET /api/v1/admin/users/{id}/balance-history` 查询余额及并发调整，`type=admin_balance|admin_concurrency` 精确筛选，省略时返回两类；其他类型返回空列表。`total_recharged` 为该用户所有正数 `admin_balance` 记录的精确总和，包含创建时初始余额和 set 操作的正差额，不减去扣减记录，不受类型或分页影响，也不改写用户表的同名字段。条目保留原 value、notes、内部 code、used_by 和时间等账本字段；总数、金额和页面来自同一只读快照。默认按 used_at（空时采用 created_at）及 ID 倒序；显式 type 沿用 used_at 倒序、空值在前、同值 ID 倒序。管理员可查询已删除用户的账本，不存在的用户返回空结果；普通用户和客户端 Key 无权访问。
+
 用户通过 `POST /api/v1/keys` 创建自己的 Key，可携带 `Idempotency-Key`。同一操作内该标识保留 24 小时，相同用户和请求重放首次结果（包括原 Key、ID、到期时间），不同用户或请求返回 409；不要跨用户复用标识。创建和重放记录在一个数据库事务中提交，写入失败全部回滚；重放不会重新启用已删除的 Key。省略幂等键时每次创建独立 Key。重放同时返回 `Idempotency-Replayed: true` 和 `X-Idempotency-Replayed: true`。
 
 `GET /api/v1/keys` 支持名称或 Key 的 `search`（最多 100 字节，按字面子串匹配）、`status`、`group_id` 筛选；`group_id=0` 只查询未分组 Key。`sort_by` 支持 id/name/status/created_at/expires_at/last_used_at/current_concurrency，默认 created_at；`sort_order=asc|desc` 默认 desc，相同值以 ID 排序，筛选和排序在分页前执行。管理员按用户或分组查询使用同一查询逻辑，查询参数不能扩大路径限定范围。修改或清除过期时间会将 `expired` Key 恢复为 active（新时间须在未来），人工 inactive 和 quota_exhausted 不因此恢复；显式 status 优先，额度和窗口计数只在显式 reset 时清零。

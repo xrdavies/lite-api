@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 )
 
 func (a *App) adjustBalance(w http.ResponseWriter, r *http.Request) error {
@@ -78,11 +80,31 @@ func (a *App) balanceHistory(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	page, size := pagination(r)
-	var total int
-	if err = a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM redeem_codes WHERE used_by=$1 AND type IN ('admin_balance','admin_concurrency')", id).Scan(&total); err != nil {
+	codeType := r.URL.Query().Get("type")
+	if len(codeType) > 20 || !utf8.ValidString(codeType) || strings.ContainsRune(codeType, 0) {
+		return bad("invalid balance history type")
+	}
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(h) FROM (SELECT id,type,value,status,used_at,created_at,notes FROM redeem_codes WHERE used_by=$1 AND type IN ('admin_balance','admin_concurrency') ORDER BY id DESC LIMIT $2 OFFSET $3) h`, id, size, (page-1)*size)
+	defer tx.Rollback()
+	// Keep the internal adjustment ledger separate from excluded redemption and
+	// referral products. The positive balance sum is independent of the filter.
+	const where = " WHERE used_by=$1 AND type IN ('admin_balance','admin_concurrency')"
+	var total int
+	var recharged string
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FILTER (WHERE $2='' OR type=$2),
+ COALESCE(sum(value) FILTER (WHERE type='admin_balance' AND value>0),0)::text FROM redeem_codes`+where, id, codeType).Scan(&total, &recharged); err != nil {
+		return err
+	}
+	order := "COALESCE(used_at,created_at) DESC,id DESC"
+	if codeType != "" {
+		order = "used_at DESC,id DESC"
+	}
+	rows, err := tx.QueryContext(r.Context(), `SELECT to_jsonb(h) FROM
+ (SELECT id,code,type,value,status,used_by,used_at,created_at,COALESCE(notes,'') AS notes,group_id,validity_days,expires_at
+ FROM redeem_codes`+where+` AND ($2='' OR type=$2) ORDER BY `+order+` LIMIT $3 OFFSET $4) h`, id, codeType, size, (page-1)*size)
 	if err != nil {
 		return err
 	}
@@ -90,5 +112,6 @@ func (a *App) balanceHistory(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return pageReply(w, items, total, page, size)
+	return reply(w, map[string]any{"items": items, "total": total, "page": page, "page_size": size,
+		"pages": max(1, (total+size-1)/size), "total_recharged": json.Number(recharged)})
 }

@@ -116,6 +116,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testUpstreamRequestIDs(t, a, admin)
 	testKeyManagement(t, a, admin)
 	testUserQueries(t, a, admin)
+	testBalanceHistory(t, a, admin)
 	group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Private team", "platform": "openai", "is_exclusive": true})
 	gid := int64(group["id"].(float64))
 	expect(403, "POST", "/api/v1/keys", userToken, map[string]any{"name": "unauthorized group", "group_id": gid})
