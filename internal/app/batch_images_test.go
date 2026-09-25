@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,12 @@ import (
 )
 
 func TestBatchImageInputAndEnvelope(t *testing.T) {
+	for _, id := range []string{"../escape", "a/b", `a\b`, "..", "\r\n", strings.Repeat("猫", 80)} {
+		name := batchFilename(id, "png", 1)
+		if !utf8.ValidString(name) || path.Base(name) != name || strings.ContainsAny(name, "\\\r\n") || strings.Contains(name, "..") || !strings.HasSuffix(name, "_2.png") {
+			t.Fatal("unsafe batch filename", name)
+		}
+	}
 	in := batchImageRequest{Model: "gemini-3-pro-image-preview", Items: []batchImageInput{{ID: "a", Prompt: "private scene", Count: 2}}}
 	if err := in.normalize(); err != nil || len(in.Items) != 2 || in.Items[1].ID != "a_02" {
 		t.Fatal(in, err)
@@ -116,7 +124,7 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 	jobs := map[string]*providerJob{}
 	inputs := map[string][]string{}
 	uploads, creates, downloads, deletes, cancels := 0, 0, 0, 0, 0
-	unknownCreate, badOutput, changedOutput, cancelFailure := false, false, false, false
+	unknownCreate, badOutput, changedOutput, cancelFailure, allImages := false, false, false, false, false
 	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -224,7 +232,7 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 				if badOutput {
 					key = "unexpected"
 				}
-				if i > 0 || changedOutput {
+				if i > 0 && !allImages || changedOutput {
 					_ = enc.Encode(map[string]any{"key": key, "error": map[string]string{"message": "private upstream error"}})
 					continue
 				}
@@ -379,11 +387,155 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 	if !bytes.Equal(content.Body.Bytes(), png) {
 		t.Fatal("image changed")
 	}
+	kind, disposition, err := mime.ParseMediaType(content.Header().Get("Content-Disposition"))
+	if err != nil || kind != "attachment" || disposition["filename"] != "one_01.png" {
+		t.Fatal("image filename", disposition, err)
+	}
+	downloadedAt := func() *time.Time {
+		t.Helper()
+		var at *time.Time
+		if err := a.DB.QueryRow("SELECT downloaded_at FROM batch_image_jobs WHERE batch_id=$1", id).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	firstDownload := downloadedAt()
+	if firstDownload == nil {
+		t.Fatal("single image did not mark downloaded")
+	}
+	if w := must("GET", "/v1/images/batches?downloaded=true", key, nil, ""); !strings.Contains(w.Body.String(), id) {
+		t.Fatal("single image missing from downloaded list", w.Body.String())
+	}
 	archive := must("GET", path+"/download", key, nil, "")
 	z, err := zip.NewReader(bytes.NewReader(archive.Body.Bytes()), int64(archive.Body.Len()))
-	if err != nil || len(z.File) != 1 || z.File[0].Name != "000001_01.png" {
+	if err != nil || len(z.File) != 3 || z.File[0].Name != "images/one_01.png" {
 		t.Fatal("batch ZIP", err)
 	}
+	for _, file := range z.File {
+		reader, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch file.Name {
+		case "images/one_01.png":
+			if !bytes.Equal(data, png) {
+				t.Fatal("ZIP image changed")
+			}
+		case "manifest.json":
+			var manifest struct {
+				BatchID string `json:"batch_id"`
+				Model   string
+				Count   int `json:"item_count"`
+				Success int `json:"success_count"`
+				Failed  int `json:"fail_count"`
+				Files   []map[string]any
+			}
+			if json.Unmarshal(data, &manifest) != nil || manifest.BatchID != id || manifest.Model != "team-image" || manifest.Count != 2 || manifest.Success != 1 || manifest.Failed != 1 || len(manifest.Files) != 1 || manifest.Files[0]["custom_id"] != "one_01" || manifest.Files[0]["filename"] != "images/one_01.png" || manifest.Files[0]["mime_type"] != "image/png" || manifest.Files[0]["image_index"] != float64(0) {
+				t.Fatal("ZIP manifest", string(data))
+			}
+		case "errors.json":
+			var failures []map[string]string
+			if json.Unmarshal(data, &failures) != nil || len(failures) != 1 || failures[0]["custom_id"] != "one_02" || failures[0]["code"] != "PROVIDER_ITEM_FAILED" || strings.Contains(string(data), "private upstream error") {
+				t.Fatal("ZIP errors", string(data))
+			}
+		default:
+			t.Fatal("unexpected archive file", file.Name)
+		}
+	}
+	if at := downloadedAt(); at == nil || !at.Equal(*firstDownload) {
+		t.Fatal("download replaced first timestamp", at)
+	}
+	for _, value := range []string{"0", "-1", "201", "invalid"} {
+		if w := call("GET", path+"/download?max_items="+value, key, nil, ""); w.Code != 400 {
+			t.Fatal("invalid ZIP limit", value, w.Code)
+		}
+	}
+	must("GET", path+"/download?max_items=1", key, nil, "")
+	// Fail the status write after successful delivery; never append JSON to a file.
+	execSQL := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execSQL("UPDATE batch_image_jobs SET downloaded_at=NULL WHERE batch_id=$1", id)
+	execSQL("ALTER TABLE batch_image_jobs ADD CONSTRAINT test_batch_download_failure CHECK(batch_id<>'" + id + "' OR downloaded_at IS NULL) NOT VALID")
+	defer a.DB.Exec("ALTER TABLE batch_image_jobs DROP CONSTRAINT IF EXISTS test_batch_download_failure")
+	for _, suffix := range []string{"/items/one_01/content", "/download"} {
+		w := must("GET", path+suffix, key, nil, "")
+		if w.Header().Get("Content-Length") != fmt.Sprint(w.Body.Len()) || downloadedAt() != nil {
+			t.Fatal("status failure corrupted file", suffix, w.Body.String())
+		}
+	}
+	execSQL("ALTER TABLE batch_image_jobs DROP CONSTRAINT test_batch_download_failure")
+	// Interrupted writes must neither mark downloads nor append an error document.
+	for _, suffix := range []string{"/items/one_01/content", "/download"} {
+		r := httptest.NewRequest("GET", path+suffix, nil)
+		r.RemoteAddr = "192.0.2.189:1234"
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := &batchInterruptedWriter{ResponseRecorder: httptest.NewRecorder()}
+		b.Handler().ServeHTTP(w, r)
+		if w.writes != 1 || downloadedAt() != nil {
+			t.Fatal("interrupted download", suffix, w.writes)
+		}
+	}
+	must("GET", path+"/download", key, nil, "")
+	if downloadedAt() == nil {
+		t.Fatal("ZIP did not mark downloaded")
+	}
+	// Distinct custom IDs can collapse to one sanitized name; the manifest must
+	// still map each to its own ZIP entry without changing settled billing.
+	storedJob, err := b.loadBatchJob(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	originalKeys := jobs[storedJob.ProviderJob].Keys
+	jobs[storedJob.ProviderJob].Keys = []string{"a/b", `a\b`}
+	allImages = true
+	mu.Unlock()
+	execSQL(`UPDATE batch_image_items SET custom_id=CASE custom_id WHEN 'one_01' THEN 'a/b' ELSE $2 END,status='success',image_count=1,mime_type='image/png',file_extension='png',error_code=NULL,error_message=NULL WHERE job_id=$1`, id, `a\b`)
+	if w := call("GET", path+"/download?max_items=1", key, nil, ""); w.Code != 400 {
+		t.Fatal("ZIP item cap", w.Code)
+	}
+	collision := must("GET", path+"/download", key, nil, "")
+	cz, err := zip.NewReader(bytes.NewReader(collision.Body.Bytes()), int64(collision.Body.Len()))
+	if err != nil || len(cz.File) != 4 || cz.File[0].Name == cz.File[1].Name {
+		t.Fatal("ZIP filename collision", err)
+	}
+	reader, err := cz.File[2].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct{ Files []map[string]any }
+	err = json.NewDecoder(reader).Decode(&manifest)
+	reader.Close()
+	if err != nil || len(manifest.Files) != 2 || manifest.Files[0]["custom_id"] != "a/b" || manifest.Files[1]["custom_id"] != `a\b` || manifest.Files[0]["filename"] != cz.File[0].Name || manifest.Files[1]["filename"] != cz.File[1].Name {
+		t.Fatal("collision manifest", manifest, err)
+	}
+	reader, err = cz.File[3].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noFailures []map[string]string
+	err = json.NewDecoder(reader).Decode(&noFailures)
+	reader.Close()
+	if err != nil || noFailures == nil || len(noFailures) != 0 {
+		t.Fatal("successful ZIP error list", noFailures, err)
+	}
+	execSQL(`UPDATE batch_image_items SET custom_id='one_01' WHERE job_id=$1 AND custom_id='a/b'`, id)
+	execSQL(`UPDATE batch_image_items SET custom_id='one_02',status='failed',image_count=0,mime_type=NULL,file_extension=NULL,error_code='PROVIDER_ITEM_FAILED',error_message='provider could not generate this item' WHERE job_id=$1 AND custom_id=$2`, id, `a\b`)
+	mu.Lock()
+	jobs[storedJob.ProviderJob].Keys = originalKeys
+	allImages = false
+	mu.Unlock()
+	balances("9.87500000", "0.00000000")
+	usageCount(id, 1)
 	items := must("GET", path+"/items?limit=1", key, nil, "")
 	if !strings.Contains(items.Body.String(), `"has_more":true`) {
 		t.Fatal("item pagination")
@@ -493,6 +645,16 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 		t.Fatal("provider lifecycle", uploads, creates, cancels, deletes, downloads)
 	}
 	testBatchImageQueries(t, b, uid, kid, key, other, user)
+}
+
+type batchInterruptedWriter struct {
+	*httptest.ResponseRecorder
+	writes int
+}
+
+func (w *batchInterruptedWriter) Write(data []byte) (int, error) {
+	w.writes++
+	return 0, io.ErrClosedPipe
 }
 
 func testBatchImageQueries(t *testing.T, a *App, uid, kid int64, key, other, login string) {
