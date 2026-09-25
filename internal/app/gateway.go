@@ -582,7 +582,9 @@ func (a *App) gatewayRoutes() {
 	for _, path := range []string{"/v1/realtime", "/realtime"} {
 		a.mux.HandleFunc("GET "+path, a.grokRealtime)
 	}
-	a.mux.HandleFunc("GET /v1/billing", a.gatewayBilling)
+	for _, path := range []string{"/v1/billing", "/v1/lite-api/billing"} {
+		a.mux.HandleFunc("GET "+path, a.gatewayBilling)
+	}
 	a.mux.HandleFunc("GET /v1/usage", a.gatewayUsage)
 	for _, protocol := range []string{"web_search", "x_search", "tts", "stt"} {
 		for _, prefix := range []string{"/v1/", "/"} {

@@ -384,8 +384,10 @@ func testGateway(t *testing.T, a *App, admin string) {
 	if w := call("GET", "/api/v1/admin/usage", token, nil); w.Code != 403 {
 		t.Fatal("nonadmin usage access", w.Code)
 	}
-	if w := call("GET", "/v1/billing", key, nil); w.Code != 200 || !strings.Contains(w.Body.String(), "quota_used") {
-		t.Fatal("billing introspection", w.Code, w.Body.String())
+	for _, path := range []string{"/v1/billing", "/v1/lite-api/billing"} {
+		if w := call("GET", path, key, nil); w.Code != 200 || !strings.Contains(w.Body.String(), "quota_used") {
+			t.Fatal("billing introspection", path, w.Code, w.Body.String())
+		}
 	}
 	// 5h expiration resets only its window on the next charge; total quota remains cumulative.
 	if _, err := a.DB.Exec("UPDATE api_keys SET rate_limit_5h=0.01,usage_5h=0.01,window_5h_start=now() WHERE id=$1", kid); err != nil {
