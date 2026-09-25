@@ -321,6 +321,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testUsageErrors(t, a, admin, otherToken)
 	testErrorRequestMetadata(t, a, admin)
 	testGroupChannelQueries(t, a, admin, otherToken)
+	testGroupReplacement(t, a, admin)
 	testStreamTimeout(t, a, admin, otherToken)
 	testAnthropicPolicy(t, a, admin, otherToken)
 	testBillingProbes(t, a, admin, otherToken)

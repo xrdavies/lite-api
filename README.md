@@ -47,6 +47,8 @@ Key 列表、详情和修改响应包含所属 `user` 和 `group`。用户关联
 
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。
 
+管理员通过 `POST /api/v1/admin/users/{id}/replace-group` 提交 `old_group_id`、`new_group_id`，将该用户未删除的旧组 Key 整体改绑，并授予新组权限、移除旧组权限。目标必须是活跃的专属标准 API Key 分组；不支持公开、订阅或 OAuth 专属目标。操作在一个事务中完成，目标状态并发变更也须通过校验；保留 Key 状态、额度及消费计数、余额和原有专属倍率，返回 `migrated_keys`。重复执行已完成的替换返回零，不重置 Key。
+
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。
 
 `GET /api/v1/admin/users/{id}/usage` 查询指定用户的真实用量汇总，`period=day|week|month`（默认 month）分别从 Asia/Shanghai 当日、周一或当月首日零点统计到查询时刻，返回请求数、包含缓存的 token 总量、用户实际费用和已记录耗时的平均值。`GET /api/v1/admin/accounts/{id}/today-stats` 返回上游账号当日的 requests、tokens、cost、standard_cost、user_cost；账号成本使用历史 `COALESCE(account_stats_cost,total_cost) × COALESCE(account_rate_multiplier,1)`，标准费用使用 total_cost，用户费用使用 actual_cost。金额由数据库精确汇总，当前倍率修改不改变历史结果；已删除 Key 的消费继续计入，不存在或已删除的用户/账号返回 404。两个接口仅管理员可用，不查询上游或调用复杂统计任务。

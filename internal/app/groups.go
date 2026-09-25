@@ -645,12 +645,14 @@ func (a *App) replaceGroup(w http.ResponseWriter, r *http.Request) error {
 	if err = tx.QueryRowContext(r.Context(), "SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", uid).Scan(&id); err != nil {
 		return err
 	}
-	var platform string
-	if err = tx.QueryRowContext(r.Context(), "SELECT platform FROM groups WHERE id=$1 AND deleted_at IS NULL AND status='active' AND subscription_type='standard' AND NOT require_oauth_only", in.New).Scan(&platform); err != nil {
+	var platform, status, subscription string
+	var exclusive, oauthOnly bool
+	// Hold the target's eligibility through the permission and Key updates.
+	if err = tx.QueryRowContext(r.Context(), "SELECT platform,status,subscription_type,is_exclusive,require_oauth_only FROM groups WHERE id=$1 AND deleted_at IS NULL FOR SHARE", in.New).Scan(&platform, &status, &subscription, &exclusive, &oauthOnly); err != nil {
 		return err
 	}
-	if !supportedPlatform(platform) && platform != "composite" {
-		return bad("unsupported platform")
+	if status != "active" || !exclusive || subscription != "standard" || oauthOnly || !supportedPlatform(platform) && platform != "composite" {
+		return bad("target must be an active exclusive API key group")
 	}
 	if _, err = tx.ExecContext(r.Context(), "INSERT INTO user_allowed_groups(user_id,group_id) VALUES($1,$2) ON CONFLICT DO NOTHING", uid, in.New); err != nil {
 		return err

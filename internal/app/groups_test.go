@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testGroupChannelQueries(t *testing.T, a *App, admin, user string) {
@@ -220,5 +222,175 @@ func testGroupChannelQueries(t *testing.T, a *App, admin, user string) {
 	check(groups, "sort_by=id", 4, gids[0], gids[1], gids[2], gids[3])
 	if w := call("GET", fmt.Sprintf("%s/%d", groups, deleted), admin, nil); w.Code != 404 {
 		t.Fatal("deleted group visible", w.Code)
+	}
+}
+
+func testGroupReplacement(t *testing.T, a *App, admin string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.244:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	must := func(method, path, token string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, token, body)
+		var out struct{ Data map[string]any }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gids := []int64{}
+	for _, name := range []string{"old", "new", "unrelated"} {
+		group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "replacement-" + name, "is_exclusive": true})
+		gid := int64(group["id"].(float64))
+		gids = append(gids, gid)
+		defer exec("UPDATE groups SET deleted_at=now() WHERE id=$1", gid)
+	}
+	old, target, unrelated := gids[0], gids[1], gids[2]
+	user := must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "replace-group@example.test", "password": "replace-password", "balance": 12.34567891, "allowed_groups": []int64{old, unrelated}})
+	uid := int64(user["id"].(float64))
+	path := fmt.Sprintf("/api/v1/admin/users/%d/replace-group", uid)
+	token := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "replace-group@example.test", "password": "replace-password"})["access_token"].(string)
+	keys := []int64{}
+	for i, gid := range []int64{old, old, old, unrelated} {
+		key := must("POST", "/api/v1/keys", token, map[string]any{"name": fmt.Sprint("replacement-", i), "group_id": gid})
+		keys = append(keys, int64(key["id"].(float64)))
+	}
+	exec("UPDATE api_keys SET status='inactive' WHERE id=$1", keys[1])
+	must("DELETE", fmt.Sprintf("/api/v1/keys/%d", keys[2]), token, nil)
+	exec("UPDATE api_keys SET quota_used=1.23456789,usage_5h=0.1,usage_1d=0.2,usage_7d=0.3,window_5h_start=now(),window_1d_start=now(),window_7d_start=now() WHERE user_id=$1", uid)
+	exec("INSERT INTO user_group_rate_multipliers(user_id,group_id,rate_multiplier) VALUES($1,$2,0.75)", uid, old)
+	snapshot := func(includeAssignment bool) string {
+		t.Helper()
+		projection := "to_jsonb(k)-'updated_at'"
+		if !includeAssignment {
+			projection += "-'group_id'"
+		}
+		var raw string
+		err := a.DB.QueryRow(`SELECT jsonb_build_object('keys',(SELECT jsonb_agg(`+projection+` ORDER BY id) FROM api_keys k WHERE user_id=$1),
+ 'balance',balance,'rates',(SELECT jsonb_agg(to_jsonb(m) ORDER BY group_id) FROM user_group_rate_multipliers m WHERE user_id=$1))::text FROM users WHERE id=$1`, uid).Scan(&raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	assignments := func(wantKeys, wantGroups []int64) {
+		t.Helper()
+		var raw []byte
+		if err := a.DB.QueryRow(`SELECT jsonb_build_object('keys',(SELECT jsonb_agg(group_id ORDER BY id) FROM api_keys WHERE user_id=$1),
+ 'groups',(SELECT jsonb_agg(group_id ORDER BY group_id) FROM user_allowed_groups WHERE user_id=$1))`, uid).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var got struct{ Keys, Groups []int64 }
+		if json.Unmarshal(raw, &got) != nil || !slices.Equal(got.Keys, wantKeys) || !slices.Equal(got.Groups, wantGroups) {
+			t.Fatal("group assignment mismatch", string(raw))
+		}
+	}
+	body := map[string]int64{"old_group_id": old, "new_group_id": target}
+	original, preserved := snapshot(true), snapshot(false)
+	for _, identity := range []struct {
+		token string
+		code  int
+	}{{"", 401}, {token, 403}} {
+		if w := call("POST", path, identity.token, body); w.Code != identity.code {
+			t.Fatal("replacement authorization", w.Code)
+		}
+	}
+	for _, invalid := range []map[string]int64{{"old_group_id": old, "new_group_id": old}, {"old_group_id": 0, "new_group_id": target}} {
+		if w := call("POST", path, admin, invalid); w.Code != 400 {
+			t.Fatal("invalid replacement", w.Code)
+		}
+	}
+	for _, change := range []string{"is_exclusive=false", "status='inactive'", "subscription_type='subscription'", "require_oauth_only=true", "platform='unsupported'", "deleted_at=now()"} {
+		exec("UPDATE groups SET "+change+" WHERE id=$1", target)
+		want := 400
+		if change == "deleted_at=now()" {
+			want = 404
+		}
+		if w := call("POST", path, admin, body); w.Code != want {
+			t.Fatal("ineligible target", change, w.Code, w.Body.String())
+		}
+		exec("UPDATE groups SET is_exclusive=true,status='active',subscription_type='standard',require_oauth_only=false,platform='openai',deleted_at=NULL WHERE id=$1", target)
+	}
+	// A failed Key update must also roll back the newly granted permission.
+	exec(fmt.Sprintf("ALTER TABLE api_keys ADD CONSTRAINT test_group_replacement CHECK(group_id<>%d) NOT VALID", target))
+	defer a.DB.Exec("ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS test_group_replacement")
+	if w := call("POST", path, admin, body); w.Code != 500 {
+		t.Fatal("replacement SQL failure", w.Code, w.Body.String())
+	}
+	exec("ALTER TABLE api_keys DROP CONSTRAINT test_group_replacement")
+	assignments([]int64{old, old, old, unrelated}, []int64{old, unrelated})
+	if snapshot(true) != original {
+		t.Fatal("rejected replacement changed Key or financial state")
+	}
+	// Observe a real row-lock wait, then commit an incompatible target change.
+	tx, err := a.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var pid int
+	if err = tx.QueryRow("SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec("UPDATE groups SET is_exclusive=false WHERE id=$1", target); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- call("POST", path, admin, body) }()
+	blocked := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		if err = a.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))", pid).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !blocked {
+		t.Fatal("replacement did not lock target eligibility")
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case w := <-done:
+		if w.Code != 400 {
+			t.Fatal("concurrent target change accepted", w.Code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("replacement remained blocked")
+	}
+	exec("UPDATE groups SET is_exclusive=true WHERE id=$1", target)
+	if v := must("POST", path, admin, body); v["migrated_keys"] != float64(2) {
+		t.Fatal("replacement count", v)
+	}
+	assignments([]int64{target, target, old, unrelated}, []int64{target, unrelated})
+	if snapshot(false) != preserved {
+		t.Fatal("replacement changed Key settings, counters or balances")
+	}
+	if v := must("POST", path, admin, body); v["migrated_keys"] != float64(0) {
+		t.Fatal("replacement repeated migration", v)
+	}
+	if w := call("POST", "/api/v1/keys", token, map[string]any{"name": "revoked", "group_id": old}); w.Code != 403 {
+		t.Fatal("old group still authorized", w.Code)
+	}
+	must("POST", "/api/v1/keys", token, map[string]any{"name": "granted", "group_id": target})
+	must("DELETE", fmt.Sprintf("/api/v1/admin/users/%d", uid), admin, nil)
+	if w := call("POST", path, admin, body); w.Code != 404 {
+		t.Fatal("deleted user replacement", w.Code)
 	}
 }
