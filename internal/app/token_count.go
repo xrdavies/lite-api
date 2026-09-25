@@ -32,6 +32,9 @@ func estimateInputTokens(raw []byte) (int, error) {
 		if text == "" {
 			return nil
 		}
+		if !utf8.ValidString(text) {
+			return bad("local token counting requires valid UTF-8")
+		}
 		// ponytail: split long strings at UTF-8 boundaries to bound quadratic BPE
 		// work. Chunk boundaries can alter the estimate; exact counts need upstream.
 		for len(text) > 0 {

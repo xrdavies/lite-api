@@ -49,6 +49,12 @@ func TestLocalInputTokens(t *testing.T) {
 			t.Fatal("invalid count input", raw)
 		}
 	}
+	// RawMessage preserves malformed bytes inside tool schemas. Reject these
+	// before finding UTF-8 chunk boundaries, including long continuation runs.
+	malformed := `{"input":[],"tools":[{"type":"function","description":"` + strings.Repeat("\x80", 5000) + `"}]}`
+	if _, err := estimateInputTokens([]byte(malformed)); err == nil {
+		t.Fatal("invalid UTF-8 in tool schema accepted")
+	}
 	for i := 0; i < 8; i++ {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
