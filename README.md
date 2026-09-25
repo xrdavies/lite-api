@@ -37,6 +37,10 @@ go build -o bin/lite-api ./cmd/lite-api
 
 Key 列表和详情返回 `current_concurrency`、`last_used_ip` 及有效窗口用量。并发是当前单实例中已取得用户槽位、尚未完成的请求数，包含等待账号槽位的请求；尚在等待用户槽位、空闲 WebSocket 和供应商后台执行中的任务不计入。查询及按并发排序使用同一快照，结束/失败/取消后释放；进程重启从零开始。`last_used_ip` 来自该 Key 最近一条含 IP 的已记录用量。过期或未初始化窗口的 `usage_5h/1d/7d` 返回 0，只有有效窗口返回对应 `reset_5h_at/1d_at/7d_at`；查询不改写数据库累计值。
 
+Key 列表、详情和修改响应包含所属 `user` 和 `group`。用户关联只返回基础资料及 `allowed_groups`；分组关联返回公开价格、能力和请求策略，不包含内部账号路由、成本策略或管理员备注。用户已失去分组权限、分组停用或删除时，`group` 为 null，原 `group_id` 保留；管理员按用户/分组查询可查看未删除的停用或未授权分组。管理员改组自动授予权限时，同一事务返回 `granted_group_id`、`granted_group_name` 和更新后的关联信息。
+
+`GET /api/v1/groups/available` 与 Key 中的分组返回基础 `rate_multiplier`；本人专属倍率通过 `/api/v1/groups/rates` 查询，实际扣费继续优先使用专属值。管理员用户列表及详情返回 `allowed_groups`、`group_rates` 和 `last_used_at`；最近消费时间来自原始用量，删除 Key 后仍保留，登录不算消费。`notes`、`restrict_public_groups`、`group_rates` 和用户级 `last_used_at` 不进入登录、个人资料或 Key 中的用户关联。
+
 管理员通过 `GET /api/v1/admin/groups/{id}/rate-multipliers` 查询用户专属倍率和 RPM。`PUT .../rate-multipliers` 接受 `{"entries":[{"user_id":1,"rate_multiplier":0.5}]}`，替换整组倍率，保留 RPM；`PUT .../rpm-overrides` 接受 `{"entries":[{"user_id":1,"rpm_override":10}]}`，替换整组 RPM，保留倍率。未列出的用户恢复该项默认值，RPM 的 `null` 为恢复默认，`0` 为免除该组限制。专属配置不授予分组访问权。`DELETE .../rpm-overrides` 只清除 RPM；沿用既有行为，`DELETE .../rate-multipliers` 清除整组专属记录（包括 RPM），若只清倍率请使用 PUT 空 `entries`。用户编辑中的 `group_rates` 省略时不修改，空对象清除该用户所有专属倍率，值为 `null` 只清该组倍率，均保留 RPM。
 
 用户 `rpm_limit` 是跨 Key、跨分组的全局上限；分组 `rpm_limit` 按用户分别限制，专属 `rpm_override` 只覆盖分组值，不能绕过用户全局上限。`GET /api/v1/admin/users/{id}/rpm-status` 返回当前分钟用户总量、各 Key 所属分组的计数及 group/override 来源；无倍率/RPM 配置也会统计获准请求，拒绝请求不增加计数。修改配置立即生效并保留本分钟计数；Redis 故障返回 503。

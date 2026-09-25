@@ -15,6 +15,19 @@ func supportedPlatform(platform string) bool {
 	return false
 }
 
+// Keep the user-facing projection explicit: account routing and administrator
+// pricing policies must not become public when the table gains a column.
+const publicGroupView = `(SELECT to_jsonb(visible) FROM (SELECT
+ g.id,g.name,COALESCE(g.description,'') AS description,g.platform,g.rate_multiplier,g.is_exclusive,g.status,
+ g.subscription_type,g.daily_limit_usd,g.weekly_limit_usd,g.monthly_limit_usd,g.long_context_pricing_enabled,
+ g.allow_image_generation,g.allow_batch_image_generation,g.image_rate_independent,g.image_rate_multiplier,
+ g.image_price_1k,g.image_price_2k,g.image_price_4k,g.batch_image_discount_multiplier,g.batch_image_hold_multiplier,
+ g.video_rate_independent,g.video_rate_multiplier,g.video_price_480p,g.video_price_720p,g.video_price_1080p,g.video_model_prices,
+ g.web_search_price_per_call,g.search_price_per_1k,g.audio_realtime_price_per_min,g.audio_tts_price_per_million_chars,g.audio_stt_price_per_hour,
+ g.peak_rate_enabled,g.peak_start,g.peak_end,g.peak_rate_multiplier,g.claude_code_only,g.fallback_group_id,g.fallback_group_id_on_invalid_request,
+ g.allow_messages_dispatch,g.rpm_limit,g.max_reasoning_effort,g.max_reasoning_effort_over_limit,g.reasoning_effort_mappings,g.created_at,g.updated_at
+ ) visible)`
+
 type groupInput struct {
 	audioPrices
 	videoPrices
@@ -499,7 +512,7 @@ func (a *App) deleteGroup(w http.ResponseWriter, r *http.Request) error {
 	return reply(w, map[string]bool{"deleted": true})
 }
 func (a *App) availableGroups(w http.ResponseWriter, r *http.Request) error {
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT jsonb_build_object('id',g.id,'name',g.name,'description',g.description,'platform',g.platform,'rate_multiplier',COALESCE(m.rate_multiplier,g.rate_multiplier),'is_exclusive',g.is_exclusive,'status',g.status,'subscription_type',g.subscription_type) FROM groups g JOIN users u ON u.id=$1 LEFT JOIN user_group_rate_multipliers m ON m.user_id=u.id AND m.group_id=g.id WHERE g.deleted_at IS NULL AND g.status='active' AND g.subscription_type='standard' AND NOT g.require_oauth_only AND g.platform IN ('openai','anthropic','gemini','grok','kimi','zhipu','deepseek','minimax','composite') AND ((NOT g.is_exclusive AND NOT u.restrict_public_groups) OR EXISTS(SELECT 1 FROM user_allowed_groups WHERE user_id=u.id AND group_id=g.id)) ORDER BY g.sort_order,g.id`, current(r).ID)
+	rows, err := a.DB.QueryContext(r.Context(), `SELECT `+publicGroupView+` FROM groups g JOIN users u ON u.id=$1 WHERE g.deleted_at IS NULL AND g.status='active' AND g.subscription_type='standard' AND NOT g.require_oauth_only AND g.platform IN ('openai','anthropic','gemini','grok','kimi','zhipu','deepseek','minimax','composite') AND ((NOT g.is_exclusive AND NOT u.restrict_public_groups) OR EXISTS(SELECT 1 FROM user_allowed_groups WHERE user_id=u.id AND group_id=g.id)) ORDER BY g.sort_order,g.id`, current(r).ID)
 	if err != nil {
 		return err
 	}

@@ -15,14 +15,25 @@ type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-const userFields = "id,email,username,role,balance,frozen_balance,total_recharged,concurrency,rpm_limit,status,restrict_public_groups,created_at,updated_at,last_login_at,last_active_at"
+const userFields = "id,email,username,role,balance,frozen_balance,total_recharged,concurrency,rpm_limit,status,created_at,updated_at,last_login_at,last_active_at"
 
-func (a *App) userJSON(ctx context.Context, q queryer, id int64, admin bool) (json.RawMessage, error) {
+func userView(admin bool) string {
 	fields := userFields
 	if admin {
-		fields += ",notes"
+		fields += ",notes,restrict_public_groups"
 	}
-	return jsonRow(q.QueryRowContext(ctx, `SELECT to_jsonb(u) || jsonb_build_object('allowed_groups',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM user_allowed_groups WHERE user_id=u.id),'[]'::jsonb)) FROM (SELECT `+fields+` FROM users WHERE id=$1 AND deleted_at IS NULL) u`, id))
+	view := `(SELECT to_jsonb(profile) FROM (SELECT u.` + strings.ReplaceAll(fields, ",", ",u.") + `) profile)
+ || jsonb_build_object('allowed_groups',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM user_allowed_groups WHERE user_id=u.id),'[]'::jsonb))`
+	if admin {
+		view += ` || jsonb_build_object(
+ 'last_used_at',(SELECT max(created_at) FROM usage_logs WHERE user_id=u.id),
+ 'group_rates',COALESCE((SELECT jsonb_object_agg(group_id::text,rate_multiplier) FROM user_group_rate_multipliers WHERE user_id=u.id AND rate_multiplier IS NOT NULL),'{}'::jsonb))`
+	}
+	return view
+}
+
+func (a *App) userJSON(ctx context.Context, q queryer, id int64, admin bool) (json.RawMessage, error) {
+	return jsonRow(q.QueryRowContext(ctx, "SELECT "+userView(admin)+" FROM users u WHERE id=$1 AND deleted_at IS NULL", id))
 }
 func (a *App) profile(w http.ResponseWriter, r *http.Request) error {
 	u, err := a.userJSON(r.Context(), a.DB, current(r).ID, false)
@@ -422,7 +433,7 @@ func (a *App) listUsers(w http.ResponseWriter, r *http.Request) error {
 	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM users"+where, search, status, role).Scan(&total); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(u) FROM (SELECT "+userFields+",notes FROM users"+where+" ORDER BY id DESC LIMIT $4 OFFSET $5) u", search, status, role, size, (page-1)*size)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT "+userView(true)+" FROM users u"+where+" ORDER BY id DESC LIMIT $4 OFFSET $5", search, status, role, size, (page-1)*size)
 	if err != nil {
 		return err
 	}

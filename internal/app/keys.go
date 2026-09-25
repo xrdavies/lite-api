@@ -111,11 +111,23 @@ const keyView = `to_jsonb(k)-'deleted_at' || jsonb_build_object(
  || CASE WHEN k.window_1d_start+interval '24 hours'>now() THEN jsonb_build_object('reset_1d_at',k.window_1d_start+interval '24 hours') ELSE '{}'::jsonb END
  || CASE WHEN k.window_7d_start+interval '168 hours'>now() THEN jsonb_build_object('reset_7d_at',k.window_7d_start+interval '168 hours') ELSE '{}'::jsonb END`
 
+func keyRelations(admin bool) string {
+	visibility := `g.status='active' AND g.subscription_type='standard' AND NOT g.require_oauth_only
+ AND g.platform IN ('openai','anthropic','gemini','grok','kimi','zhipu','deepseek','minimax','composite')
+ AND ((NOT g.is_exclusive AND NOT u.restrict_public_groups) OR EXISTS(SELECT 1 FROM user_allowed_groups WHERE user_id=u.id AND group_id=g.id))`
+	if admin {
+		visibility = "true"
+	}
+	return `jsonb_build_object('group',(SELECT ` + publicGroupView + ` FROM groups g JOIN users u ON u.id=k.user_id
+ WHERE g.id=k.group_id AND g.deleted_at IS NULL AND ` + visibility + `),
+ 'user',(SELECT ` + userView(false) + ` FROM users u WHERE u.id=k.user_id AND u.deleted_at IS NULL))`
+}
+
 func (a *App) keyJSON(ctx context.Context, q queryer, id, uid int64) (json.RawMessage, error) {
 	a.gatewayMu.Lock()
 	count := a.gatewayActive[fmt.Sprintf("key:%d", id)]
 	a.gatewayMu.Unlock()
-	return jsonRow(q.QueryRowContext(ctx, "SELECT "+keyView+" || jsonb_build_object('current_concurrency',$3::int) FROM api_keys k WHERE id=$1 AND ($2::bigint=0 OR user_id=$2) AND deleted_at IS NULL", id, uid, count))
+	return jsonRow(q.QueryRowContext(ctx, "SELECT "+keyView+" || "+keyRelations(uid == 0)+" || jsonb_build_object('current_concurrency',$3::int) FROM api_keys k WHERE id=$1 AND ($2::bigint=0 OR user_id=$2) AND deleted_at IS NULL", id, uid, count))
 }
 func (a *App) createKey(w http.ResponseWriter, r *http.Request) error {
 	var in keyInput
@@ -255,7 +267,7 @@ func (a *App) keysFor(w http.ResponseWriter, r *http.Request, uid, gid int64) er
 	}
 	a.gatewayMu.Unlock()
 	snapshot, _ := json.Marshal(counts)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT "+keyView+" || jsonb_build_object('current_concurrency',COALESCE(($6::jsonb->>k.id::text)::int,0)) FROM api_keys k"+where+" ORDER BY "+order+" LIMIT $7 OFFSET $8", uid, gid, search, status, group, string(snapshot), size, (page-1)*size)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT "+keyView+" || "+keyRelations(strings.HasPrefix(r.URL.Path, "/api/v1/admin/"))+" || jsonb_build_object('current_concurrency',COALESCE(($6::jsonb->>k.id::text)::int,0)) FROM api_keys k"+where+" ORDER BY "+order+" LIMIT $7 OFFSET $8", uid, gid, search, status, group, string(snapshot), size, (page-1)*size)
 	if err != nil {
 		return err
 	}
@@ -443,10 +455,20 @@ func (a *App) adminKey(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	result := map[string]any{"api_key": data, "auto_granted_group_access": granted}
+	if granted {
+		var key struct {
+			Group struct{ Name string }
+		}
+		if err = json.Unmarshal(data, &key); err != nil {
+			return err
+		}
+		result["granted_group_id"], result["granted_group_name"] = *in.GroupID, key.Group.Name
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return reply(w, map[string]any{"api_key": data, "auto_granted_group_access": granted})
+	return reply(w, result)
 }
 func (a *App) keyRoutes() {
 	a.route("GET /api/v1/keys", "user", a.listKeys)
