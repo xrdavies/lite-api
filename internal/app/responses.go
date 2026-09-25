@@ -19,13 +19,35 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			}
 		}
 	}
-	in.Action = r.PathValue("action")
-	switch in.Action {
-	case "":
-	case "compact", "input_tokens":
-		in.Scope += "." + in.Action
-		in.CountOnly = in.Action == "input_tokens"
-		in.Action = "/" + in.Action
+	action := strings.TrimRight(r.PathValue("action"), "/")
+	switch {
+	case action == "":
+	case action == "compact", action == "input_tokens", strings.HasPrefix(action, "compact/"):
+		// Both endpoints are persisted in the existing VARCHAR(128) columns.
+		if len(r.URL.Path) > 128 || len("/backend-api/codex/responses/")+len(action) > 128 {
+			return in, missing()
+		}
+		segments := strings.Split(action, "/")
+		if len(segments) > 8 {
+			return in, missing()
+		}
+		for _, segment := range segments {
+			if len(segment) > 128 || strings.Trim(segment, ".") == "" {
+				return in, missing()
+			}
+			for _, c := range segment {
+				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("-_.", c)) {
+					return in, missing()
+				}
+			}
+		}
+		in.Scope += "." + action
+		if len(segments) > 1 {
+			// Keep the SQL scope bounded and separate each extension's replay.
+			in.Scope = "responses.compact." + digest(action)
+		}
+		in.CountOnly = action == "input_tokens"
+		in.Action = "/" + action
 		if in.Stream {
 			return in, bad("this Responses operation does not stream")
 		}
@@ -447,7 +469,7 @@ func (o *textObservation) observeResponses(data []byte) error {
 	if event.Type == "error" || event.Error != nil && string(event.Error) != "null" || event.Status == "failed" || event.Status == "cancelled" {
 		return &apiError{502, "upstream response failed"}
 	}
-	if event.Object != "response" && !(o.Action == "/compact" && event.Object == "response.compaction") {
+	if event.Object != "response" && !((o.Action == "/compact" || strings.HasPrefix(o.Action, "/compact/")) && event.Object == "response.compaction") {
 		return &apiError{502, "upstream returned an invalid response object"}
 	}
 	if !validResponseID(event.ID) || o.ResponseID != "" && o.ResponseID != event.ID {

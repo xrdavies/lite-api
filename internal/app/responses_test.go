@@ -13,6 +13,44 @@ import (
 
 const responseUsage = `"usage":{"input_tokens":20,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":3},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":6},"total_tokens":28}`
 
+func TestResponsesCompactionSubpaths(t *testing.T) {
+	parse := func(action string, stream bool) (textRequest, error) {
+		r := httptest.NewRequest("POST", "/responses/"+action, nil)
+		r.SetPathValue("action", action)
+		return parseResponsesRequest(r, textRequest{Protocol: "responses", Stream: stream}, map[string]json.RawMessage{"input": json.RawMessage(`"compact me"`)})
+	}
+	maxSegment := 128 - len("/backend-api/codex/responses/compact/")
+	for _, action := range []string{"compact", "compact/", "compact/detail", "compact/a-b_C.1/detail/", "compact/" + strings.Repeat("a", maxSegment), "compact/a/b/c/d/e/f/g", "input_tokens/"} {
+		in, err := parse(action, false)
+		want := "/" + strings.TrimRight(action, "/")
+		path, pathErr := in.upstreamPath("model")
+		if err != nil || in.Action != want || pathErr != nil || path != "/v1/responses"+want || len("gateway."+in.Scope+".9223372036854775807") > 128 {
+			t.Fatal("compaction path or idempotency scope", action, in, path, err, pathErr)
+		}
+		if _, err = parse(action, true); err == nil {
+			t.Fatal("streaming compaction/count accepted", action)
+		}
+		if in.CountOnly {
+			continue
+		}
+		o := textObservation{Protocol: "responses", Action: in.Action}
+		if err := o.observe([]byte(`{"object":"response.compaction","id":"cmp_test","output":[],` + responseUsage + `}`)); err != nil || !o.complete() || !o.HasUsage {
+			t.Fatal("compaction extension result", action, o, err)
+		}
+	}
+	for _, action := range []string{"compact//detail", "compact/.", "compact/..", "compact/...", "compact/%2e%2e", "compact/x?y", "compact/x#y", `compact/x\y`, "compact/中文", "compact/" + strings.Repeat("a", maxSegment+1), "compact/a/b/c/d/e/f/g/h", "compact-other", "resp_foreign/compact", "input_tokens/detail"} {
+		if _, err := parse(action, false); err == nil {
+			t.Fatal("unsafe or unknown operation accepted", action)
+		}
+	}
+	first, _ := parse("compact/detail", false)
+	alias, _ := parse("compact/detail/", false)
+	other, _ := parse("compact/detail.v2", false)
+	if first.Scope != alias.Scope || first.Scope == other.Scope {
+		t.Fatal("compaction extension replay scope collision")
+	}
+}
+
 func TestResponseItemReferences(t *testing.T) {
 	for _, item := range []string{`{"id":"msg_one"}`, `{"id":"msg_one","type":null}`, `{"id":"msg_one","type":"item_reference"}`} {
 		var body map[string]json.RawMessage
@@ -143,7 +181,7 @@ func testResponses(t *testing.T, a *App, admin string) {
 			_, _ = fmt.Fprint(w, `{"object":"response.input_tokens","input_tokens":20}`)
 			return
 		}
-		if r.URL.Path == "/v1/responses/compact" {
+		if r.URL.Path == "/v1/responses/compact" || r.URL.Path == "/v1/responses/compact/detail.v2" {
 			_, _ = fmt.Fprint(w, `{"object":"response.compaction","id":"cmp_test","output":[{"type":"compaction","encrypted_content":"opaque-content"}],`+responseUsage+`}`)
 			return
 		}
@@ -225,7 +263,7 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/responses/input_tokens", "/backend-api/codex/responses/input_tokens"} {
+	for _, path := range []string{"/responses/input_tokens", "/backend-api/codex/responses/input_tokens", "/v1/responses/input_tokens/"} {
 		if w := call(path, key, body, "response-count"); w.Code != 200 || calls.Load() != 1 || !strings.Contains(w.Body.String(), fmt.Sprintf(`"input_tokens":%d`, estimated)) {
 			t.Fatal("Responses token count", w.Code, w.Body.String())
 		}
@@ -237,7 +275,37 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if w := call("/v1/responses/compact", key, body, "response-compact"); w.Code != 200 || !strings.Contains(w.Body.String(), "opaque-content") {
 		t.Fatal("Responses compaction", w.Code, w.Body.String())
 	}
+	beforeCompact := calls.Load()
+	if w := call("/backend-api/codex/responses/compact/", key, body, "response-compact"); w.Code != 200 || calls.Load() != beforeCompact || w.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatal("compaction trailing slash changed replay scope", w.Code, w.Body.String())
+	}
+	for _, prefix := range []string{"/v1/responses", "/responses", "/backend-api/codex/responses"} {
+		for _, suffix := range []string{"/compact/detail.v2", "/compact/detail.v2/"} {
+			w := call(prefix+suffix, key, body, "response-compact")
+			if w.Code != 200 || !strings.Contains(w.Body.String(), "opaque-content") || calls.Load() != beforeCompact+1 {
+				t.Fatal("compaction extension path/alias/replay", prefix+suffix, w.Code, w.Body.String(), calls.Load())
+			}
+		}
+	}
+	var compactCost, upstreamEndpoint string
+	if err := a.DB.QueryRow(`SELECT count(*),min(actual_cost)::text,min(upstream_endpoint) FROM usage_logs WHERE api_key_id=$1 AND inbound_endpoint='/v1/responses/compact/detail.v2'`, kid).Scan(&logs, &compactCost, &upstreamEndpoint); err != nil || logs != 1 || compactCost != "0.0000750000" || upstreamEndpoint != "/v1/responses/compact/detail.v2" {
+		t.Fatal("compaction extension accounting", logs, compactCost, upstreamEndpoint, err)
+	}
+	for _, path := range []string{"/responses/compact/%2e%2e", "/responses/compact/detail%3Fescape", "/responses/compact/detail%23escape", "/responses/compact/%252e%252e", "/responses/compact/" + strings.Repeat("x", 129), "/responses/resp_unowned/compact", "/responses/unknown"} {
+		w := call(path, key, body, "")
+		if w.Code != 404 || calls.Load() != beforeCompact+1 {
+			t.Fatal("invalid compaction path reached upstream", path, w.Code)
+		}
+	}
+	for _, credential := range []string{"", user} {
+		if w := call("/responses/compact/detail.v2", credential, body, ""); w.Code != 401 || calls.Load() != beforeCompact+1 {
+			t.Fatal("compaction extension Key authentication", w.Code)
+		}
+	}
 	body["stream"] = true
+	if w := call("/responses/compact/detail.v2", key, body, ""); w.Code != 400 || calls.Load() != beforeCompact+1 {
+		t.Fatal("streaming extension dispatched", w.Code)
+	}
 	stream := call("/responses", key, body, "response-stream")
 	if stream.Code != 200 || !strings.Contains(stream.Body.String(), "event: response.completed") || strings.Contains(stream.Body.String(), "[DONE]") {
 		t.Fatal("Responses stream", stream.Code, stream.Body.String())
@@ -260,6 +328,10 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if _, err := a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_responses_settlement CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID"); err != nil {
 		t.Fatal(err)
 	}
+	compactRecovery := map[string]any{"model": "client-response", "input": "compact while SQL fails"}
+	if w := call("/responses/compact/detail.v2", key, compactRecovery, "compact-recovery"); w.Code != 503 || strings.Contains(w.Body.String(), "opaque-content") {
+		t.Fatal("compaction extension completed before settlement", w.Code, w.Body.String())
+	}
 	w := call("/responses", key, body, "response-settlement")
 	if !strings.Contains(w.Body.String(), "event: error") || strings.Contains(w.Body.String(), "event: response.completed") {
 		t.Fatal("Responses completed before billing", w.Body.String())
@@ -270,7 +342,14 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if err := a.recoverReceipts(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE api_key_id=$1", kid).Scan(&logs); err != nil || logs != 6 {
+	if err := a.recoverReceipts(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	beforeRecoveryReplay := calls.Load()
+	if w := call("/responses/compact/detail.v2", key, compactRecovery, "compact-recovery"); w.Code != 503 || calls.Load() != beforeRecoveryReplay || w.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatal("failed compaction extension was resubmitted", w.Code, w.Body.String())
+	}
+	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE api_key_id=$1", kid).Scan(&logs); err != nil || logs != 8 {
 		t.Fatal("Responses failed/partial billing or settlement recovery", logs, err)
 	}
 	delete(body, "stream")
@@ -293,7 +372,7 @@ func testResponses(t *testing.T, a *App, admin string) {
 			delete(body, field)
 		}
 	}
-	for _, path := range []string{"/responses/other", "/responses/resp_foreign/cancel", "/responses/compact/extra", "/responses/%2e%2e/other"} {
+	for _, path := range []string{"/responses/other", "/responses/resp_foreign/cancel", "/responses/compact-other/extra", "/responses/%2e%2e/other"} {
 		if w := call(path, key, body, ""); w.Code != 404 {
 			t.Fatal("unapproved Responses subpath", path, w.Code)
 		}
@@ -403,6 +482,14 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if w := call("/responses", otherKey, body, ""); w.Code != 404 || otherCalls.Load() != 0 {
 		t.Fatal("cross-key response reference allowed", w.Code)
 	}
+	compactBody := map[string]any{"model": "client-response", "input": "compact history", "previous_response_id": "resp_1"}
+	if w := call("/responses/compact/detail.v2", key, compactBody, ""); w.Code != 200 || otherCalls.Load() != 0 {
+		t.Fatal("compaction extension source affinity", w.Code, w.Body.String())
+	}
+	before = calls.Load()
+	if w := call("/responses/compact/detail.v2", otherKey, compactBody, ""); w.Code != 404 || calls.Load() != before || otherCalls.Load() != 0 {
+		t.Fatal("compaction extension cross-key affinity", w.Code)
+	}
 	var keyInfo gatewayKey
 	keyInfo.ID, keyInfo.GroupID = kid, gid
 	identity := &gatewayIdentity{Key: keyInfo}
@@ -465,6 +552,9 @@ func testResponses(t *testing.T, a *App, admin string) {
 		t.Fatal(err)
 	}
 	before = calls.Load()
+	if w := call("/responses/compact/detail.v2", key, compactBody, ""); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
+		t.Fatal("compaction extension survived upstream key rotation", w.Code)
+	}
 	if w := call("/responses", key, body, "response-rotated"); w.Code != 503 || calls.Load() != before || otherCalls.Load() != 0 {
 		t.Fatal("continuation survived upstream key rotation", w.Code)
 	}

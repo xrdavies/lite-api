@@ -472,8 +472,10 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	}
 	mode.Store(0)
 	before = calls.Load()
-	if w := call("POST", "/responses/compact", key, body(false), ""); w.Code != 503 || calls.Load() != before {
-		t.Fatal("native compaction converted", w.Code)
+	for _, path := range []string{"/responses/compact", "/responses/compact/detail.v2"} {
+		if w := call("POST", path, key, body(false), ""); w.Code != 503 || calls.Load() != before {
+			t.Fatal("native compaction converted", path, w.Code)
+		}
 	}
 	if w := call("POST", "/responses/input_tokens", key, body(false), ""); w.Code != 200 || calls.Load() != before || !strings.Contains(w.Body.String(), `"object":"response.input_tokens"`) {
 		t.Fatal("native count endpoint", w.Code, w.Body.String())

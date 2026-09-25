@@ -361,7 +361,7 @@ func testResponsesAnthropic(t *testing.T, a *App, admin string) {
 	if w := call("POST", "/v1/responses", other, next, ""); w.Code != 404 || calls.Load() != before {
 		t.Fatal("cross-key continuation", w.Code)
 	}
-	for _, suffix := range []string{"/compact", "/input_tokens"} {
+	for _, suffix := range []string{"/compact", "/compact/detail.v2", "/input_tokens"} {
 		w := call("POST", "/v1/responses"+suffix, key, body(false), "")
 		if w.Code != 503 || calls.Load() != before {
 			t.Fatal("native-only operation", suffix, w.Code)

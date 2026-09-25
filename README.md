@@ -251,7 +251,9 @@ OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址�
 
 协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。计数可只提供 instructions 或工具声明，并支持已授权的托管工具及完整工具历史。`previous_response_id`、`item_reference`、服务端 prompt 或加密历史仍发往原来源解析，404 明确返回不支持，不以缺失上下文估算；跨 Key/未知引用仍拒绝。资源授权、容器归属和分组图片开关继续生效。
 
-原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
+三个前缀也支持兼容上游的 `/compact/{subpath...}`，例如 `/compact/detail`；上游须返回可验证的 Responses 或 compaction 对象及用量。子路径最多 8 段（含 compact），只接受 ASCII 字母、数字、`-_.`，拒绝空段和全点段；按最长前缀计算的路径及实际入口均不得超过账务字段的 128 字节。压缩和计数可带尾部斜杠，转发时去掉，别名共享幂等结果，不同压缩子路径分别计费和去重。压缩扩展仍只用原生 Responses 账号、不支持流式或后台；历史引用继续验证当前 Key、分组与原账号来源，SQL 故障通过已有账务恢复链只结算一次。普通响应 ID 操作仍通过独立的归属接口，其他未知子路径拒绝转发。
+
+原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。
 
 `POST /v1/messages/count_tokens` 和 `/messages/count_tokens` 可通过 OpenAI 类型的 Chat/Responses 账号调用 [Responses 输入计数接口](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)。沿用 Messages 分组开关、原始模型白名单、账号准入和模型映射；系统提示、消息、工具及工具选择转换为输入，生成控制参数不发往计数端点，返回 `{"input_tokens":整数}`。不调用生成端点、不创建消费记录或扣减余额/Key 额度，不受 Fast 和利润策略限制；仍执行鉴权、余额/限额、RPM及并发准入。已完成幂等请求直接重放；上游 404 返回不支持计数，负数或缺失计数返回 502。原生 Anthropic 和 Gemini 计数分支继续使用各自协议；Grok 和国内平台使用下述本地估算。
 
