@@ -475,7 +475,7 @@ func testResponsesChat(t *testing.T, a *App, admin string) {
 	if w := call("POST", "/responses/compact", key, body(false), ""); w.Code != 503 || calls.Load() != before {
 		t.Fatal("native compaction converted", w.Code)
 	}
-	if w := call("POST", "/responses/input_tokens", key, body(false), ""); w.Code != 200 || calls.Load() != before+1 || !strings.Contains(w.Body.String(), `"input_tokens":12`) {
+	if w := call("POST", "/responses/input_tokens", key, body(false), ""); w.Code != 200 || calls.Load() != before || !strings.Contains(w.Body.String(), `"object":"response.input_tokens"`) {
 		t.Fatal("native count endpoint", w.Code, w.Body.String())
 	}
 	if _, err := a.DB.Exec("ALTER TABLE usage_logs ADD CONSTRAINT test_reverse_receipt CHECK(user_id<>" + fmt.Sprint(uid) + ") NOT VALID"); err != nil {

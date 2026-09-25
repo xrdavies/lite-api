@@ -220,8 +220,13 @@ func testResponses(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow(`SELECT l.input_tokens,l.output_tokens,l.cache_read_tokens,l.cache_creation_tokens,l.actual_cost::text,u.balance::text,k.quota_used::text,l.reasoning_effort FROM usage_logs l JOIN users u ON u.id=l.user_id JOIN api_keys k ON k.id=l.api_key_id WHERE k.id=$1`, kid).Scan(&input, &output, &read, &write, &cost, &balance, &consumed, &effort); err != nil || input != 12 || output != 8 || read != 5 || write != 3 || cost != "0.0000750000" || balance != "9.99992500" || consumed != "0.00007500" || effort != "high" {
 		t.Fatal("Responses accounting", input, output, read, write, cost, balance, consumed, effort, err)
 	}
+	countInput := mustJSON(map[string]any{"model": "upstream-responses", "input": body["input"], "tools": body["tools"]})
+	estimated, err := estimateInputTokens(countInput)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range []string{"/responses/input_tokens", "/backend-api/codex/responses/input_tokens"} {
-		if w := call(path, key, body, "response-count"); w.Code != 200 || !strings.Contains(w.Body.String(), `"input_tokens":20`) {
+		if w := call(path, key, body, "response-count"); w.Code != 200 || calls.Load() != 1 || !strings.Contains(w.Body.String(), fmt.Sprintf(`"input_tokens":%d`, estimated)) {
 			t.Fatal("Responses token count", w.Code, w.Body.String())
 		}
 	}

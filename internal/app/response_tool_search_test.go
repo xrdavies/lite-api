@@ -488,6 +488,7 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 	key, kid := k["key"].(string), id(k)
 	var calls atomic.Int64
 	var reject atomic.Bool
+	var nativeCounts atomic.Int64
 	var rejectResources atomic.Bool
 	var resourceRejections atomic.Int64
 	var textOnly atomic.Bool
@@ -530,6 +531,14 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 			calls.Add(1)
 			received.Store(body)
 			fmt.Fprint(w, `{"id":"chat_file","object":"chat.completion","model":"native-tool","choices":[{"index":0,"message":{"role":"assistant","content":"Read the file."},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":4}}}`)
+			return
+		}
+		if r.URL.Path == "/v1/responses/input_tokens" {
+			nativeCounts.Add(1)
+			if credentialString(body, "model") != "native-tool" || credentialString(body, "previous_response_id") == "" {
+				t.Error("count did not retain remote context")
+			}
+			fmt.Fprint(w, `{"object":"response.input_tokens","input_tokens":19}`)
 			return
 		}
 		if r.URL.Path != "/v1/responses" || credentialString(body, "model") != "native-tool" {
@@ -731,11 +740,12 @@ func testNativeResponseTools(t *testing.T, a *App, admin, kind string) {
 				t.Fatal("unknown or altered program history dispatched", got.Code, got.Body.String())
 			}
 		}
-		for _, path := range []string{"/responses/compact", "/responses/input_tokens"} {
-			request := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
-			if got := call("POST", path, key, request, ""); got.Code != 400 || calls.Load() != 1 {
-				t.Fatal("implicit program admitted on auxiliary endpoint", got.Code)
-			}
+		request := map[string]any{"model": "tool-model", "input": "continue", "previous_response_id": first.ID}
+		if got := call("POST", "/responses/compact", key, request, ""); got.Code != 400 || calls.Load() != 1 {
+			t.Fatal("implicit program admitted on compaction endpoint", got.Code)
+		}
+		if got := call("POST", "/responses/input_tokens", key, request, ""); got.Code != 200 || nativeCounts.Load() != 1 || calls.Load() != 1 || !strings.Contains(got.Body.String(), `"input_tokens":19`) {
+			t.Fatal("implicit program count generated instead of resolving context", got.Code, got.Body.String())
 		}
 		delete(body, "previous_response_id")
 	}

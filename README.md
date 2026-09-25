@@ -203,9 +203,9 @@ Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；
 
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
-OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、input_tokens、原生压缩和 WebSocket 仍要求原生 Responses 账号。
+OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、原生压缩和 WebSocket 仍要求原生 Responses 账号；input_tokens 使用下述独立计数路径。
 
-Responses HTTP/SSE 也支持 Anthropic 平台及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Anthropic 协议账号。直接生成 `/v1/messages`，保留文本/图片/PDF、结构化系统指令、缓存标记、工具结果，工具命名空间/custom/客户端发现复用同一套身份映射；原生内容块按出现顺序转为 Responses 输出。compact、input_tokens、原生 compaction 和 WebSocket 仍要求原生 Responses 账号。
+Responses HTTP/SSE 也支持 Anthropic 平台及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Anthropic 协议账号。直接生成 `/v1/messages`，保留文本/图片/PDF、结构化系统指令、缓存标记、工具结果，工具命名空间/custom/客户端发现复用同一套身份映射；原生内容块按出现顺序转为 Responses 输出。compact、原生 compaction 和 WebSocket 仍要求原生 Responses 账号；OpenAI 兼容平台的 input_tokens 使用下述独立计数路径。
 
 `previous_response_id` 的加密历史保存原生思考、签名、隐藏思考块和工具身份；续接仅使用同一 Key/分组/账号及凭证来源。顶层 instructions 可替换，input 中的系统指令继续保留。`store=false` 不保存历史，外部传入的 reasoning 密文不当作 Anthropic 签名；原生签名不出现在 Responses 内容中。失败或断流中已知 usage 仍结算，输出终态与工具完成事件等待结算成功；实际缓存读写和转换后的 effort 用于计费。该链路已通过本地协议/数据库测试，尚无真实 Anthropic 上游联调。
 
@@ -221,13 +221,19 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 
-三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。OpenAI 类型账号的 `/input_tokens` 独立于其文本协议，使用配置地址和 Bearer Key 调用上游同名端点。协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
+三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。
+
+OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址（未配置 `base_url` 或主机名为 `api.openai.com`）使用 Bearer Key 调用配置地址的同名端点；完整输入遇到上游 404 时改为本地估算，401/403、429、其他错误及无效成功响应沿用原错误处理。自定义中转、Grok、Kimi、Zhipu、DeepSeek、MiniMax 的完整输入直接本地估算，不发送上游请求。均保留用户/Key/模型/账号/资源准入、余额与限额、RPM 和并发校验；Grok 此处仍需要可用账号及消费资格，与 Messages 本地计数不同。返回 `{"object":"response.input_tokens","input_tokens":整数}`，不生成内容、不调用工具、不写入消费账务。
+
+协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。计数可只提供 instructions 或工具声明，并支持已授权的托管工具及完整工具历史。`previous_response_id`、`item_reference`、服务端 prompt 或加密历史仍发往原来源解析，404 明确返回不支持，不以缺失上下文估算；跨 Key/未知引用仍拒绝。资源授权、容器归属和分组图片开关继续生效。
+
+原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
 
 `POST /v1/messages/count_tokens` 和 `/messages/count_tokens` 可通过 OpenAI 类型的 Chat/Responses 账号调用 [Responses 输入计数接口](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)。沿用 Messages 分组开关、原始模型白名单、账号准入和模型映射；系统提示、消息、工具及工具选择转换为输入，生成控制参数不发往计数端点，返回 `{"input_tokens":整数}`。不调用生成端点、不创建消费记录或扣减余额/Key 额度，不受 Fast 和利润策略限制；仍执行鉴权、余额/限额、RPM及并发准入。已完成幂等请求直接重放；上游 404 返回不支持计数，负数或缺失计数返回 502。原生 Anthropic 和 Gemini 计数分支继续使用各自协议；Grok 和国内平台使用下述本地估算。
 
 Messages 计数对 Grok、Kimi、Zhipu、DeepSeek、MiniMax 使用本地分词估算，支持两个路径别名及复合分组的 `count_tokens` 路由。Grok 只需有效用户/Key、分组访问和模型白名单，不选号或检查消费余额/额度；国内四个平台仍执行余额/Key/平台额度、账号健康/模型准入与并发检查，包含配置为 Anthropic 的账号。两类均执行 RPM，支持幂等重放，不发起上游请求、不改变账号健康或写入消费账务。Claude Code fallback 使用实际目标平台。
 
-估算复用 Messages 输入转换与内置 `o200k_base`/`cl100k_base` 词表，覆盖系统提示、文本、函数参数/结果和工具定义；不下载图片/PDF，媒体描述不代表真实视觉 token，不能用于账务。长字符串按 4 KiB UTF-8 边界分块，计数可能有边界误差。依赖固定为 `github.com/tiktoken-go/tokenizer v0.7.0`，兼容现有 Go 版本，运行时无需词表下载。已用独立 Docker PostgreSQL/Redis 和本地模拟验证。
+估算复用 Messages 输入转换与内置 `o200k_base`/`cl100k_base` 词表，覆盖系统提示、文本、函数/自定义工具参数与结果、托管工具完整历史、工具定义及输出格式；原生 Responses 按映射后的模型选词表，认证头和容器域名密钥不计入输入。不下载图片/PDF，媒体描述不代表真实视觉 token，不能用于账务。长字符串按 4 KiB UTF-8 边界分块，计数可能有边界误差。依赖固定为 `github.com/tiktoken-go/tokenizer v0.7.0`，兼容现有 Go 版本，运行时无需词表下载。已用独立 Docker PostgreSQL/Redis 和本地模拟验证。
 
 三个前缀下的 `GET /responses/{id}` 也支持查询已成功结算、保存了归属的普通原生 HTTP/SSE/WS 响应；`GET /responses/{id}/input_items` 读取输入条目，接受 `after`、`limit=1..100`、`order=asc|desc`。两者支持官方 `include` 或 `include[]` 选项，两种参数形式不可混用，未知/重复标量参数拒绝。接口定义见 [查询响应](https://developers.openai.com/api/reference/resources/responses/methods/retrieve) 和 [输入条目列表](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list)。
 

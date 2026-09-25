@@ -201,7 +201,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 				body["input"], _ = json.Marshal(items)
 			}
 		}
-	} else if in.Previous == "" && body["prompt"] == nil {
+	} else if in.Previous == "" && body["prompt"] == nil && !in.CountOnly {
 		return in, bad("input or previous_response_id is required")
 	}
 	// Hosted tools require their own meters and platform admission.
@@ -299,7 +299,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" && !in.CountOnly || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	in.FileIDs, err = requestFileIDs(body, tools, "responses")

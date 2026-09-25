@@ -360,6 +360,11 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         # local count paths must leave the provider, wallet and ledger untouched.
         before_counts = dict(calls)
         ledger = sql(f"SELECT balance,(SELECT count(*) FROM usage_logs) FROM users WHERE id={uid}")
+        native_count = {"model": "deploy-text", "input": "Hello 世界"}
+        status, first_count, _ = request(base, "POST", "/v1/responses/input_tokens", key, native_count, "release-native-count")
+        assert status == 200 and json.loads(first_count)["object"] == "response.input_tokens" and json.loads(first_count)["input_tokens"] > 0
+        status, repeated, headers = request(base, "POST", "/responses/input_tokens", key, native_count, "release-native-count")
+        assert status == 200 and repeated == first_count and headers.get("Idempotency-Replayed") == "true"
         for platform in ("grok", "deepseek"):
             cg = api("POST", "/api/v1/admin/groups", admin, {"name": "Count " + platform, "platform": platform})["id"]
             if platform == "deepseek":
@@ -374,7 +379,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
             assert status == 200 and repeated == first_count and headers.get("Idempotency-Replayed") == "true"
         assert calls == before_counts, "local counting contacted the provider"
         assert sql(f"SELECT balance,(SELECT count(*) FROM usage_logs) FROM users WHERE id={uid}") == ledger
-        print("Compiled token vocabularies: Grok without account and DeepSeek local counts, replay and zero billing verified", flush=True)
+        print("Compiled token vocabularies: native relay, Grok without account and DeepSeek local counts, replay and zero billing verified", flush=True)
         logs = dc("logs", "--no-color", "app").stdout
         assert not any(secret in logs for secret in secrets_seen), "secret in application logs"
         print("PASS: isolated release, crash recovery, rollback and upgrade; no paid upstream calls", flush=True)

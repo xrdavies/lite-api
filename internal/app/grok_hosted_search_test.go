@@ -423,10 +423,11 @@ func testHostedSearch(t *testing.T, a *App, admin, platform string) {
 		t.Fatal("hosted search converted to Chat", w.Code)
 	}
 	must("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": "responses"}})
-	for _, path := range []string{"/v1/responses/input_tokens", "/responses/compact"} {
-		if w = call(path, key, ""); w.Code != 400 {
-			t.Fatal("hosted non-generation accepted", path, w.Code)
-		}
+	if w = call("/v1/responses/input_tokens", key, ""); w.Code != 200 || calls.Load() != before || !strings.Contains(w.Body.String(), `"object":"response.input_tokens"`) {
+		t.Fatal("hosted counting dispatched tools", w.Code, w.Body.String())
+	}
+	if w = call("/responses/compact", key, ""); w.Code != 400 || calls.Load() != before {
+		t.Fatal("hosted compaction accepted", w.Code)
 	}
 	if w = call("/v1/responses", user, ""); w.Code != 401 {
 		t.Fatal("login token accepted as gateway key", w.Code)

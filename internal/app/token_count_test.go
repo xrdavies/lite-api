@@ -144,6 +144,10 @@ func testLocalTokenCounting(t *testing.T, a *App, admin string) {
 			}
 			manage("PUT", ap, admin, map[string]any{"credentials": map[string]any{"api_protocol": protocol}})
 			expect(key, 200)
+			native := call("POST", "/responses/input_tokens", key, map[string]any{"model": "count-alias", "input": "hello world"}, "")
+			if native.Code != 200 || !strings.Contains(native.Body.String(), `"input_tokens":2`) {
+				t.Fatal("native local count", platform, protocol, native.Code, native.Body.String())
+			}
 		}
 		w := call("POST", "/v1/messages/count_tokens", key, body, "local-replay")
 		replay := call("POST", "/messages/count_tokens", key, body, "local-replay")

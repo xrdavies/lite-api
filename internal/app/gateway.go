@@ -403,7 +403,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if protocol == "anthropic" && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
 			matches = true
 		}
-		if protocol == "responses" && in.CountOnly && u.Platform == "openai" {
+		if protocol == "responses" && in.CountOnly && (chatResponsesPlatform(u.Platform) || u.Platform == "grok") {
 			matches = true
 		}
 		if protocol == "chat_completions" && u.protocol() == "responses" && chatResponsesPlatform(u.Platform) {
@@ -955,7 +955,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		in.NativeFileSearch = in.NativeFileSearch || len(in.VectorStores) > 0
 	}
-	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" || in.NativeCompaction) {
+	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" && !in.CountOnly || in.NativeCompaction) {
 		err = bad("file search requires scoped stores and a normal Responses request")
 	}
 	if err == nil {
@@ -1374,7 +1374,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
-		if in.ResponseImage != nil {
+		if in.ResponseImage != nil && !in.CountOnly {
 			// Check both text-only and actual-image tariffs before dispatch.
 			imageModel := selected.responseImageModel(model, "")
 			for _, size := range []string{"1K", "2K", "4K"} {
@@ -1428,6 +1428,15 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			}
 			return
 		}
+		resp, err = localResponsesCount(in, selected.Account, upstreamBody, 0)
+		if err != nil {
+			selected.Release()
+			fail(err)
+			return
+		}
+		if resp != nil {
+			break // Reuse ordinary count validation and idempotent replies.
+		}
 		if emulation != nil {
 			var result *webSearchResponse
 			result, err = a.runWebSearch(ctx, *emulation, webSearchQuery(request), selected.Account.ProxyID, false)
@@ -1459,6 +1468,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		status := resp.StatusCode
 		failureBody := readUpstreamError(resp)
 		resp.Body.Close()
+		fallback, countErr := localResponsesCount(in, selected.Account, upstreamBody, status)
+		if countErr != nil {
+			selected.Release()
+			fail(countErr)
+			return
+		}
+		if fallback != nil {
+			resp = fallback
+			break
+		}
 		fallbackError := &apiError{502, fmt.Sprintf("upstream rejected request (HTTP %d)", status)}
 		countUnsupported := in.CountOnly && wireIn.Protocol == "responses" && status == http.StatusNotFound
 		if countUnsupported {

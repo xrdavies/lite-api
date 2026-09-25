@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -93,7 +94,8 @@ func testMessagesCounting(t *testing.T, a *App, admin string) {
 		gid := id(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Counting " + wire, "platform": "openai", "allow_messages_dispatch": true, "force_openai_fast": true, "profit_control_enabled": true, "profit_min_margin": "0.99", "messages_dispatch_model_config": map[string]any{"exact_model_mappings": map[string]string{"public-count": "count-admission"}}}))
 		gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
 		aid := id(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Counting " + wire, "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "counting-upstream", "base_url": up.URL + "/prefix/v1", "api_protocol": wire, "model_mapping": map[string]string{"public-count": "count-upstream", "count-admission": "not-forwarded"}}}))
-		key := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Counting", "group_id": gid})["key"].(string)
+		keyObject := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Counting", "group_id": gid})
+		key := keyObject["key"].(string)
 		body := map[string]any{"model": "public-count", "messages": []any{map[string]any{"role": "user", "content": "count me"}}}
 		if wire != "anthropic" {
 			for _, path := range []string{"/v1/messages/count_tokens", "/messages/count_tokens"} {
@@ -126,9 +128,79 @@ func testMessagesCounting(t *testing.T, a *App, admin string) {
 		}
 		// The native counting endpoint is independent of the account's text wire.
 		for _, path := range []string{"/v1/responses/input_tokens", "/responses/input_tokens", "/backend-api/codex/responses/input_tokens"} {
+			before := calls.Load()
 			w := call(path, key, map[string]any{"model": "public-count", "input": "count me"}, "")
-			if w.Code != 200 || !strings.Contains(w.Body.String(), `"input_tokens":17`) {
+			if w.Code != 200 || calls.Load() != before || !strings.Contains(w.Body.String(), `"input_tokens":2`) {
 				t.Fatal("native count endpoint", wire, w.Code, w.Body.String())
+			}
+		}
+		if wire == "responses" {
+			before := calls.Load()
+			input := map[string]any{"model": "public-count", "input": "count me"}
+			first := call("/responses/input_tokens", key, input, "native-replay")
+			replay := call("/v1/responses/input_tokens", key, input, "native-replay")
+			if first.Code != 200 || replay.Code != 200 || replay.Header().Get("Idempotency-Replayed") != "true" || first.Body.String() != replay.Body.String() || calls.Load() != before {
+				t.Fatal("native count replay", first.Code, replay.Code)
+			}
+			input["input"] = "changed"
+			if w := call("/responses/input_tokens", key, input, "native-replay"); w.Code != 409 {
+				t.Fatal("native replay conflict", w.Code)
+			}
+			if w := call("/responses/input_tokens", user, input, ""); w.Code != 401 {
+				t.Fatal("JWT local count", w.Code)
+			}
+			input["input"] = "count me"
+			for _, tools := range []string{nativeCodeTools, nativeHostedShellTools, `[{"type":"web_search"}]`, `[{"type":"programmatic_tool_calling"}]`} {
+				input["tools"] = json.RawMessage(tools)
+				if w := call("/responses/input_tokens", key, input, ""); w.Code != 200 || calls.Load() != before {
+					t.Fatal("hosted count dispatched", w.Code, w.Body.String())
+				}
+			}
+			input["tools"] = json.RawMessage(`[{"type":"file_search","vector_store_ids":["vs_count"]}]`)
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 503 {
+				t.Fatal("ungranted store counted", w.Code)
+			}
+			ap := fmt.Sprintf("/api/v1/admin/accounts/%d", aid)
+			manage("PUT", ap, admin, map[string]any{"extra": map[string]any{"response_vector_stores": map[string]any{fmt.Sprint(gid): []string{"vs_count"}}}})
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 200 {
+				t.Fatal("granted store count", w.Code, w.Body.String())
+			}
+			delete(input, "tools")
+			input["input"] = json.RawMessage(nativeCodeCalls)
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 404 {
+				t.Fatal("unowned tool history counted", w.Code)
+			}
+			u, err := a.loadAccount(context.Background(), aid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := &gatewayIdentity{UserID: uid, Key: gatewayKey{ID: id(keyObject), GroupID: gid}}
+			binding := responseBinding{AccountID: aid, Target: responseTarget(u), Items: []string{"ci_team"}, CodeTool: true, Containers: []string{"cntr_team"}}
+			if err := a.storeResponseBinding(context.Background(), identity, "resp_counting", binding); err != nil {
+				t.Fatal(err)
+			}
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 200 || calls.Load() != before {
+				t.Fatal("owned full tool history count", w.Code, w.Body.String())
+			}
+			other := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Other counting key", "group_id": gid})["key"].(string)
+			if w := call("/responses/input_tokens", other, input, ""); w.Code != 404 {
+				t.Fatal("cross Key tool history", w.Code)
+			}
+			input["input"] = "count me"
+			input["previous_response_id"] = "resp_counting"
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 200 || calls.Load() != before+1 || !strings.Contains(w.Body.String(), `"input_tokens":17`) {
+				t.Fatal("remote history wasn't resolved upstream", w.Code, w.Body.String())
+			}
+			mode.Store(1)
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 404 {
+				t.Fatal("missing remote history silently estimated", w.Code, w.Body.String())
+			}
+			mode.Store(0)
+			delete(input, "previous_response_id")
+			input["model"] = "not-allowed"
+			before = calls.Load()
+			if w := call("/responses/input_tokens", key, input, ""); w.Code != 503 || calls.Load() != before {
+				t.Fatal("local account model admission", w.Code)
 			}
 		}
 		var status string

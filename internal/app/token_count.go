@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 
@@ -16,6 +18,15 @@ func estimateInputTokens(raw []byte) (int, error) {
 	var body map[string]json.RawMessage
 	if json.Unmarshal(raw, &body) != nil || body == nil {
 		return 0, bad("invalid token count input")
+	}
+	if !utf8.Valid(raw) {
+		return 0, bad("local token counting requires valid UTF-8")
+	}
+	if value := body["instructions"]; value != nil && string(value) != "null" {
+		var text string
+		if json.Unmarshal(value, &text) != nil {
+			return 0, bad("instructions must be a string")
+		}
 	}
 	model := strings.ToLower(credentialString(body, "model"))
 	encoding := tokenizer.O200kBase
@@ -68,7 +79,11 @@ func estimateInputTokens(raw []byte) (int, error) {
 		}
 		var parts []map[string]json.RawMessage
 		if json.Unmarshal(raw, &parts) != nil {
-			return compact(raw)
+			var part map[string]json.RawMessage
+			if json.Unmarshal(raw, &part) != nil || credentialString(part, "type") == "" {
+				return compact(raw)
+			}
+			parts = []map[string]json.RawMessage{part}
 		}
 		for _, part := range parts {
 			if part == nil {
@@ -79,12 +94,19 @@ func estimateInputTokens(raw []byte) (int, error) {
 			switch kind {
 			case "input_text", "output_text", "text":
 				text = credentialString(part, "text")
-			case "input_image":
+			case "input_image", "computer_screenshot":
 				text = credentialString(part, "image_url")
 				if strings.HasPrefix(strings.ToLower(text), "data:") {
 					text, _, _ = strings.Cut(text, ",")
 				}
 			default:
+				if kind == "" {
+					encoded, _ := json.Marshal(part)
+					if err := compact(encoded); err != nil {
+						return err
+					}
+					continue
+				}
 				text = kind
 			}
 			if err := count(text); err != nil {
@@ -98,7 +120,9 @@ func estimateInputTokens(raw []byte) (int, error) {
 	}
 	var items []map[string]json.RawMessage
 	var plain string
-	if json.Unmarshal(body["input"], &plain) == nil {
+	if len(body["input"]) == 0 || string(body["input"]) == "null" {
+		// The native endpoint also accepts just instructions or tool declarations.
+	} else if json.Unmarshal(body["input"], &plain) == nil {
 		err = count(plain)
 	} else if json.Unmarshal(body["input"], &items) != nil {
 		return 0, bad("token count input must be text or an array")
@@ -108,7 +132,7 @@ func estimateInputTokens(raw []byte) (int, error) {
 				return 0, bad("invalid token count input item")
 			}
 			total += 3
-			for _, key := range []string{"role", "type", "name", "arguments", "call_id", "id"} {
+			for _, key := range []string{"role", "type", "name", "call_id", "id", "input", "code", "text", "refusal"} {
 				text := credentialString(item, key)
 				if key == "type" && text == "message" {
 					continue
@@ -117,9 +141,16 @@ func estimateInputTokens(raw []byte) (int, error) {
 					return 0, err
 				}
 			}
-			for _, key := range []string{"output", "content"} {
+			for _, key := range []string{"arguments", "output", "content"} {
 				if err = content(item[key]); err != nil {
 					return 0, err
+				}
+			}
+			for _, key := range []string{"action", "result", "results", "queries", "summary", "tools", "outputs", "caller"} {
+				if raw := item[key]; raw != nil && string(raw) != "null" {
+					if err = compact(raw); err != nil {
+						return 0, err
+					}
 				}
 			}
 		}
@@ -141,7 +172,68 @@ func estimateInputTokens(raw []byte) (int, error) {
 			return 0, err
 		}
 	}
+	if raw := body["text"]; raw != nil && string(raw) != "null" {
+		if err = compact(raw); err != nil {
+			return 0, err
+		}
+	}
 	return max(total, 1), nil
+}
+
+// References carry ownership, not the remote prompt/history itself. Let the
+// original supplier resolve them instead of returning an incomplete local count.
+func responsesCountRemoteContext(in textRequest, body map[string]json.RawMessage) bool {
+	if in.Previous != "" || body["prompt"] != nil && string(body["prompt"]) != "null" {
+		return true
+	}
+	var items []map[string]json.RawMessage
+	_ = json.Unmarshal(body["input"], &items)
+	for _, item := range items {
+		kind := credentialString(item, "type")
+		if kind == "item_reference" || kind == "" && item["id"] != nil || credentialString(item, "encrypted_content") != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesCountLocally(u *upstreamAccount) bool {
+	if u.Platform == "grok" || cnPaygPlatform(u.Platform) {
+		return true
+	}
+	if u.Platform != "openai" {
+		return false
+	}
+	base := strings.TrimSpace(credentialString(u.Credentials, "base_url"))
+	if base == "" {
+		return false
+	}
+	parsed, err := url.Parse(base)
+	return err != nil || !strings.EqualFold(parsed.Hostname(), "api.openai.com")
+}
+
+func localResponsesCount(in textRequest, u *upstreamAccount, body []byte, status int) (*http.Response, error) {
+	if in.Protocol != "responses" || !in.CountOnly || status != http.StatusNotFound && (status != 0 || !responsesCountLocally(u)) {
+		return nil, nil
+	}
+	var request map[string]json.RawMessage
+	if json.Unmarshal(body, &request) != nil || request == nil {
+		return nil, bad("invalid token count input")
+	}
+	if responsesCountRemoteContext(in, request) {
+		return nil, nil
+	}
+	// Authentication headers and container secrets are transport metadata.
+	clean, err := sanitizeResponseTools(body)
+	if err != nil {
+		return nil, err
+	}
+	n, err := estimateInputTokens(clean)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := json.Marshal(map[string]any{"object": "response.input_tokens", "input_tokens": n})
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(raw))}, nil
 }
 
 // Grok counting needs identity and routing permissions, but no supplier account
