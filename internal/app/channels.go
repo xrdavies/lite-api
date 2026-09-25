@@ -131,13 +131,13 @@ func (in *channelInput) validate(create bool) error {
 }
 
 // One statement gives a consistent configuration snapshot across child tables.
-const channelSnapshot = `SELECT to_jsonb(c) || jsonb_build_object(
+const channelSnapshot = `to_jsonb(c) || jsonb_build_object(
  'group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM channel_groups WHERE channel_id=c.id),'[]'::jsonb),
  'model_pricing',COALESCE((SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object('intervals',COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY sort_order,id) FROM channel_pricing_intervals i WHERE pricing_id=p.id),'[]'::jsonb)) ORDER BY p.id) FROM channel_model_pricing p WHERE channel_id=c.id),'[]'::jsonb),
- 'account_stats_pricing_rules',COALESCE((SELECT jsonb_agg(to_jsonb(s) || jsonb_build_object('pricing',COALESCE((SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object('intervals',COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY sort_order,id) FROM channel_account_stats_pricing_intervals i WHERE pricing_id=p.id),'[]'::jsonb)) ORDER BY p.id) FROM channel_account_stats_model_pricing p WHERE rule_id=s.id),'[]'::jsonb)) ORDER BY s.sort_order,s.id) FROM channel_account_stats_pricing_rules s WHERE channel_id=c.id),'[]'::jsonb)) FROM channels c WHERE c.id=$1`
+ 'account_stats_pricing_rules',COALESCE((SELECT jsonb_agg(to_jsonb(s) || jsonb_build_object('pricing',COALESCE((SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object('intervals',COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY sort_order,id) FROM channel_account_stats_pricing_intervals i WHERE pricing_id=p.id),'[]'::jsonb)) ORDER BY p.id) FROM channel_account_stats_model_pricing p WHERE rule_id=s.id),'[]'::jsonb)) ORDER BY s.sort_order,s.id) FROM channel_account_stats_pricing_rules s WHERE channel_id=c.id),'[]'::jsonb))`
 
 func channelJSON(ctx context.Context, q queryer, id int64) (json.RawMessage, error) {
-	return jsonRow(q.QueryRowContext(ctx, channelSnapshot, id))
+	return jsonRow(q.QueryRowContext(ctx, "SELECT "+channelSnapshot+" FROM channels c WHERE c.id=$1", id))
 }
 
 func insertPrices(ctx context.Context, tx *sql.Tx, parent int64, prices []modelPrice, stats bool) error {
@@ -329,39 +329,48 @@ func (a *App) getChannel(w http.ResponseWriter, r *http.Request) error {
 }
 func (a *App) listChannels(w http.ResponseWriter, r *http.Request) error {
 	page, size := pagination(r)
-	search, status := "%"+r.URL.Query().Get("search")+"%", r.URL.Query().Get("status")
+	size = min(size, 100)
+	q := r.URL.Query()
+	search := strings.TrimSpace(q.Get("search"))
+	if len([]rune(search)) > 100 || strings.ContainsRune(search, 0) {
+		return bad("invalid channel search (maximum 100 characters)")
+	}
+	where := ` WHERE ($1='' OR position(lower($1) in lower(c.name))>0 OR position(lower($1) in lower(COALESCE(c.description,'')))>0)
+ AND ($2='' OR c.status=$2)`
+	field := strings.ToLower(strings.TrimSpace(q.Get("sort_by")))
+	if !q.Has("sort_by") {
+		field = "created_at"
+	}
+	direction := " DESC"
+	if raw := strings.TrimSpace(q.Get("sort_order")); q.Has("sort_order") && !strings.EqualFold(raw, "desc") {
+		direction = " ASC"
+	}
+	switch field {
+	case "id", "name", "status", "created_at":
+	default:
+		field, direction = "id", " ASC"
+	}
+	order := "c." + field + direction
+	if field != "id" {
+		order += ",c.id" + direction
+	}
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM channels WHERE name ILIKE $1 AND ($2='' OR status=$2)", search, status).Scan(&total); err != nil {
+	if err = tx.QueryRowContext(r.Context(), "SELECT count(*) FROM channels c"+where, search, q.Get("status")).Scan(&total); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT id FROM channels WHERE name ILIKE $1 AND ($2='' OR status=$2) ORDER BY id DESC LIMIT $3 OFFSET $4", search, status, size, (page-1)*size)
+	// Paginate parent rows first, then project child prices in the same statement.
+	rows, err := tx.QueryContext(r.Context(), "SELECT "+channelSnapshot+" FROM (SELECT * FROM channels c"+where+" ORDER BY "+order+" LIMIT $3 OFFSET $4)c ORDER BY "+order, search, q.Get("status"), size, (page-1)*size)
 	if err != nil {
 		return err
 	}
-	ids := []int64{}
-	for rows.Next() {
-		var id int64
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	err = rows.Err()
-	rows.Close()
+	items, err := jsonRows(rows)
 	if err != nil {
 		return err
-	}
-	items := []json.RawMessage{}
-	for _, id := range ids {
-		raw, err := channelJSON(r.Context(), a.DB, id)
-		if err == sql.ErrNoRows {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		items = append(items, raw)
 	}
 	return pageReply(w, items, total, page, size)
 }

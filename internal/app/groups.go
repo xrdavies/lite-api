@@ -1,9 +1,11 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -283,7 +285,7 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if err = in.profitInput.apply(r.Context(), tx, created.ID, true); err != nil {
 		return err
 	}
-	raw, err = jsonRow(tx.QueryRowContext(r.Context(), "SELECT to_jsonb(g)-'deleted_at' FROM groups g WHERE id=$1", created.ID))
+	raw, err = jsonRow(tx.QueryRowContext(r.Context(), "SELECT "+adminGroupView+adminGroupFrom+" WHERE g.id=$1", created.ID))
 	if err != nil {
 		return err
 	}
@@ -472,45 +474,114 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 	}
 	return a.getGroup(w, r)
 }
+
+// These are inventory counts, not model-specific admission or free concurrency.
+// Retain the stored health/expiry/cooldown meanings within API Key account scope.
+const adminGroupFrom = ` FROM groups g CROSS JOIN LATERAL (
+ SELECT count(*) AS account_count,
+ count(*) FILTER (WHERE a.status='active' AND a.schedulable
+ AND (a.expires_at IS NULL OR a.expires_at>now() OR NOT a.auto_pause_on_expired)
+ AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now())
+ AND (a.overload_until IS NULL OR a.overload_until<=now())
+ AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now())) AS active_account_count,
+ count(*) FILTER (WHERE a.status='active' AND a.schedulable
+ AND (a.expires_at IS NULL OR a.expires_at>now() OR NOT a.auto_pause_on_expired)
+ AND (a.rate_limit_reset_at>now() OR a.overload_until>now() OR a.temp_unschedulable_until>now())) AS rate_limited_account_count
+ FROM accounts a JOIN account_groups ag ON ag.account_id=a.id
+ WHERE ag.group_id=g.id AND a.deleted_at IS NULL AND a.type='apikey'
+ AND a.platform IN ('openai','anthropic','gemini','grok','kimi','zhipu','deepseek','minimax')
+ AND COALESCE(a.credentials->>'account_mode','') IN ('','payg')
+ ) counts`
+const adminGroupView = `(to_jsonb(g)-'deleted_at') || to_jsonb(counts)`
+
 func (a *App) getGroup(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(g)-'deleted_at' FROM groups g WHERE id=$1 AND deleted_at IS NULL", id))
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT "+adminGroupView+adminGroupFrom+" WHERE g.id=$1 AND g.deleted_at IS NULL", id))
 	if err != nil {
 		return err
 	}
 	return reply(w, raw)
 }
 func (a *App) listGroups(w http.ResponseWriter, r *http.Request) error {
-	page, size := pagination(r)
-	platform := r.URL.Query().Get("platform")
-	status := r.URL.Query().Get("status")
-	search := "%" + r.URL.Query().Get("search") + "%"
-	where := ` WHERE deleted_at IS NULL AND ($1='' OR platform=$1) AND ($2='' OR status=$2) AND name ILIKE $3`
-	if strings.HasSuffix(r.URL.Path, "/all") {
-		rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(g)-'deleted_at' FROM groups g"+where+" ORDER BY sort_order,id", platform, status, search)
-		if err != nil {
-			return err
-		}
-		items, err := jsonRows(rows)
-		if err != nil {
-			return err
-		}
-		return reply(w, items)
+	q := r.URL.Query()
+	search := strings.TrimSpace(q.Get("search"))
+	if len([]rune(search)) > 100 || strings.ContainsRune(search, 0) {
+		return bad("invalid group search (maximum 100 characters)")
 	}
-	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM groups"+where, platform, status, search).Scan(&total); err != nil {
+	var exclusive any
+	if raw := q.Get("is_exclusive"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return bad("invalid is_exclusive")
+		}
+		exclusive = value
+	}
+	all := strings.HasSuffix(r.URL.Path, "/all")
+	status := q.Get("status")
+	if all {
+		includeInactive := false
+		if raw := q.Get("include_inactive"); raw != "" {
+			var err error
+			if includeInactive, err = strconv.ParseBool(raw); err != nil {
+				return bad("invalid include_inactive")
+			}
+		}
+		if !includeInactive {
+			status = "active"
+		}
+	}
+	args := []any{q.Get("platform"), status, search, exclusive}
+	where := ` WHERE g.deleted_at IS NULL AND ($1='' OR g.platform=$1) AND ($2='' OR g.status=$2)
+ AND ($3='' OR position(lower($3) in lower(g.name))>0 OR position(lower($3) in lower(COALESCE(g.description,'')))>0)
+ AND ($4::boolean IS NULL OR g.is_exclusive=$4)`
+	field := strings.ToLower(strings.TrimSpace(q.Get("sort_by")))
+	switch field {
+	case "name", "platform", "subscription_type", "rate_multiplier", "is_exclusive", "status", "created_at", "id", "sort_order", "account_count":
+	case "billing_type":
+		field = "subscription_type"
+	default:
+		field = "sort_order"
+	}
+	direction := " ASC"
+	if strings.EqualFold(strings.TrimSpace(q.Get("sort_order")), "desc") {
+		direction = " DESC"
+	}
+	order := "g." + field + direction
+	if field == "account_count" {
+		order = "counts.account_count" + direction + ",g.sort_order ASC,g.id ASC"
+	} else if field != "id" {
+		order += ",g.id" + direction
+	}
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(g)-'deleted_at' FROM groups g"+where+" ORDER BY sort_order,id LIMIT $4 OFFSET $5", platform, status, search, size, (page-1)*size)
+	defer tx.Rollback()
+	page, size := pagination(r)
+	var total int
+	if !all {
+		if err = tx.QueryRowContext(r.Context(), "SELECT count(*) FROM groups g"+where, args...).Scan(&total); err != nil {
+			return err
+		}
+	}
+	query := "SELECT " + adminGroupView + adminGroupFrom + where + " ORDER BY " + order
+	if !all {
+		query += " LIMIT $5 OFFSET $6"
+		args = append(args, size, (page-1)*size)
+	}
+	rows, err := tx.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		return err
 	}
 	items, err := jsonRows(rows)
 	if err != nil {
 		return err
+	}
+	if all {
+		return reply(w, items)
 	}
 	return pageReply(w, items, total, page, size)
 }

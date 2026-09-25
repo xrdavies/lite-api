@@ -177,6 +177,12 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 管理员通过 `/api/v1/admin/channels` 管理渠道、分组关联、模型映射、价格和账号成本规则。一个分组只能属于一个渠道；关联与价格替换在同一事务中完成。价格沿用各字段的十进制精度，token 价格单位为 USD/token，支持科学计数法。`billing_model_source` 可配置 requested、channel_mapped、upstream 或 response_model。Chat Completions 已使用请求开始时的价格快照结算，消费期间修改价格不会回改该次费用。
 
+管理员分组列表支持 `platform/status/is_exclusive/search`，search 匹配名称和描述的字面子串，忽略大小写、去除首尾空白，最多 100 字符。`sort_by` 支持 sort_order/name/platform/subscription_type（或 billing_type）/rate_multiplier/is_exclusive/status/created_at/id/account_count，默认 sort_order ASC；`sort_order=asc|desc`。普通排序同值按 ID 同方向，账号数量同值按 sort_order、ID 升序；排序先于分页。`GET /api/v1/admin/groups/all` 默认只返回 active，`include_inactive=true` 包含停用分组，同时仍应用 platform/search/is_exclusive 等筛选；软删除分组始终排除。
+
+管理员分组创建、详情、修改和列表返回 `account_count/active_account_count/rate_limited_account_count`，只计未删除、范围内平台的按量 API Key 账号。active 按人工状态、schedulable、到期自动停用及三种冷却窗口判断；rate_limited 表示满足其他条件但处于限流、过载或临时停调窗口的账号，重叠窗口只计一次。这些字段保留目录统计口径，不代表某个模型的实际调度余量；具体额度、模型能力和当前并发仍由请求准入检查。用户分组和 Key 关联不返回内部账号数量。
+
+管理员渠道列表支持 `status/search`，搜索规则与分组相同；`sort_by=id|name|status|created_at`、`sort_order=asc|desc`，默认 created_at DESC，同值按 ID 同方向，空或未知 sort_by 回退 id ASC。最多每页 100 条，分页后一次读取本页完整价卡、区间、分组关联和账号成本规则，列表与详情使用相同投影。分组和渠道分页查询的总数与内容均使用同一数据库快照。
+
 价格支持 token、per_request、image，缓存读写及 1h 写入价、上下文阶梯、时段/服务等级/推理倍率。上下文阶梯按 `(min_tokens, max_tokens]` 匹配；时段使用显式时区与 `[start_time, end_time)`，结束 `00:00` 表示当天结束。账号成本规则单独保存，不改变用户价格。渠道缺失的文本单价回落到参考价，显式零价仍为免费；单独配置缓存写入价同时覆盖 5m/1h，单独的 1h 价优先。渠道阶梯替代参考阶梯，未配阶梯则继承参考长上下文倍率；渠道自定义价不叠加供应商默认时段策略。`restrict_models=true` 仍要求模型命中渠道价卡，不能通过参考价绕过限制。
 
 管理员创建或更新分组时可设置 `model_pricing`，格式与渠道价卡相同；省略或 `null` 保留现值，`[]` 清空。分组价按选定的计费模型名匹配，精确名优先于首个通配项；价卡平台标签不限制分组内的名称匹配。匹配后整张替代渠道卡，缺省单价继承参考价，显式零价生效；不能绕过渠道模型限制。分组 token 卡只覆盖基础价，所存自定义区间不参与 token 计费，长上下文使用参考阶梯并受分组开关控制；按次/图片卡保留自身档位。分组价不支持时段配置；订阅专属的高峰分组倍率不在按量业务中启用。网关请求固定分组价快照，模型广场使用相同解析规则；可用渠道查询展示渠道价，分组实际价格以模型广场为准。
