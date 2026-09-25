@@ -7,11 +7,105 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func testErrorRequestMetadata(t *testing.T, a *App, admin string) {
+	t.Helper()
+	call := func(method, path, token string, body any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		r := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		r.RemoteAddr = "192.0.2.244:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("User-Agent", "error-metadata-client")
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	manage := func(method, path, token string, body any) map[string]any {
+		t.Helper()
+		w := call(method, path, token, body)
+		var out struct{ Data map[string]any }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return out.Data
+	}
+	manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": "error-metadata@example.test", "password": "error-metadata-password", "balance": 100})
+	user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": "error-metadata@example.test", "password": "error-metadata-password"})["access_token"].(string)
+	keys := map[string]string{}
+	for _, platform := range []string{"openai", "anthropic", "gemini", "grok"} {
+		group := manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Error metadata " + platform, "platform": platform})
+		keys[platform] = manage("POST", "/api/v1/keys", user, map[string]any{"name": "Error metadata", "group_id": group["id"]})["key"].(string)
+	}
+	manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": true})
+	defer manage("PUT", "/api/v1/admin/settings", admin, map[string]any{"allow_user_view_error_requests": false})
+	for _, tc := range []struct {
+		platform, path, raw, model string
+		status, kind               int
+		count                      bool
+	}{
+		{"openai", "/v1/chat/completions", `{"model":"team-chat","messages":[{"role":"user","content":"private-client-prompt"}]}`, "team-chat", 503, 1, false},
+		{"openai", "/chat/completions", `{"model":"team-chat","stream":true}`, "team-chat", 400, 2, false},
+		{"openai", "/v1/responses", `{"model":"team-response","stream":true}`, "team-response", 400, 2, false},
+		{"anthropic", "/v1/messages", `{"model":"team-claude","stream":true}`, "team-claude", 400, 2, false},
+		{"anthropic", "/v1/messages/count_tokens", `{"model":"team-claude"}`, "team-claude", 400, 1, true},
+		{"openai", "/v1/responses/input_tokens", `{"model":"team-count"}`, "team-count", 503, 1, true},
+		{"gemini", "/v1beta/models/team-gemini:streamGenerateContent", `{"model":"ignored-body-model"}`, "team-gemini", 400, 2, false},
+		{"gemini", "/v1beta/models/team-gemini/streamGenerateContent", `{}`, "team-gemini", 400, 2, false},
+		{"gemini", "/v1beta/models/team-gemini:countTokens", `{}`, "team-gemini", 400, 1, true},
+		{"openai", "/v1/images/generations", `{"model":"team-image","stream":true}`, "team-image", 400, 2, false},
+		{"openai", "/api/v3/contents/generations/tasks", `{"model":"team-seedance"}`, "team-seedance", 400, 1, false},
+		{"grok", "/v1/videos/edits", `{"model":"team-video","prompt":"private-client-prompt"}`, "team-video", 400, 1, false},
+		{"grok", "/v1/videos/extensions", `{"model":"team-video","prompt":"private-client-prompt"}`, "team-video", 400, 1, false},
+		{"grok", "/v1/tts", `{"model":"team-audio"}`, "team-audio", 400, 1, false},
+		{"openai", "/v1/chat/completions", `{"model":42,"stream":true}`, "", 400, 2, false},
+		{"openai", "/v1/chat/completions", `{"model":"team-invalid-stream","stream":"true"}`, "team-invalid-stream", 400, 1, false},
+		{"openai", "/v1/chat/completions", `{"model":"` + strings.Repeat("x", 101) + `","stream":true}`, "", 400, 2, false},
+		{"openai", "/v1/chat/completions", `null`, "", 400, 1, false},
+	} {
+		w := call("POST", tc.path, keys[tc.platform], json.RawMessage(tc.raw))
+		if w.Code != tc.status {
+			t.Fatalf("metadata producer %s: %d %s", tc.path, w.Code, w.Body.String())
+		}
+		var id int64
+		var raw []byte
+		if err := a.DB.QueryRow("SELECT id,to_jsonb(e) FROM ops_error_logs e WHERE request_id=$1 AND error_phase='gateway'", w.Header().Get("X-Request-ID")).Scan(&id, &raw); err != nil {
+			t.Fatal(tc.path, err)
+		}
+		var row map[string]any
+		if json.Unmarshal(raw, &row) != nil {
+			t.Fatal("invalid error row")
+		}
+		if fmt.Sprint(row["model"]) != tc.model && !(tc.model == "" && row["model"] == nil) ||
+			row["requested_model"] != row["model"] || row["upstream_model"] != nil || row["stream"] != (tc.kind == 2) ||
+			row["request_type"] != float64(tc.kind) || row["is_count_tokens"] != tc.count || row["client_ip"] != "192.0.2.244" || row["user_agent"] != "error-metadata-client" || strings.Contains(string(raw), "private-client-prompt") {
+			t.Fatalf("metadata %s: %s", tc.path, raw)
+		}
+		path := fmt.Sprintf("/api/v1/usage/errors/%d", id)
+		if tc.count {
+			if w := call("GET", path, user, nil); w.Code != 404 {
+				t.Fatal("count error exposed", tc.path, w.Code)
+			}
+			continue
+		}
+		detail := manage("GET", path, user, nil)
+		if detail["model"] != row["model"] || detail["request_type"] != float64(tc.kind) || detail["stream"] != row["stream"] || detail["upstream_model"] != nil {
+			t.Fatal("user error metadata", detail)
+		}
+		if tc.model != "" {
+			page := manage("GET", "/api/v1/usage/errors?model="+tc.model, user, nil)
+			if page["total"].(float64) == 0 {
+				t.Fatal("real error model filter empty", tc.model)
+			}
+		}
+	}
+}
 
 func TestOperationalAvailability(t *testing.T) {
 	now := time.Now()
@@ -385,11 +479,13 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 	// stays in upstream diagnostics, while only the final failed request is
 	// exposed to the user. Upstream bodies are never persisted.
 	var primaryCalls, backupCalls atomic.Int32
+	var primaryStatus atomic.Int32
+	primaryStatus.Store(503)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		if r.Header.Get("Authorization") == "Bearer ops-first-secret" {
 			primaryCalls.Add(1)
-			w.WriteHeader(503)
+			w.WriteHeader(int(primaryStatus.Load()))
 			_, _ = io.WriteString(w, `{"error":"private-upstream-body"}`)
 			return
 		}
@@ -408,7 +504,7 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 	}
 	successID := success.Header().Get("X-Request-ID")
 	attempts := listErrors("upstream-errors?status_code=503&request_id=" + successID)
-	if len(attempts) != 1 || attempts[0]["status_code"] != nil || attempts[0]["upstream_status_code"] != float64(503) {
+	if len(attempts) != 1 || attempts[0]["status_code"] != nil || attempts[0]["upstream_status_code"] != float64(503) || attempts[0]["request_type"] != float64(1) || attempts[0]["upstream_model"] != nil {
 		t.Fatal("upstream HTTP status filter", attempts)
 	}
 	for _, path := range []string{"errors", "request-errors"} {
@@ -439,6 +535,29 @@ func testOperational(t *testing.T, a *App, admin, ordinary string) {
 	var leaked int
 	if err := a.DB.QueryRow("SELECT count(*) FROM ops_error_logs e WHERE e.request_id IN ($1,$2) AND (to_jsonb(e)::text LIKE '%private-upstream-body%' OR to_jsonb(e)::text LIKE '%ops-first-secret%')", successID, failureID).Scan(&leaked); err != nil || leaked != 0 {
 		t.Fatal("upstream secrets persisted", leaked, err)
+	}
+	// A nonretryable rejection keeps the public model and the actual mapped
+	// model separate in both the attempt and the final request record.
+	primaryStatus.Store(400)
+	manage("POST", fmt.Sprintf("/api/v1/admin/accounts/%d/clear-rate-limit", firstAccount), admin, map[string]any{})
+	manage("PUT", fmt.Sprintf("/api/v1/admin/accounts/%d", firstAccount), admin, map[string]any{"credentials": map[string]any{"model_mapping": map[string]string{"ops-http": "ops-private-model"}}})
+	body["stream"] = true
+	failure = call("POST", "/v1/chat/completions", secret, body)
+	if failure.Code != 502 {
+		t.Fatal("mapped rejection", failure.Code, failure.Body.String())
+	}
+	failureID = failure.Header().Get("X-Request-ID")
+	for _, path := range []string{"request-errors", "upstream-errors"} {
+		rows := listErrors(path + "?request_id=" + failureID)
+		if len(rows) != 1 || rows[0]["model"] != "ops-http" || rows[0]["requested_model"] != "ops-http" || rows[0]["upstream_model"] != "ops-private-model" || rows[0]["stream"] != true || rows[0]["request_type"] != float64(2) {
+			t.Fatal("mapped rejection metadata", path, rows)
+		}
+		if path == "request-errors" {
+			detail := manage("GET", fmt.Sprintf("/api/v1/usage/errors/%d", int64(rows[0]["id"].(float64))), token, nil)
+			if detail["model"] != "ops-http" || detail["stream"] != true || detail["request_type"] != float64(2) || detail["upstream_model"] != nil {
+				t.Fatal("upstream mapping exposed to user", detail)
+			}
+		}
 	}
 	var userErrors struct {
 		Items []struct {

@@ -425,7 +425,43 @@ func (a *App) markGatewayFailure(ctx context.Context, s *gatewaySelection, statu
 		slog.Error("account failure state update failed", "account_id", s.Account.ID)
 	}
 }
-func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelection, r *http.Request, cause error, started time.Time) {
+
+// Capture only routing metadata from an already decoded request. Never retain
+// its body or infer a client's model from the account chosen after mapping.
+func errorRequestInfo(r *http.Request, protocol string, body map[string]json.RawMessage) textRequest {
+	in := textRequest{Protocol: protocol, Model: credentialString(body, "model")}
+	_ = json.Unmarshal(body["stream"], &in.Stream)
+	if protocol == "gemini" {
+		model, action, ok := strings.Cut(r.PathValue("action"), ":")
+		if !ok {
+			model, action, ok = strings.Cut(r.PathValue("action"), "/")
+		}
+		in.Model, in.Stream = "", false
+		if ok && validNativeModel(model) {
+			in.Model, in.Stream = model, action == "streamGenerateContent"
+		}
+	}
+	return in
+}
+
+func errorRequestType(r *http.Request, in textRequest) int {
+	if socketTurn(r.Context()) != nil || in.Protocol == "realtime" {
+		return 3
+	}
+	if in.Stream {
+		return 2
+	}
+	return 1
+}
+
+func errorModel(model string) string {
+	if !validModelPattern(model) || len(model) > 100 || strings.Contains(model, "*") {
+		return ""
+	}
+	return model
+}
+
+func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelection, r *http.Request, in textRequest, cause error, started time.Time) {
 	// Invalid unauthenticated requests do not create an unbounded database audit stream.
 	if g == nil || skipErrorMonitoring(cause) {
 		return
@@ -438,8 +474,10 @@ func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelect
 		status = e.status
 	}
 	var aid any
+	var upstreamModel string
 	if s != nil && s.Account != nil {
 		aid = s.Account.ID
+		upstreamModel = errorModel(s.UpstreamModel)
 	}
 	message := safeGatewayError(cause)
 	var passthrough *passthroughError
@@ -448,10 +486,10 @@ func (a *App) recordGatewayError(id string, g *gatewayIdentity, s *gatewaySelect
 		// provider body in operational diagnostics.
 		message = fmt.Sprintf("upstream returned HTTP %d (error rule applied)", passthrough.UpstreamStatus)
 	}
-	countOnly := strings.HasSuffix(r.URL.Path, "/count_tokens") || strings.HasSuffix(r.URL.Path, "/input_tokens") ||
+	countOnly := in.CountOnly || strings.HasSuffix(r.URL.Path, "/count_tokens") || strings.HasSuffix(r.URL.Path, "/input_tokens") ||
 		strings.HasSuffix(r.URL.Path, ":countTokens") || strings.HasSuffix(r.URL.Path, "/countTokens")
-	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms,is_count_tokens,inbound_endpoint,client_ip,user_agent)
- VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11,$12,$7,NULLIF($13,'')::inet,$14)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, r.URL.Path, status, message, status == 429 || status == 402, time.Since(started).Milliseconds(), countOnly, clientIP(r), truncate(r.UserAgent(), 512))
+	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,request_path,error_phase,error_type,status_code,error_message,error_source,error_owner,is_business_limited,duration_ms,is_count_tokens,inbound_endpoint,client_ip,user_agent,model,requested_model,upstream_model,stream,request_type)
+ VALUES($1,$2,$3,$4,$5,$6,$7,'gateway','request_failed',$8,$9,'gateway','gateway',$10,$11,$12,$7,NULLIF($13,'')::inet,$14,NULLIF($15,''),NULLIF($15,''),NULLIF(NULLIF($16,''),$15),$17,$18)`, id, g.UserID, g.Key.ID, aid, g.Key.GroupID, g.Group.Platform, truncate(r.URL.Path, 256), status, message, status == 429 || status == 402, time.Since(started).Milliseconds(), countOnly, clientIP(r), truncate(r.UserAgent(), 512), errorModel(in.Model), upstreamModel, in.Stream, errorRequestType(r, in))
 	if err != nil {
 		slog.Error("gateway error record failed", "request_id", id)
 	}

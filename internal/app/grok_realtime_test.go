@@ -142,7 +142,7 @@ func testGrokRealtime(t *testing.T, a *App, admin string) {
 			if resp == nil || resp.StatusCode != want {
 				t.Fatalf("handshake want %d: %v %v", want, resp, err)
 			}
-			return nil, ""
+			return nil, resp.Header.Get("X-Request-ID")
 		}
 		if err != nil {
 			t.Fatal("realtime dial", err)
@@ -349,7 +349,11 @@ func testGrokRealtime(t *testing.T, a *App, admin string) {
 		t.Fatal("orphan recovery failed")
 	}
 	manage("PUT", gp, admin, map[string]any{"model_allowlist": map[string]any{"enabled": true, "models": []string{"other"}}})
-	dial("/realtime", key, nil, 403)
+	_, deniedID := dial("/realtime", key, nil, 403)
+	var recorded bool
+	if err := a.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM ops_error_logs WHERE request_id=$1 AND requested_model='grok-voice-latest' AND stream AND request_type=3)", deniedID).Scan(&recorded); err != nil || !recorded {
+		t.Fatal("realtime error request metadata", err)
+	}
 	manage("PUT", gp, admin, map[string]any{"model_allowlist": map[string]any{"enabled": false}})
 	manage("PUT", gp, admin, map[string]any{"claude_code_only": true})
 	dial("/realtime", key, nil, 403)

@@ -180,7 +180,8 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	var g *gatewayIdentity
 	var selected *gatewaySelection
-	fail := func(err error) { a.recordGatewayError(id, g, selected, r, err, started); gatewayError(w, err) }
+	in := textRequest{Protocol: "custom-voices", Model: "custom-voices"}
+	fail := func(err error) { a.recordGatewayError(id, g, selected, r, in, err, started); gatewayError(w, err) }
 	if err := a.checkInstance(r.Context()); err != nil {
 		fail(err)
 		return
@@ -354,7 +355,6 @@ func (a *App) customVoices(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"voices": voices, "pagination_token": next})
 		return
 	}
-	in := textRequest{Protocol: "custom-voices", Model: "custom-voices"}
 	var binding *responseBinding
 	if voice != nil {
 		binding = &voice.Binding

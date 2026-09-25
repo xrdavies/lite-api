@@ -476,9 +476,9 @@ func (a *App) recordUpstreamFailure(id string, g *gatewayIdentity, s *gatewaySel
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	path, _, _ = strings.Cut(path, "?")
-	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,model,requested_model,upstream_model,request_path,stream,error_phase,error_type,error_owner,error_source,error_message,upstream_status_code,inbound_endpoint,upstream_endpoint,duration_ms,is_count_tokens)
- VALUES($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,'upstream','upstream_rejected','provider','upstream',$11,$12,$9,$13,$14,$15)`,
-		id, g.UserID, g.Key.ID, s.Account.ID, g.Key.GroupID, s.Account.Platform, in.Model, s.UpstreamModel, r.URL.Path, in.Stream, fmt.Sprintf("upstream returned HTTP %d", status), status, path, time.Since(started).Milliseconds(), in.CountOnly)
+	_, err := a.DB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,api_key_id,account_id,group_id,platform,model,requested_model,upstream_model,request_path,stream,error_phase,error_type,error_owner,error_source,error_message,upstream_status_code,inbound_endpoint,upstream_endpoint,duration_ms,is_count_tokens,request_type,client_ip,user_agent)
+ VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),NULLIF($7,''),NULLIF(NULLIF($8,''),$7),$9,$10,'upstream','upstream_rejected','provider','upstream',$11,$12,$9,$13,$14,$15,$16,NULLIF($17,'')::inet,$18)`,
+		id, g.UserID, g.Key.ID, s.Account.ID, g.Key.GroupID, s.Account.Platform, errorModel(in.Model), errorModel(s.UpstreamModel), truncate(r.URL.Path, 256), in.Stream, fmt.Sprintf("upstream returned HTTP %d", status), status, truncate(path, 256), time.Since(started).Milliseconds(), in.CountOnly, errorRequestType(r, in), clientIP(r), truncate(r.UserAgent(), 512))
 	if err != nil {
 		slog.Error("upstream error record failed", "request_id", id)
 	}

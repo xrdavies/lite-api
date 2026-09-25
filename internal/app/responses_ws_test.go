@@ -340,6 +340,10 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	write(other, b)
 	assertResult(terminal(other), "error")
 	other.CloseNow()
+	var recorded bool
+	if err := a.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM ops_error_logs WHERE api_key_id=$1 AND requested_model='public-ws' AND model='public-ws' AND stream AND request_type=3)", kid).Scan(&recorded); err != nil || !recorded {
+		t.Fatal("WebSocket error request metadata", err)
+	}
 	// Stored results can reconnect through any alias but cannot cross keys.
 	c = dial("/backend-api/codex/responses", key, nil, 101)
 	b = body()

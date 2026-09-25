@@ -633,9 +633,10 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	defer controller.SetWriteDeadline(time.Time{})
 	var g *gatewayIdentity
 	var selected *gatewaySelection
+	errorIn := errorRequestInfo(r, protocol, nil)
 	committed := false
 	fail := func(err error) {
-		a.recordGatewayError(id, g, selected, r, err, started)
+		a.recordGatewayError(id, g, selected, r, errorIn, err, started)
 		if !committed {
 			textGatewayError(w, protocol, err)
 		} else {
@@ -685,12 +686,16 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	}
 	if err != nil || request == nil {
 		if audioProtocol(protocol) {
+			if json.Unmarshal(body, &request) == nil && request != nil {
+				errorIn = errorRequestInfo(r, protocol, request)
+			}
 			fail(err)
 		} else {
 			fail(bad("JSON object or image edit multipart form required"))
 		}
 		return
 	}
+	errorIn = errorRequestInfo(r, protocol, request)
 	in, err := parseTextRequest(r, protocol, request)
 	if err != nil {
 		fail(err)
@@ -711,6 +716,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if audioIn != nil && audioIn.Model != "" {
 		in.Model = audioIn.Model
 	}
+	errorIn = in
 	r = r.WithContext(context.WithValue(r.Context(), clientPolicyKey{}, clientPolicy{protocol, claudeCodeClient(r, request)}))
 	ctx = r.Context()
 	if err = a.resolveClientGroup(r, g); err != nil {
@@ -1425,7 +1431,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			finishRequest, err = a.submitBackgroundResponse(w, r, g, selected, wireIn, upstreamBody, id, digest(string(body)), effort, originalEffort, started)
 			if err != nil {
 				if w.Header().Get("Content-Type") == "text/event-stream" {
-					a.recordGatewayError(id, g, selected, r, err, started)
+					a.recordGatewayError(id, g, selected, r, errorIn, err, started)
 				} else {
 					fail(err)
 				}

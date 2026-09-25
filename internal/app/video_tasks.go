@@ -400,7 +400,8 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 	defer controller.SetWriteDeadline(time.Time{})
 	var g *gatewayIdentity
 	var s *gatewaySelection
-	fail := func(err error) { a.recordGatewayError(requestID, g, s, r, err, started); gatewayError(w, err) }
+	in := textRequest{Protocol: protocol}
+	fail := func(err error) { a.recordGatewayError(requestID, g, s, r, in, err, started); gatewayError(w, err) }
 	if err := a.checkInstance(r.Context()); err != nil {
 		fail(err)
 		return
@@ -453,9 +454,13 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 		body, model, err = parseSeedance(raw)
 	}
 	if err != nil {
+		if json.Unmarshal(raw, &body) == nil {
+			in = errorRequestInfo(r, protocol, body)
+		}
 		fail(err)
 		return
 	}
+	in.Model = model
 	if !g.Group.allows(model) {
 		fail(denied())
 		return
@@ -518,7 +523,6 @@ func (a *App) videoTasks(w http.ResponseWriter, r *http.Request, protocol, opera
 			return
 		}
 	}
-	in := textRequest{Protocol: protocol, Model: model}
 	var binding *responseBinding
 	var content []map[string]json.RawMessage
 	if protocol == "seedance" {

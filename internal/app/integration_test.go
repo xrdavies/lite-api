@@ -314,6 +314,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testGatewayUsage(t, a, admin, otherToken)
 	testUsageQueries(t, a, admin, otherToken)
 	testUsageErrors(t, a, admin, otherToken)
+	testErrorRequestMetadata(t, a, admin)
 	testGroupChannelQueries(t, a, admin, otherToken)
 	testStreamTimeout(t, a, admin, otherToken)
 	testAnthropicPolicy(t, a, admin, otherToken)

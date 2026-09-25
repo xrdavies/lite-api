@@ -161,7 +161,7 @@ func testUsageErrors(t *testing.T, a *App, admin, other string) {
 		r.RemoteAddr = "192.0.2.242:1234"
 		r.Header.Set("User-Agent", "test-client")
 		requestID := fmt.Sprintf("error-query-writer-%d", i)
-		a.recordGatewayError(requestID, g, nil, r, &apiError{429, "rate limit exceeded"}, time.Now())
+		a.recordGatewayError(requestID, g, nil, r, textRequest{}, &apiError{429, "rate limit exceeded"}, time.Now())
 		var id int64
 		if err := a.DB.QueryRow("SELECT id FROM ops_error_logs WHERE request_id=$1", requestID).Scan(&id); err != nil {
 			t.Fatal(err)

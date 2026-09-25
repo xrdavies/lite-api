@@ -102,7 +102,8 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", id)
 	var g *gatewayIdentity
 	var selected *gatewaySelection
-	fail := func(err error) { a.recordGatewayError(id, g, selected, r, err, started); gatewayError(w, err) }
+	in := textRequest{Protocol: "realtime", Stream: true}
+	fail := func(err error) { a.recordGatewayError(id, g, selected, r, in, err, started); gatewayError(w, err) }
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		fail(&apiError{426, "WebSocket upgrade required"})
 		return
@@ -134,6 +135,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 		fail(bad("invalid realtime model"))
 		return
 	}
+	in.Model = model
 	ctx, cancel := context.WithTimeout(r.Context(), time.Hour)
 	defer cancel()
 	r = r.WithContext(context.WithValue(ctx, clientPolicyKey{}, clientPolicy{Protocol: "realtime"}))
@@ -177,7 +179,6 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	defer a.releaseSlot("user", g.UserID)
 	defer a.trackKeySlot(g.Key.ID)()
 	snapshot := g.Group
-	in := textRequest{Protocol: "realtime", Model: model, Stream: true}
 	binding, err := a.voiceLibraryBinding(ctx, g)
 	if err != nil {
 		fail(err)
@@ -299,7 +300,7 @@ func (a *App) grokRealtime(w http.ResponseWriter, r *http.Request) {
 	client.SetReadLimit(4 << 20)
 	connected := time.Now()
 	if err = a.relayRealtime(ctx, cancel, client, upstream, r, id, model, upstreamID, connected, g, selected); err != nil {
-		a.recordGatewayError(id, g, selected, r, err, started)
+		a.recordGatewayError(id, g, selected, r, in, err, started)
 	}
 }
 
