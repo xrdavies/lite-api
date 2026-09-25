@@ -32,6 +32,8 @@ type gatewayGroup struct {
 	audioPrices
 	videoPrices
 	reasoningPolicy
+	ForceFast       bool                `json:"force_openai_fast"`
+	FreeFast        bool                `json:"free_openai_fast"`
 	ID              int64               `json:"id"`
 	Platform        string              `json:"platform"`
 	Rate            json.Number         `json:"rate_multiplier"`
@@ -970,6 +972,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var responsesBridge *chatResponsesStream
 	var chatRequest *responsesChatRequest
 	maxAttempts := 3
+	originalTier := request["service_tier"]
 	if in.Search != nil || audioIn != nil {
 		maxAttempts = 4
 	}
@@ -1057,8 +1060,20 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return
 			}
 		}
+		// A retry may select a different wire protocol; start with the client tier.
+		delete(request, "service_tier")
+		if originalTier != nil {
+			request["service_tier"] = originalTier
+		}
+		tier, err = g.applyFast(request, selected.Account, in)
+		if err != nil {
+			selected.Release()
+			fail(err)
+			return
+		}
 		upstreamBody, _ := json.Marshal(request)
 		wireIn, chatBridge = in, nil
+		wireIn.Tier = tier
 		wireIn.Effort = effort
 		anthropicBridge = nil
 		geminiBridge = nil
@@ -1301,7 +1316,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		upstreamStarted = time.Now()
 		if in.Background {
 			defer selected.Release()
-			finishRequest, err = a.submitBackgroundResponse(w, r, g, selected, in, upstreamBody, id, digest(string(body)), effort, originalEffort, started)
+			finishRequest, err = a.submitBackgroundResponse(w, r, g, selected, wireIn, upstreamBody, id, digest(string(body)), effort, originalEffort, started)
 			if err != nil {
 				if w.Header().Get("Content-Type") == "text/event-stream" {
 					a.recordGatewayError(id, g, selected, r, err, started)
@@ -1819,7 +1834,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if anthropicBridge != nil || anthropicResponses != nil || messagesBridge != nil || responsesMessages != nil || geminiBridge != nil || geminiMessages != nil {
 			billingEffort = wireIn.Effort
 		}
-		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, observation.Tier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
+		billingTier := observation.Tier
+		if selected.Account.Platform == "openai" {
+			billingTier = openAIBillingTier(tier, billingTier)
+		}
+		receipt, err := a.makeReceipt(id, g, selected, model, observation.Model, billingTier, billingEffort, observation.Usage, stream, time.Since(started), firstToken, started, payloadHash, clientIP(r), r.UserAgent(), r.URL.Path, upstreamID)
 		if err == nil {
 			receipt.WebSocket = socketTurn(ctx) != nil
 			receipt.RequestedEffort = originalEffort

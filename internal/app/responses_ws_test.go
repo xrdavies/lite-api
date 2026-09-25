@@ -74,7 +74,7 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	_ = id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "sockets@example.test", "password": "sockets-password", "balance": 100, "concurrency": 2}))
 	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "sockets@example.test", "password": "sockets-password"})["access_token"].(string)
 	price := []any{map[string]any{"platform": "openai", "models": []string{"public-ws"}, "input_price": "0.001", "output_price": "0.002", "cache_read_price": "0.0005", "cache_write_price": "0"}}
-	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Sockets", "platform": "openai", "model_pricing": price, "max_reasoning_effort": "low"}))
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Sockets", "platform": "openai", "model_pricing": price, "max_reasoning_effort": "low", "force_openai_fast": true, "free_openai_fast": true}))
 	gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
 	keyData := must("POST", "/api/v1/keys", user, map[string]any{"name": "Sockets", "group_id": gid, "quota": 100})
 	key, kid := keyData["key"].(string), id(keyData)
@@ -113,6 +113,9 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 			}
 			if credentialString(req, "type") != "response.create" || req["stream"] != nil || req["stream_id"] != nil || credentialString(req, "model") != "up-ws" {
 				t.Error("wrong forwarded request", string(raw))
+			}
+			if credentialString(req, "service_tier") != "priority" {
+				t.Error("WebSocket force fast not applied")
 			}
 			var reasoning struct{ Effort string }
 			_ = json.Unmarshal(req["reasoning"], &reasoning)
@@ -292,6 +295,10 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	var kind int
 	if err := a.DB.QueryRow("SELECT actual_cost::text,reasoning_effort,requested_reasoning_effort,openai_ws_mode,request_type FROM usage_logs WHERE api_key_id=$1 ORDER BY id DESC LIMIT 1", kid).Scan(&cost, &effort, &requested, &ws, &kind); err != nil || cost != "0.0190000000" || effort != "low" || requested != "high" || !ws || kind != 3 {
 		t.Fatal(cost, effort, requested, ws, kind, err)
+	}
+	var fastTier, total string
+	if err := a.DB.QueryRow("SELECT service_tier,total_cost::text FROM usage_logs WHERE api_key_id=$1 ORDER BY id DESC LIMIT 1", kid).Scan(&fastTier, &total); err != nil || fastTier != "priority" || total != "0.0380000000" {
+		t.Fatal("WebSocket fast accounting", fastTier, total, err)
 	}
 	b = body()
 	b["previous_response_id"] = first

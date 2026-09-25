@@ -279,7 +279,11 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 	t.CodeTool = t.CodeTool || len(t.Containers) > 0
 	if !failed || observation.Usage != (priceUsage{}) {
 		at := time.Now().UTC()
-		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, observation.Model, observation.Tier, t.Effort, observation.Usage, t.Stream, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamID)
+		tier := observation.Tier
+		if t.Selection.Account.Platform == "openai" {
+			tier = openAIBillingTier(t.Tier, tier)
+		}
+		t.Receipt, err = a.makeReceipt(t.ID, &t.Identity, &t.Selection, t.Requested, observation.Model, tier, t.Effort, observation.Usage, t.Stream, at.Sub(t.Created), 0, t.Created, t.Payload, t.IP, t.UserAgent, t.Inbound, t.UpstreamID)
 		if err != nil {
 			return err
 		}

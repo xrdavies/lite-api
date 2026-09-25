@@ -65,7 +65,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	prices := func(n string) []any {
 		return []any{map[string]any{"models": []string{"bg-model"}, "platform": "openai", "input_price": n, "output_price": "0.002", "cache_read_price": "0.0001", "cache_write_price": "0.003"}}
 	}
-	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Background", "platform": "openai", "model_pricing": prices("0.001")}))
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Background", "platform": "openai", "model_pricing": prices("0.001"), "force_openai_fast": true, "free_openai_fast": true}))
 	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "background@example.test", "password": "background-password", "balance": 100, "concurrency": 5}))
 	token := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "background@example.test", "password": "background-password"})["access_token"].(string)
 	k := must("POST", "/api/v1/keys", token, map[string]any{"name": "background", "group_id": gid, "quota": 100})
@@ -93,6 +93,9 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 			_ = json.NewDecoder(r.Body).Decode(&request)
 			if credentialString(request, "model") != "native-bg" || string(request["background"]) != "true" {
 				t.Error("background body mapping")
+			}
+			if creates == 1 && credentialString(request, "service_tier") != "priority" {
+				t.Error("background force fast not applied")
 			}
 			if next == "reject" || next == "ambiguous" {
 				status := 400
@@ -288,7 +291,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 		t.Fatal("zero balance create", w.Code)
 	}
 	exec("UPDATE users SET balance=100 WHERE id=$1", uid)
-	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.5")})
+	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.5"), "force_openai_fast": false, "free_openai_fast": false})
 	exec("ALTER TABLE usage_logs ADD CONSTRAINT test_background_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID")
 	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_background_failure")
 	set(first, "completed")
@@ -320,6 +323,10 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	var cost, balance, used string
 	if err := a.DB.QueryRow("SELECT count(*),sum(actual_cost)::text FROM usage_logs WHERE request_id=$1", task.ID).Scan(&count, &cost); err != nil || count != 1 || cost != "0.0375000000" {
 		t.Fatal("background receipt", count, cost, err)
+	}
+	var tier, total string
+	if err := a.DB.QueryRow("SELECT service_tier,total_cost::text FROM usage_logs WHERE request_id=$1", task.ID).Scan(&tier, &total); err != nil || tier != "priority" || total != "0.0750000000" || task.Tier != "priority" || !task.Identity.Group.FreeFast {
+		t.Fatal("recovered background fast snapshot", tier, total, task.Tier, err)
 	}
 	if err := a.DB.QueryRow("SELECT u.balance::text,k.quota_used::text FROM users u JOIN api_keys k ON k.user_id=u.id WHERE k.id=$1", kid).Scan(&balance, &used); err != nil || balance != "99.96250000" || used != "0.03750000" {
 		t.Fatal("background funds", balance, used, err)

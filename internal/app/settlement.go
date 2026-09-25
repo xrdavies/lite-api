@@ -83,6 +83,22 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 			return nil, err
 		}
 	}
+	// The concession changes customer charges only, preserving tier and upstream costs.
+	if g.Group.FreeFast && g.openAIFastScope() && s.Account.Platform == "openai" && (tier == "priority" || tier == "fast") && u.VideoCount == 0 && s.Audio == "" && s.Search == "" {
+		var standard priceCost
+		if u.ImageCount > 0 && s.ResponseImage != nil {
+			standard, _, _, err = s.generatedImageCost(g.Group, model, u, "", effort, at)
+		} else {
+			standard, err = calculatePrice(p, u, rate, "", effort, "", at, g.Group.LongContext)
+		}
+		if err == nil && u.SearchCalls > 0 {
+			err = addHostedSearchCost(&standard, g.Group, u.SearchCalls, rate)
+		}
+		if err != nil {
+			return nil, err
+		}
+		cost.Actual, cost.Debit = standard.Actual, standard.Debit
+	}
 	r := &usageReceipt{RequestID: id, PayloadHash: payload, UserID: g.UserID, KeyID: g.Key.ID, AccountID: s.Account.ID, GroupID: g.Key.GroupID, ChannelID: s.ChannelID, Platform: s.Account.Platform, Model: model, RequestedModel: requested, UpstreamModel: s.UpstreamModel, ResponseModel: response, ServiceTier: tier, Effort: effort, Cost: cost, UserRate: g.Group.Rate.String(), AccountRate: s.Rate.String(), Usage: u, Stream: stream, Duration: duration.Milliseconds(), FirstToken: first, At: at, IP: ip, UserAgent: truncate(agent, 512), Inbound: inbound, UpstreamRequestID: truncate(upstreamID, 128), BillingMode: p.BillingMode}
 	if u.VideoCount > 0 {
 		r.UserRate = g.Group.videoRate().String()

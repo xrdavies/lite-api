@@ -65,6 +65,10 @@ OpenAI、Anthropic 和复合分组可配置 `max_reasoning_effort`、`max_reason
 
 策略处理显式 `reasoning.effort`、`reasoning_effort`、`output_config.effort`，保留嵌套其他字段；缺省值不补写，未知值交由上游处理。Chat、Responses、Messages 及其复合派发均使用实际转发 effort 的价格倍率；用量中的 `requested_reasoning_effort` 单独保留规范化的客户端请求值（未知/none 为 null，缺省时可记录模型名的已知后缀）。在途修改策略不改变该次结算，已完成的幂等请求仍可原样重放。省略/null 保留配置，空上限取消限制，空映射数组清除规则；策略不用于 Gemini 或其他具体平台。
 
+OpenAI/composite 分组支持 `force_openai_fast` 和 `free_openai_fast`：前者将发往 OpenAI Chat/Responses 协议的文本请求设为 `service_tier=priority`，包含 Messages 转换、JSON/SSE、Responses WebSocket 和后台任务；原生 Anthropic 协议、计数和独立媒体入口不强制添加。`fast` 别名归一为 priority，未强制时其余合法档位原样保留，未知档位在派发前拒绝。省略/null 保留开关，false 关闭；其他平台保存时归一为 false。两个字段仅在管理员分组视图返回。
+
+`free_openai_fast` 只将 priority/fast 的用户费用按标准档重算，保留原用户/分组倍率、推理与时段倍率及工具费用；`total_cost`、成本明细和账号额度仍按有效档位计算。上游声明较低档位时使用较低档计费，缺省、未知或较高声明不能提高收费；响应内容保持上游原值，用量 `service_tier` 记录计费采用的档位。请求发出后的设置变化不改本次价格，后台任务持久化开关及实际发送档位，SQL 故障恢复沿用原快照并去重。全局 Fast/Flex 规则仍待实现，本节仅描述已接入的分组策略。
+
 管理员还可通过 `GET /api/v1/admin/accounts/{id}/usage` 查询适用的账号额度信息。Grok 返回已观察到的请求/token 限额、重置时间、Retry-After 与时间戳，并附本地当日及滚动 24 小时精确用量；HTTP（含 SSE 响应头）与 WebSocket 握手共用采集，尚无观测时明确返回 `quota_unknown`。快照仅保留已解析数值，不保存任意头、Cookie 或 plan 声明；不改变账号配置版本、消费计数或人工状态。凭证、地址、协议及代理变化清除快照，旧请求不能覆盖新配置。无额度头的普通成功响应保留上次观测及原时间戳；401/403/429 记录最近拒绝，不把缺少额度当成零。快照是历史观测，不保证当前剩余额度，也不直接改变调度。
 
 Gemini 同一路径返回 `source=local` 的本地估算，按模型名 flash/lite 与其余 Pro 分类；每日按 America/Los_Angeles 自然日（含夏令时），每分钟按固定分钟统计。`credentials.tier_id` 仅 Gemini 接受空字符串、`aistudio_free`、`aistudio_paid`；缺省沿用固定兼容值 Pro 50/日、2/分钟及 Flash 1500/日、15/分钟，paid 不显示日额度、分钟分别为 1000/2000。这些值不是实时原厂额度，估算不用于调度。窗口 `cost` 沿用用户实际消费口径，计数和金额直接由 SQL 汇总。
