@@ -53,7 +53,7 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-deployment.py
 - 重新升级后创建 programmatic 后台任务，修改价格并制造 SQL 故障，再次强杀应用/Redis/PostgreSQL；由当前版本恢复原价一次结算，核对 Key 隔离、程序结果、幂等重放和无声明续接。该任务不交给不认识 programmatic 标记的旧版本。
 - 在只读镜像中使用编译内置词表执行 Grok 无账号计数、DeepSeek 本地计数和别名幂等重放；上游调用次数、余额和消费记录保持不变。
 
-此脚本补充 `scripts/test-integration.py` 的 Docker/race 业务回归，不能代替真实供应商协议验证、对象存储故障测试或全量容量测试。
+此脚本补充 `scripts/test-integration.py` 的 Docker/race 业务回归。后者使用临时 MinIO 验证 S3 签名、图片转存/下载、存储故障与账务恢复；两者均不能代替真实模型供应商、各云存储配置联调或全量容量测试。
 
 ## 发布与回退
 

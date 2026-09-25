@@ -418,7 +418,11 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/check-schema.py
 DOCKER_CONTEXT=desktop-linux python3 scripts/test-integration.py
 ```
 
-集成脚本创建独立的临时 PostgreSQL/Redis，运行 race 检测和真实数据库测试，结束后删除测试容器。普通 `go test` 未配置 `TEST_DATABASE_URL`、`TEST_REDIS_URL` 时跳过数据库集成用例。若给集成脚本提供 `TEST_UPSTREAM_BASE_URL`、`TEST_UPSTREAM_MODEL` 和秘密环境变量 `TEST_UPSTREAM_API_KEY`，会额外发起两次可能计费的真实网关请求，并核对用量、余额及 Key 计数。指定中转的 `gpt-5.6-luna` 已通过 Chat 和 Responses 的真实 JSON/SSE 网关验证；设置 `TEST_UPSTREAM_PROTOCOL=responses` 可验证 Responses JSON/SSE，默认 `chat_completions`。测试价格仅用于验证账务，并非上游报价。
+集成脚本创建独立的临时 PostgreSQL、Redis 和 MinIO，运行 race 检测、真实数据库及 S3 协议测试，结束后删除测试容器。MinIO 仅用于隔离验收，使用固定摘要镜像、随机凭证和本机临时端口；生产部署按需连接自己的 S3 兼容存储。普通 `go test` 未配置 `TEST_DATABASE_URL`、`TEST_REDIS_URL` 时跳过数据库集成用例，未配置 `TEST_S3_ENDPOINT` 时跳过真实 S3 专项；完整集成所需的 `TEST_S3_ENDPOINT`、`TEST_S3_ACCESS_KEY` 和 `TEST_S3_SECRET_KEY` 由脚本注入。
+
+存储验收让 MinIO 实际校验签名，覆盖桶 HEAD、图片 PUT、含中文/空格/特殊字符的对象名、签名 GET、错误凭证、篡改和过期链接，以及异步图片生成→转存→查询→下载。故障测试覆盖上传拒绝、重定向、超限、传输中断、取消、私网目标拒绝、SQL 结算失败及新应用状态恢复；已发生消费不因转存失败丢失，重复恢复不重新生成或扣费。测试不代替各云存储服务的独立配置联调。
+
+若给集成脚本提供 `TEST_UPSTREAM_BASE_URL`、`TEST_UPSTREAM_MODEL` 和秘密环境变量 `TEST_UPSTREAM_API_KEY`，会额外发起两次可能计费的真实网关请求，并核对用量、余额及 Key 计数。指定中转的 `gpt-5.6-luna` 已通过 Chat 和 Responses 的真实 JSON/SSE 网关验证；设置 `TEST_UPSTREAM_PROTOCOL=responses` 可验证 Responses JSON/SSE，默认 `chat_completions`。测试价格仅用于验证账务，并非上游报价。
 
 数据库定义位于 `schema/baseline.sql`，固定来源及校验和位于 `schema/source.json`。新库省略两张插件表及其专属对象，其余业务表保留原结构和含义。`schema/contract.json` 固定表列、约束、索引、函数、触发器和序列定义；结构改变会拒绝启动。确需变更基线时，审核 SQL 后以 `scripts/check-schema.py --write-contract` 重新生成契约。正常运行不依赖其他项目目录。
 

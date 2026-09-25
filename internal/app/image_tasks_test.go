@@ -11,7 +11,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,25 +89,40 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	}
 	var storageDown atomic.Bool
 	var uploads, upstreamCalls atomic.Int32
+	s3 := testS3Storage(t, a)
+	storageURL, _ := url.Parse(s3.Endpoint)
+	proxy := httputil.NewSingleHostReverseProxy(storageURL)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	defer transport.CloseIdleConnections()
+	proxy.Transport = transport
+	proxy.ModifyResponse = func(r *http.Response) error {
+		if r.Request.Method == "PUT" && r.StatusCode == 200 {
+			uploads.Add(1)
+		}
+		return nil
+	}
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") || strings.Contains(r.Header.Get("Authorization"), "private-secret") || r.Header.Get("Cookie") != "" {
+		if (r.Method != "GET" && !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ")) || strings.Contains(r.Header.Get("Authorization"), s3.Secret) || r.Header.Get("Cookie") != "" {
 			t.Error("storage credential isolation")
 		}
 		if storageDown.Load() {
 			w.WriteHeader(503)
 			return
 		}
-		if r.Method == "HEAD" {
+		if r.Method == "HEAD" || r.Method == "GET" {
+			proxy.ServeHTTP(w, r)
 			return
 		}
-		if r.Method != "PUT" || !strings.HasPrefix(r.URL.Path, "/images/generated/imgtask_") {
+		if r.Method != "PUT" || !strings.HasPrefix(r.URL.Path, "/"+s3.Bucket+"/generated/imgtask_") {
 			t.Error("invalid image object path", r.URL.Path)
 		}
 		data, _ := io.ReadAll(r.Body)
 		if http.DetectContentType(data) != "image/png" {
 			t.Error("image bytes changed")
 		}
-		uploads.Add(1)
+		r.Body = io.NopCloser(bytes.NewReader(data))
+		proxy.ServeHTTP(w, r)
 	}))
 	defer storage.Close()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,12 +144,12 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 		_, _ = fmt.Fprintf(w, `{"created":1710000000,"data":[{"b64_json":%q}]}`, png)
 	}))
 	defer upstream.Close()
-	storageConfig := map[string]any{"enabled": true, "bucket": "images", "prefix": "generated/", "region": "auto", "endpoint": storage.URL, "force_path_style": true, "access_key_id": "access", "secret_access_key": "private-secret"}
+	storageConfig := map[string]any{"enabled": true, "bucket": s3.Bucket, "prefix": "generated/", "region": s3.Region, "endpoint": storage.URL, "force_path_style": true, "access_key_id": s3.AccessKey, "secret_access_key": s3.Secret}
 	manage("PUT", "/api/v1/admin/backups/image-storage", admin, storageConfig)
 	if !manage("POST", "/api/v1/admin/backups/image-storage/test", admin, storageConfig)["ok"].(bool) {
 		t.Fatal("object storage test")
 	}
-	if w := call("GET", "/api/v1/admin/backups/image-storage", admin, nil, ""); strings.Contains(w.Body.String(), "private-secret") || strings.Contains(w.Body.String(), "enc:v1:") {
+	if w := call("GET", "/api/v1/admin/backups/image-storage", admin, nil, ""); strings.Contains(w.Body.String(), s3.Secret) || strings.Contains(w.Body.String(), "enc:v1:") {
 		t.Fatal("storage secret disclosed")
 	}
 	uid := int64(manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": "async-images@example.test", "password": "async-images-password", "balance": 10})["id"].(float64))
@@ -186,7 +203,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 		t.Fatal("async payload conflict", w.Code)
 	}
 	raw, err := a.Redis.Get(ctx, imageTaskKey(id)).Result()
-	if err != nil || strings.Contains(raw, "private lighthouse") || strings.Contains(raw, "private-secret") || strings.Contains(raw, key) {
+	if err != nil || strings.Contains(raw, "private lighthouse") || strings.Contains(raw, s3.Secret) || strings.Contains(raw, key) {
 		t.Fatal("task request not encrypted", err)
 	}
 	if w := call("GET", "/v1/images/tasks/"+id, otherKey, nil, ""); w.Code != 404 {
@@ -200,6 +217,13 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	result := poll(id, "completed")
 	if uploads.Load() != 1 || upstreamCalls.Load() != 1 || !strings.Contains(string(result.Result), "X-Amz-Signature=") || result.CompletedAt == nil || result.ExpiresAt < *result.CompletedAt+86399 {
 		t.Fatal("image task completion", uploads.Load(), upstreamCalls.Load(), result)
+	}
+	var storedImages struct{ Data []map[string]json.RawMessage }
+	if json.Unmarshal(result.Result, &storedImages) != nil || len(storedImages.Data) != 1 {
+		t.Fatal("missing stored image")
+	}
+	if data, err := a.imageBytes(ctx, s3.MaxDownloadBytes, storedImages.Data[0]); err != nil || http.DetectContentType(data) != "image/png" {
+		t.Fatal("completed task image could not be downloaded", err)
 	}
 	var cost, balance, quota string
 	if err := a.DB.QueryRow("SELECT actual_cost::text FROM usage_logs WHERE request_id=$1", id).Scan(&cost); err != nil || cost != "0.0200000000" {
@@ -361,14 +385,14 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	delete(storageConfig, "secret_access_key")
 	manage("PUT", "/api/v1/admin/backups/image-storage", admin, storageConfig)
 	var setting string
-	if err := a.DB.QueryRow("SELECT value FROM settings WHERE key=$1", imageStorageSetting).Scan(&setting); err != nil || strings.Contains(setting, "private-secret") {
+	if err := a.DB.QueryRow("SELECT value FROM settings WHERE key=$1", imageStorageSetting).Scan(&setting); err != nil || strings.Contains(setting, s3.Secret) {
 		t.Fatal("storage settings preservation", err)
 	}
 	var storedConfig map[string]json.RawMessage
 	if json.Unmarshal([]byte(setting), &storedConfig) != nil || string(storedConfig["future_option"]) != "true" {
 		t.Fatal("unknown storage setting lost")
 	}
-	if c, err := a.activeImageStorage(ctx); err != nil || c.Secret != "private-secret" {
+	if c, err := a.activeImageStorage(ctx); err != nil || c.Secret != s3.Secret {
 		t.Fatal("storage secret not preserved", err)
 	}
 }
