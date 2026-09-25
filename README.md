@@ -255,7 +255,14 @@ OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址�
 
 三个前缀也支持兼容上游的 `/compact/{subpath...}`，例如 `/compact/detail`；上游须返回可验证的 Responses 或 compaction 对象及用量。子路径最多 8 段（含 compact），只接受 ASCII 字母、数字、`-_.`，拒绝空段和全点段；按最长前缀计算的路径及实际入口均不得超过账务字段的 128 字节。压缩和计数可带尾部斜杠，转发时去掉，别名共享幂等结果，不同压缩子路径分别计费和去重。压缩扩展仍只用原生 Responses 账号、不支持流式或后台；历史引用继续验证当前 Key、分组与原账号来源，SQL 故障通过已有账务恢复链只结算一次。
 
-兼容扩展 `/{response_id}/compact` 及其子路径也使用上述压缩链，先验证路径中的资源属于当前 Key/分组，再绑定原生上游来源。模型必填；路径提供资源上下文时 input 可省略，不自动添加或覆盖正文的 `previous_response_id`。正文历史与路径资源分别鉴权，必须属于同一上游，并合并文件、工具和容器限制；未知/已删除/转换生成的资源、跨 Key 引用或凭证轮换均拒绝。资源和子路径分别隔离幂等结果，重复恢复只扣费一次。[官方压缩接口](https://developers.openai.com/api/reference/resources/responses/methods/compact) 是 `/responses/compact`；资源压缩和嵌套后缀须由中转上游另行支持，当前以本地模拟验证。读取、删除和取消仍使用各自资源接口，其他未知子路径拒绝转发。
+兼容扩展 `/{response_id}/compact` 及其子路径也使用上述压缩链，先验证路径中的资源属于当前 Key/分组，再绑定原生上游来源。模型必填；路径提供资源上下文时 input 可省略，不自动添加或覆盖正文的 `previous_response_id`。正文历史与路径资源分别鉴权，必须属于同一上游，并合并文件、工具和容器限制；未知/已删除/转换生成的资源、跨 Key 引用或凭证轮换均拒绝。资源和子路径分别隔离幂等结果，重复恢复只扣费一次。[官方压缩接口](https://developers.openai.com/api/reference/resources/responses/methods/compact) 是 `/responses/compact`；资源压缩和嵌套后缀须由中转上游另行支持，当前以本地模拟验证。读取、删除和取消仍使用各自资源接口；其他扩展须按下述方式注册。
+
+
+管理员可通过 `PUT /api/v1/admin/settings` 配置 `responses_extension_paths`，例如 `["summarize","v2/analyze","{response_id}/revise","compare/{response_id}/{response_id}"]`。默认空数组；省略/null 保持，`[]` 清空，GET 仅向管理员返回。最多 64 个互不重叠的模板，路径字符、深度和展开后的长度遵守上述限制；不允许覆盖 compact、input_tokens、input_items 或 cancel。字面段表示上游动作，`{response_id}` 表示必须验证当前 Key/分组归属的资源；不支持通配符或任意资源代理。未注册路径返回 404，配置损坏时扩展请求返回 503。
+
+注册扩展使用普通 [Responses 创建请求和结果契约](https://developers.openai.com/api/reference/resources/responses/methods/create)，支持 JSON、SSE 和 background；模型必填，有路径资源上下文时 input 可省略。每个路径资源与正文历史分别鉴权并合并文件、工具、容器限制，同一请求必须使用同一原生 Responses 来源，不能转换成 Chat/Messages/Gemini 或改写为普通创建路径。客户端 Key、模型、额度、并发、价格预检和实际 usage 结算均沿用现有网关；上游接收后报错不换号重发。返回的新 response 和输出条目按 store 保存归属，可继续查询或续接。
+
+三个前缀及尾部斜杠共享同路径的幂等结果，不同扩展路径分别去重。后台任务保存原路径和价格快照，撤销配置仅阻止新扩展请求，已接受任务仍能查询和恢复；SQL 故障或后台断流不重新生成、不重复扣费。扩展名称和路径由中转上游提供，不表示 OpenAI 官方存在这些端点；扩展必须返回普通 Responses 对象及有效 usage，特殊无用量操作不适用。以上通过本地 HTTP 模拟和 Docker PostgreSQL/Redis 验证，未进行真实扩展上游联调。
 
 原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。
 

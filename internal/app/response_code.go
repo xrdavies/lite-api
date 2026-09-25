@@ -297,7 +297,7 @@ func responseCodeItem(item map[string]json.RawMessage) (string, string, error) {
 
 func validateResponseContainers(in textRequest, binding *responseBinding) error {
 	if in.NativeCode || in.NativeFileSearch || in.NativeProgrammatic {
-		if in.Action != "" && !in.CountOnly || in.NativeCompaction {
+		if in.Action != "" && !in.CountOnly && !in.ResponseExtension || in.NativeCompaction {
 			return bad("hosted tools require a normal Responses request")
 		}
 	}

@@ -271,6 +271,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testImageTasks(t, a, admin)
 	testBatchImages(t, a, admin)
 	testResponses(t, a, admin)
+	testResponseExtensions(t, a, admin)
 	testResponseResources(t, a, admin)
 	testBackgroundResponses(t, a, admin)
 	testModelDiscovery(t, a, admin)

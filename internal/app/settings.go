@@ -31,6 +31,11 @@ func (a *App) getSettings(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		fields[fastPolicySetting], _ = json.Marshal(fast)
+		extensions, err := a.loadResponseExtensions(r.Context())
+		if err != nil {
+			return err
+		}
+		fields[responseExtensionsSetting], _ = json.Marshal(extensions)
 		raw, err = json.Marshal(fields)
 		if err != nil {
 			return err
@@ -48,6 +53,7 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 		PlazaDescription *string             `json:"model_plaza_description"`
 		GeminiPolicy     json.RawMessage     `json:"gemini_quota_policy"`
 		FastPolicy       *fastPolicySettings `json:"openai_fast_policy_settings"`
+		ResponsePaths    *[]string           `json:"responses_extension_paths"`
 	}
 	if err := decode(w, r, &in); err != nil {
 		return err
@@ -63,6 +69,11 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 	}
+	if in.ResponsePaths != nil {
+		if err := validateResponseExtensions(*in.ResponsePaths); err != nil {
+			return err
+		}
+	}
 	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
 		if _, err := parseGeminiQuotaPolicy(in.GeminiPolicy, true); err != nil {
 			return err
@@ -74,6 +85,10 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	}
 	defer tx.Rollback()
 	values := map[string]string{}
+	if in.ResponsePaths != nil {
+		raw, _ := json.Marshal(in.ResponsePaths)
+		values[responseExtensionsSetting] = string(raw)
+	}
 	if in.FastPolicy != nil {
 		raw, _ := json.Marshal(in.FastPolicy)
 		values[fastPolicySetting] = string(raw)
@@ -99,7 +114,7 @@ func (a *App) updateSettings(w http.ResponseWriter, r *http.Request) error {
 	if in.GeminiPolicy != nil && string(in.GeminiPolicy) != "null" {
 		values[geminiQuotaSetting] = string(in.GeminiPolicy)
 	}
-	for _, key := range []string{"site_name", "available_channels_enabled", "allow_user_view_error_requests", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting, fastPolicySetting} {
+	for _, key := range []string{"site_name", "available_channels_enabled", "allow_user_view_error_requests", "model_plaza_enabled", "model_plaza_require_auth", "model_plaza_description", geminiQuotaSetting, fastPolicySetting, responseExtensionsSetting} {
 		value, ok := values[key]
 		if !ok {
 			continue

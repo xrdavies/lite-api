@@ -696,6 +696,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		return
 	}
 	errorIn = errorRequestInfo(r, protocol, request)
+	if action := strings.TrimRight(r.PathValue("action"), "/"); protocol == "responses" && action != "" && action != "input_tokens" {
+		if _, compact := responseCompactionPath("/" + action); !compact {
+			paths, e := a.loadResponseExtensions(ctx)
+			if e != nil {
+				fail(e)
+				return
+			}
+			ctx = context.WithValue(ctx, responseExtensionsKey{}, paths)
+			r = r.WithContext(ctx)
+		}
+	}
 	in, err := parseTextRequest(r, protocol, request)
 	if err != nil {
 		fail(err)
@@ -927,9 +938,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 	}
 	binding, err := a.previousResponse(ctx, g, in.Previous)
-	if err == nil && in.ResponseResource != "" {
+	for _, responseID := range in.ResponseResources {
+		if err != nil {
+			break
+		}
 		var resource *responseBinding
-		resource, err = a.previousResponse(ctx, g, in.ResponseResource)
+		resource, err = a.previousResponse(ctx, g, responseID)
 		if err == nil {
 			binding, err = mergeResponseSources(binding, resource)
 		}
@@ -968,7 +982,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 		in.NativeFileSearch = in.NativeFileSearch || len(in.VectorStores) > 0
 	}
-	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" && !in.CountOnly || in.NativeCompaction) {
+	if err == nil && in.NativeFileSearch && (len(in.VectorStores) == 0 || in.Action != "" && !in.CountOnly && !in.ResponseExtension || in.NativeCompaction) {
 		err = bad("file search requires scoped stores and a normal Responses request")
 	}
 	if err == nil {
@@ -1524,7 +1538,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			fail(failure)
 			return
 		}
-		if in.NativeMCP || in.NativeCode || in.NativeProgrammatic || in.NativeFileSearch || len(in.FileIDs) > 0 {
+		if in.ResponseExtension || in.NativeMCP || in.NativeCode || in.NativeProgrammatic || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			// A tool may already have acted before the provider returned an error.
 			fail(failure)
 			return
@@ -2086,7 +2100,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
-	if protocol == "responses" && !in.CountOnly && in.Action == "" && in.Store {
+	if protocol == "responses" && !in.CountOnly && (in.Action == "" || in.ResponseExtension) && in.Store {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if anthropicResponses != nil {
 			err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, anthropicResponses.assistant()))

@@ -21,36 +21,30 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 	}
 	action := strings.TrimRight(r.PathValue("action"), "/")
 	resource, compact := responseCompactionPath("/" + action)
+	resources, extension := matchResponseExtension(r.Context(), action)
 	switch {
 	case action == "":
-	case compact, action == "input_tokens":
+	case compact, action == "input_tokens", extension:
 		// Both endpoints are persisted in the existing VARCHAR(128) columns.
-		if len(r.URL.Path) > 128 || len("/backend-api/codex/responses/")+len(action) > 128 {
+		if len(r.URL.Path) > 128 || !safeResponsesAction(action) {
 			return in, missing()
 		}
 		segments := strings.Split(action, "/")
-		if len(segments) > 8 {
-			return in, missing()
-		}
-		for _, segment := range segments {
-			if len(segment) > 128 || strings.Trim(segment, ".") == "" {
-				return in, missing()
-			}
-			for _, c := range segment {
-				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("-_.", c)) {
-					return in, missing()
-				}
-			}
-		}
 		in.Scope += "." + action
 		if len(segments) > 1 {
 			// Keep the SQL scope bounded and separate each extension's replay.
 			in.Scope = "responses.compact." + digest(action)
 		}
+		if extension {
+			in.Scope = "responses.extension." + digest(action)
+		}
 		in.CountOnly = action == "input_tokens"
 		in.Action = "/" + action
-		in.ResponseResource = resource
-		if in.Stream {
+		in.ResponseExtension, in.ResponseResources = extension, resources
+		if resource != "" {
+			in.ResponseResources = []string{resource}
+		}
+		if in.Stream && !extension {
 			return in, bad("this Responses operation does not stream")
 		}
 	default:
@@ -71,7 +65,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 		}
 	}
 	if in.Background {
-		if in.Action != "" || socketTurn(r.Context()) != nil {
+		if in.Action != "" && !in.ResponseExtension || socketTurn(r.Context()) != nil {
 			return in, bad("background Responses require the HTTP create endpoint")
 		}
 		// Background retention is opt-in; the provider only keeps omitted/false
@@ -225,7 +219,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 				body["input"], _ = json.Marshal(items)
 			}
 		}
-	} else if in.Previous == "" && in.ResponseResource == "" && body["prompt"] == nil && !in.CountOnly {
+	} else if in.Previous == "" && len(in.ResponseResources) == 0 && body["prompt"] == nil && !in.CountOnly {
 		return in, bad("input or previous_response_id is required")
 	}
 	// Hosted tools require their own meters and platform admission.
@@ -323,7 +317,7 @@ func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json
 			return in, err
 		}
 	}
-	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" && !in.CountOnly || in.NativeCompaction) {
+	if (in.HostedSearch || in.HostedToolSearch || in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch) && (in.Action != "" && !in.CountOnly && !in.ResponseExtension || in.NativeCompaction) {
 		return in, bad("hosted tools require a normal Responses request")
 	}
 	in.FileIDs, err = requestFileIDs(body, tools, "responses")

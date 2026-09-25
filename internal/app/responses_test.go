@@ -53,7 +53,7 @@ func TestResponsesCompactionSubpaths(t *testing.T) {
 	r.SetPathValue("action", "resp_owned/compact")
 	body := map[string]json.RawMessage{"previous_response_id": json.RawMessage(`"resp_previous"`)}
 	in, err := parseResponsesRequest(r, textRequest{Protocol: "responses"}, body)
-	if err != nil || in.ResponseResource != "resp_owned" || in.Previous != "resp_previous" || len(body) != 1 {
+	if err != nil || len(in.ResponseResources) != 1 || in.ResponseResources[0] != "resp_owned" || in.Previous != "resp_previous" || len(body) != 1 {
 		t.Fatal("resource path replaced or injected body history", in, body, err)
 	}
 	delete(body, "previous_response_id")

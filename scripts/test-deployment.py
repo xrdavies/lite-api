@@ -61,14 +61,16 @@ class Provider(BaseHTTPRequestHandler):
                 calls["video"] += 1
             raw = b'{"id":"native_video"}'
             content_type = "application/json"
-        elif self.path == "/v1/responses":
+        elif self.path in ("/v1/responses", "/v1/responses/program/run"):
             assert body["model"] == "deploy-program"
             with calls_lock:
                 calls["program"] += 1
             if body.get("background"):
+                assert self.path == "/v1/responses/program/run"
                 assert body["tools"] == [{"type": "programmatic_tool_calling"}]
                 result = {"id": "resp_deploy_program", "object": "response", "status": "queued"}
             else:
+                assert self.path == "/v1/responses"
                 assert body["previous_response_id"] == "resp_deploy_program" and "tools" not in body
                 result = {"id": "resp_deploy_continued", "object": "response", "model": "deploy-program",
                           "status": "completed", "output": [], "usage": {"input_tokens": 2, "output_tokens": 3}}
@@ -353,13 +355,15 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         pkey, pkid = pkey_obj["key"], pkey_obj["id"]
         secrets_seen.append(pkey)
         program = {"model": "deploy-program", "input": "calculate", "tools": [{"type": "programmatic_tool_calling"}], "store": True, "background": True}
-        status, raw, _ = request(base, "POST", "/responses", pkey, program, "deploy-program")
+        api("PUT", "/api/v1/admin/settings", admin, {"responses_extension_paths": ["program/run"]})
+        status, raw, _ = request(base, "POST", "/responses/program/run", pkey, program, "deploy-program")
         if status != 200:
             error = raw.decode(errors="replace")
             for value in secrets_seen:
                 error = error.replace(value, "[redacted]")
             raise AssertionError(f"program submission HTTP {status}: {error}")
         assert json.loads(raw)["id"] == "resp_deploy_program"
+        api("PUT", "/api/v1/admin/settings", admin, {"responses_extension_paths": []})
         api("PUT", f"/api/v1/admin/accounts/{paid}", admin, {"extra": {"upstream_request_id_header": None}})
         api("PUT", f"/api/v1/admin/groups/{pgid}", admin, {"rate_multiplier": 9})
         sql("ALTER TABLE usage_logs ADD CONSTRAINT program_failure CHECK (false) NOT VALID;")
@@ -387,8 +391,11 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         count, cost, used = sql(f"SELECT (SELECT count(*) FROM usage_logs WHERE api_key_id={pkid}),(SELECT sum(actual_cost) FROM usage_logs WHERE api_key_id={pkid}),quota_used FROM api_keys WHERE id={pkid}").split("|")
         assert count == "1" and Decimal(cost) == Decimal("0.016") and Decimal(used) == Decimal(cost)
         assert sql(f"SELECT upstream_request_id FROM usage_logs WHERE api_key_id={pkid}") == "creation-request"
+        assert sql(f"SELECT upstream_endpoint FROM usage_logs WHERE api_key_id={pkid}") == "/v1/responses/program/run"
         assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal("0.016")
-        status, _, headers = request(base, "POST", "/v1/responses", pkey, program, "deploy-program")
+        assert request(base, "POST", "/v1/responses/program/run", pkey, program, "deploy-program")[0] == 404
+        api("PUT", "/api/v1/admin/settings", admin, {"responses_extension_paths": ["program/run"]})
+        status, _, headers = request(base, "POST", "/v1/responses/program/run/", pkey, program, "deploy-program")
         assert status == 200 and headers.get("Idempotency-Replayed") == "true" and calls == before_program
         continued = {"model": "deploy-program", "input": "continue", "previous_response_id": "resp_deploy_program"}
         assert request(base, "POST", "/responses", key, continued)[0] == 404
@@ -399,7 +406,7 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert Decimal(cost) == Decimal("0.016") + Decimal("0.072")
         assert sql(f"SELECT upstream_request_id IS NULL FROM usage_logs WHERE api_key_id={pkid} ORDER BY id DESC LIMIT 1") == "t"
         assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal(cost)
-        print("Programmatic task: SIGKILL recovery, original price, one settlement, replay and scoped continuation verified", flush=True)
+        print("Programmatic extension: SIGKILL recovery after configuration removal, original path/price, one settlement, replay and scoped continuation verified", flush=True)
         # Exercise compiled-in token vocabularies in the scratch image. Both
         # local count paths must leave the provider, wallet and ledger untouched.
         before_counts = dict(calls)

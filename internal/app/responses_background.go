@@ -127,6 +127,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 		return true, &apiError{429, "background response capacity reached"}
 	}
 	t := &backgroundResponse{videoTask: videoTask{ID: id, Target: responseTarget(s.Account), Stage: "submitting", Identity: *g, Selection: *s, Requested: in.Model, Payload: payload, IP: clientIP(r), UserAgent: truncate(r.UserAgent(), 512), Inbound: r.URL.Path, Created: started}, Store: in.Store, Stream: in.Stream, Effort: effort, Tier: in.Tier, RequestedEffort: requestedEffort}
+	t.Operation = in.Action
 	t.MCPTool = in.NativeMCP
 	t.ProgrammaticTool = in.NativeProgrammatic
 	t.CodeTool = in.NativeCode
@@ -156,7 +157,7 @@ func (a *App) submitBackgroundResponse(w http.ResponseWriter, r *http.Request, g
 	creating = false
 	upstreamCtx, stop := context.WithCancel(r.Context())
 	defer stop()
-	resp, err := a.upstreamRequestHeaders(upstreamCtx, s.Account, "POST", "/v1/responses", body, in.Headers)
+	resp, err := a.upstreamRequestHeaders(upstreamCtx, s.Account, "POST", "/v1/responses"+t.Operation, body, in.Headers)
 	if err != nil {
 		return false, err
 	}
@@ -289,7 +290,7 @@ func (a *App) observeBackgroundResponse(ctx context.Context, t *backgroundRespon
 			return err
 		}
 		t.Receipt.RequestedEffort = t.RequestedEffort
-		t.Receipt.Upstream = "/v1/responses"
+		t.Receipt.Upstream = "/v1/responses" + t.Operation
 		t.Receipt.At = at
 	}
 	t.Stage = "settling"
