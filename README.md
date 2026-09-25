@@ -433,6 +433,8 @@ Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`ap
 
 管理员审计查询为 `/api/v1/admin/audit-logs` 和 `/{id}`，支持操作者、动作、方法、IP、RFC3339 时间、成功状态及关键词筛选；每页最多 200 条。查询不提供清空能力。`/api/v1/admin/usage/search-users` 与 `/search-api-keys` 为账务筛选提供用户/Key 简要信息，包含历史用户归属，不返回密码和 Key 原文。
 
+审计记录密码登录成功/失败、刷新失败、退出，以及已认证的管理/用户变更。成功刷新和普通 GET 不记录；管理员读取全局 Key 状态、用户 Key 列表和分组 Key 列表单独记录。登录只有成功校验后才关联用户，失败请求不据提交的邮箱或会话 ID 冒认身份；退出可通过已验证 JWT 或成功撤销的 refresh token 关联用户。动作采用 `auth.login`、`auth.token.refresh`、`admin.users.update` 等固定名称，已有记录不改写。记录请求 ID、实际 HTTP 状态、来源 IP、最多 512 字符的 User-Agent 和耗时，不采集正文、查询串或凭证。SSE 状态表示 HTTP 传输状态，测试结果仍以事件内容为准。客户端取消不取消审计写入；数据库写入失败只输出请求 ID 诊断，不改变已完成业务结果，也不承诺故障期间审计无丢失。
+
 独立 OpenAI/Grok 图片生成和编辑按 `data` 中含非空 `url` 或 `b64_json` 的结果数量记账，重复图片仍按返回数量计费，空对象不计数；没有图片的成功响应返回 502。`usage` 中真实的输入、输出、缓存及图片 token 明细进入原用量字段，兼容 input/output 与 prompt/completion 两套命名；未提供的 token 不从图片数量估算。字段依据 [OpenAI 图片 API](https://developers.openai.com/api/reference/resources/images/methods/generate)。
 
 计费尺寸优先采用图片项 `size`（省略时取响应顶层 `size`），多张图片按最大档位统一结算并记录各档数量；没有有效输出尺寸则取请求 `size`，再默认 2K。沿用最长边 ≤1024 为 1K、≤2048 为 2K、其余为 4K；输出元数据不通过额外下载或像素解码改写。原请求尺寸、输出尺寸、来源和档位分布写入用量。

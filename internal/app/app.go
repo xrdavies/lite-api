@@ -241,11 +241,14 @@ type handler func(http.ResponseWriter, *http.Request) error
 
 func (a *App) route(pattern, access string, h handler) {
 	a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		response := &auditResponseWriter{ResponseWriter: w}
+		w = response
+		actor := &identity{}
+		r = r.WithContext(context.WithValue(r.Context(), auditIdentityKey{}, actor))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		requestID := randomToken(18)
 		w.Header().Set("X-Request-ID", requestID)
-		status := 200
 		started := time.Now()
 		var user *identity
 		err := func() error {
@@ -262,6 +265,7 @@ func (a *App) route(pattern, access string, h handler) {
 				if err != nil {
 					return err
 				}
+				*actor = *user
 				if access == "admin" && user.Role != "admin" {
 					return denied()
 				}
@@ -273,16 +277,12 @@ func (a *App) route(pattern, access string, h handler) {
 			return h(w, r)
 		}()
 		if err != nil {
-			status = a.writeError(w, err)
+			a.writeError(w, err)
 		}
-		if user != nil && r.Method != "GET" {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_, err = a.DB.ExecContext(ctx, `INSERT INTO audit_logs(actor_user_id,actor_email,actor_role,auth_method,action,method,path,request_id,client_ip,status_code,latency_ms) VALUES($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)`, user.ID, user.Email, user.Role, pattern, r.Method, r.URL.Path, requestID, clientIP(r), status, time.Since(started).Milliseconds(), user.AuthMethod)
-			if err != nil {
-				slog.Error("audit record failed", "request_id", requestID)
-			}
+		if response.status == 0 {
+			response.status = http.StatusOK
 		}
+		a.recordAudit(r, pattern, actor, response.status, requestID, started)
 	})
 }
 func (a *App) writeError(w http.ResponseWriter, err error) int {

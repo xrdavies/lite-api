@@ -1,12 +1,116 @@
 package app
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+type auditIdentityKey struct{}
+
+// Public authentication handlers may identify an actor only after verifying
+// credentials. An email or a session ID supplied by a caller is not identity.
+func setAuditIdentity(r *http.Request, u *identity) {
+	if actor, ok := r.Context().Value(auditIdentityKey{}).(*identity); ok {
+		*actor = identity{ID: u.ID, Email: u.Email, Role: u.Role, AuthMethod: "jwt"}
+	}
+}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *auditResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	if status >= 200 {
+		w.status = status
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *auditResponseWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *auditResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *auditResponseWriter) FlushError() error {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func auditAction(pattern string, authenticated bool, status int) string {
+	switch pattern {
+	case "POST /api/v1/auth/login":
+		return "auth.login"
+	case "POST /api/v1/auth/refresh":
+		if status >= 400 {
+			return "auth.token.refresh"
+		}
+		return ""
+	case "POST /api/v1/auth/logout":
+		return "auth.logout.create"
+	}
+	if !authenticated {
+		return ""
+	}
+	switch pattern {
+	case "GET /api/v1/admin/settings/admin-api-key":
+		return "admin.admin_api_key.read"
+	case "GET /api/v1/admin/users/{id}/api-keys":
+		return "admin.users.api_keys.read"
+	case "GET /api/v1/admin/groups/{id}/api-keys":
+		return "admin.groups.api_keys.read"
+	case "POST /api/v1/admin/settings/admin-api-key/regenerate":
+		return "admin.admin_api_key.regenerate"
+	case "DELETE /api/v1/admin/settings/admin-api-key":
+		return "admin.admin_api_key.delete"
+	}
+	method, path, _ := strings.Cut(pattern, " ")
+	verb := map[string]string{"POST": "create", "PUT": "update", "PATCH": "update", "DELETE": "delete"}[method]
+	if verb == "" {
+		return ""
+	}
+	parts := []string{}
+	for _, part := range strings.Split(strings.TrimPrefix(path, "/api/v1/"), "/") {
+		if part != "" && !strings.HasPrefix(part, "{") {
+			parts = append(parts, strings.ReplaceAll(part, "-", "_"))
+		}
+	}
+	return strings.Join(append(parts, verb), ".")
+}
+
+func (a *App) recordAudit(r *http.Request, pattern string, actor *identity, status int, requestID string, started time.Time) {
+	action := auditAction(pattern, actor.ID > 0, status)
+	if action == "" {
+		return
+	}
+	var uid any
+	if actor.ID > 0 {
+		uid = actor.ID
+	}
+	// Bodies, query strings and credentials are deliberately not captured.
+	// Keep diagnostics bounded and valid for PostgreSQL text columns.
+	clean := func(s string, n int) string { return truncate(strings.ReplaceAll(s, "\x00", ""), n) }
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+	defer cancel()
+	_, err := a.DB.ExecContext(ctx, `INSERT INTO audit_logs(actor_user_id,actor_email,actor_role,auth_method,action,method,path,request_id,client_ip,user_agent,status_code,latency_ms)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, uid, clean(actor.Email, 255), clean(actor.Role, 32), clean(actor.AuthMethod, 32), clean(action, 128), clean(r.Method, 16), clean(r.URL.Path, 512), requestID, clean(clientIP(r), 64), clean(r.UserAgent(), 512), status, time.Since(started).Milliseconds())
+	if err != nil {
+		slog.Error("audit record failed", "request_id", requestID)
+	}
+}
 
 func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) error {
 	if r.PathValue("id") != "" {

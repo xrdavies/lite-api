@@ -222,6 +222,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	setAuditIdentity(r, u)
 	return reply(w, tokens)
 }
 func splitRefresh(token string) (string, string, error) {
@@ -284,14 +285,21 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		accessSession = u.SessionID
+		setAuditIdentity(r, u)
 	}
 	if in.Token != "" {
 		sid, secret, err := splitRefresh(in.Token)
 		if err != nil {
 			return err
 		}
-		if _, err = a.Redis.Eval(r.Context(), `if redis.call('HGET',KEYS[1],'refresh')==ARGV[1] then return redis.call('DEL',KEYS[1]) end; return 0`, []string{sessionKey(sid)}, digest(secret)).Result(); err != nil {
+		uid, err := a.Redis.Eval(r.Context(), `if redis.call('HGET',KEYS[1],'refresh')==ARGV[1] then local uid=redis.call('HGET',KEYS[1],'user'); redis.call('DEL',KEYS[1]); return uid end; return 0`, []string{sessionKey(sid)}, digest(secret)).Int64()
+		if err != nil {
 			return err
+		}
+		if uid > 0 && accessSession == "" {
+			if u, err := a.loadIdentity(r.Context(), uid); err == nil {
+				setAuditIdentity(r, u)
+			}
 		}
 	}
 	if accessSession != "" {

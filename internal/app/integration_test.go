@@ -102,6 +102,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	expect(404, "POST", "/api/v1/auth/register", "", map[string]string{"email": "not-allowed@example.test", "password": "password"})
 	expect(401, "POST", "/api/v1/auth/login", "", map[string]string{"email": "admin@example.test", "password": "wrong"})
 	admin := login("admin@example.test", "correct-password")["access_token"].(string)
+	testAuthenticationAudit(t, a, admin)
 	user := must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "user@example.test", "password": "correct-password", "balance": 100, "username": "Team user"})
 	uid := int64(user["id"].(float64))
 	upath := fmt.Sprintf("/api/v1/admin/users/%d", uid)
