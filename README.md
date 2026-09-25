@@ -321,6 +321,12 @@ OpenAI 接受 search_context_size、近似 user_location，以及正式工具的
 
 `POST /v1/messages` 支持 Anthropic 原生 JSON/SSE，`/v1/messages/count_tokens` 及 `/messages/count_tokens` 别名支持原生 Anthropic 计数及 Gemini 转换计数；别名共用鉴权、模型限制和幂等记录，不写消费账务。按量兼容平台可使用 `credentials.api_protocol=anthropic`。原生转发时版本和 beta 协议头受长度限制后传递，签名、工具调用、缓存控制和内容事件保留。缓存命中、5 分钟/1 小时缓存写入分别计量，`message_delta` 采用累计用量，结算成功后才发送 `message_stop`。
 
+OpenAI 目标的 Messages 和 count_tokens 入口需要管理员设置 `allow_messages_dispatch=true`，默认关闭；composite 路由到 OpenAI 时使用该组开关，其他目标继续使用各自协议。配置 Claude Code fallback 时使用实际调度组的开关与映射。已完成的幂等结果可重放；新请求和等待账号期间的策略变更受检查。
+
+OpenAI 分组的 `messages_dispatch_model_config` 接受 `opus_mapped_model`、`sonnet_mapped_model`、`haiku_mapped_model` 及 `exact_model_mappings`。精确匹配区分大小写，优先于 Claude 家族匹配；未配置的家族默认分别为 gpt-5.4、gpt-5.3-codex、gpt-5.4-mini，这些是固定兼容值，不保证上游可用。显式 GPT 推理后缀按兼容规则归一化，空映射项忽略，冲突项拒绝。composite 仅保留开关，清空该映射配置；其他平台清空这三项配置。`default_mapped_model` 保留存储含义，不参与转发兜底；配置省略/null 保持，空对象或空字符串显式清除。
+
+Messages 调度模型用于账号能力筛选和优先账号池。实际转发先应用渠道映射，命中的账号映射（包括原样透传）优先；未命中时采用分组调度模型，不对其再次做账号映射。白名单始终检查客户端原始模型，日志及 requested 计价仍保留原名，channel_mapped/upstream 计价分别使用实际对应阶段的名称；普通 Chat/Responses 不使用此配置。用户分组视图仅返回开关，不公开内部映射。
+
 Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；`count_tokens` 仍要求原生计数账号。
 
 该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。

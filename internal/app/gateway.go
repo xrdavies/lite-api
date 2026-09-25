@@ -32,23 +32,25 @@ type gatewayGroup struct {
 	audioPrices
 	videoPrices
 	reasoningPolicy
-	ForceFast       bool                `json:"force_openai_fast"`
-	FreeFast        bool                `json:"free_openai_fast"`
-	ID              int64               `json:"id"`
-	Platform        string              `json:"platform"`
-	Rate            json.Number         `json:"rate_multiplier"`
-	RPM             int                 `json:"rpm_limit"`
-	LongContext     bool                `json:"long_context_pricing_enabled"`
-	Allowlist       modelAllowlist      `json:"model_allowlist"`
-	Manifest        modelManifestConfig `json:"codex_models_manifest_config"`
-	Pricing         []modelPrice        `json:"model_pricing"`
-	ModelRouting    map[string][]int64  `json:"model_routing"`
-	RoutingEnabled  bool                `json:"model_routing_enabled"`
-	ClaudeCodeOnly  bool                `json:"claude_code_only"`
-	FallbackGroupID *int64              `json:"fallback_group_id"`
-	WebSearchPrice  *json.Number        `json:"web_search_price_per_call"`
-	SearchPrice     *json.Number        `json:"search_price_per_1k"`
-	AllowImage      bool                `json:"allow_image_generation"`
+	AllowMessages   bool                   `json:"allow_messages_dispatch"`
+	MessagesModel   messagesDispatchConfig `json:"messages_dispatch_model_config"`
+	ForceFast       bool                   `json:"force_openai_fast"`
+	FreeFast        bool                   `json:"free_openai_fast"`
+	ID              int64                  `json:"id"`
+	Platform        string                 `json:"platform"`
+	Rate            json.Number            `json:"rate_multiplier"`
+	RPM             int                    `json:"rpm_limit"`
+	LongContext     bool                   `json:"long_context_pricing_enabled"`
+	Allowlist       modelAllowlist         `json:"model_allowlist"`
+	Manifest        modelManifestConfig    `json:"codex_models_manifest_config"`
+	Pricing         []modelPrice           `json:"model_pricing"`
+	ModelRouting    map[string][]int64     `json:"model_routing"`
+	RoutingEnabled  bool                   `json:"model_routing_enabled"`
+	ClaudeCodeOnly  bool                   `json:"claude_code_only"`
+	FallbackGroupID *int64                 `json:"fallback_group_id"`
+	WebSearchPrice  *json.Number           `json:"web_search_price_per_call"`
+	SearchPrice     *json.Number           `json:"search_price_per_1k"`
+	AllowImage      bool                   `json:"allow_image_generation"`
 }
 type modelAllowlist struct {
 	Enabled bool     `json:"enabled"`
@@ -255,6 +257,10 @@ func (s *gatewaySelection) price(model string) (modelPrice, error) {
 	return effectiveModelPrice(s.Catalog, s.GroupPricing, s.Pricing, s.Account.Platform, model, s.Restrict)
 }
 func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model string, in textRequest, exclude map[int64]bool, binding, sticky *responseBinding, catalog *priceCatalog) (*gatewaySelection, error) {
+	dispatchModel, err := g.messagesDispatch(in)
+	if err != nil {
+		return nil, err
+	}
 	protocol := in.Protocol
 	routing := g.dispatchGroup()
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing, ResponseImage: in.ResponseImage}
@@ -269,7 +275,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		s.Search = protocol
 	}
 	var channelID int64
-	err := a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
+	err = a.DB.QueryRowContext(ctx, "SELECT c.id FROM channels c JOIN channel_groups cg ON cg.channel_id=c.id WHERE cg.group_id=$1 AND c.status='active'", g.Key.GroupID).Scan(&channelID)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -344,7 +350,11 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 	if err != nil {
 		return nil, err
 	}
-	preferred := routing.routingAccounts(s.ChannelModel, g.Group.Platform)
+	scheduleModel := s.ChannelModel
+	if dispatchModel != "" {
+		scheduleModel = dispatchModel
+	}
+	preferred := routing.routingAccounts(scheduleModel, g.Group.Platform)
 	if sticky != nil {
 		u, err := a.loadAccount(ctx, sticky.AccountID)
 		if err != nil || responseTarget(u) != sticky.Target {
@@ -445,7 +455,17 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if !u.allowsResponseResources(responseStoresKey, g.Key.GroupID, in.VectorStores) || !u.allowsResponseResources(responseFilesKey, g.Key.GroupID, in.FileIDs) || !u.allowsResponseResources(responseSkillsKey, g.Key.GroupID, in.SkillIDs) {
 			continue
 		}
-		mapped, err := u.mappedModel(s.ChannelModel)
+		mapped, matched, err := u.resolveModelMapping(s.ChannelModel)
+		if dispatchModel != "" {
+			// Admission uses the dispatch model. Explicit account mappings of the
+			// channel model still win when constructing the actual wire request.
+			if _, e := u.mappedModel(dispatchModel); e != nil {
+				continue
+			}
+			if !matched {
+				mapped, err = dispatchModel, nil
+			}
+		}
 		if audioProtocol(protocol) || protocol == "custom-voices" {
 			mapped, err = protocol, nil
 		}

@@ -309,7 +309,7 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 		return map[string]any{"platform": platform, "models": []string{"public-responses"}, "input_price": 0.01, "output_price": 0.02, "cache_read_price": 0.003, "cache_write_price": 0.004, "reasoning_effort_multipliers": map[string]any{"max": 9, "xhigh": 1.5}}
 	}
 	group := func(platform string) int64 {
-		return id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Messages Responses " + platform, "platform": platform, "rate_multiplier": 2, "model_pricing": []any{price(platform)}}))
+		return id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"allow_messages_dispatch": true, "name": "Messages Responses " + platform, "platform": platform, "rate_multiplier": 2, "model_pricing": []any{price(platform)}}))
 	}
 	account := func(platform string, groups []int64, base string, priority int) int64 {
 		return id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Messages Responses " + platform, "platform": platform, "type": "apikey", "priority": priority, "rate_multiplier": 3, "group_ids": groups, "credentials": map[string]any{"api_key": "upstream-secret", "base_url": base, "api_protocol": "responses", "model_mapping": map[string]string{"public-responses": "responses-up"}}}))

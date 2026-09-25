@@ -343,20 +343,25 @@ func (a *App) loadAccount(ctx context.Context, id int64) (*upstreamAccount, erro
 	return u, nil
 }
 func (u *upstreamAccount) mappedModel(model string) (string, error) {
+	mapped, _, err := u.resolveModelMapping(model)
+	return mapped, err
+}
+
+func (u *upstreamAccount) resolveModelMapping(model string) (string, bool, error) {
 	var mapping map[string]string
 	if raw := u.Credentials["model_mapping"]; raw != nil {
 		if err := json.Unmarshal(raw, &mapping); err != nil {
-			return "", bad("invalid model mapping")
+			return "", false, bad("invalid model mapping")
 		}
 	}
 	if len(mapping) == 0 {
-		return model, nil
+		return model, false, nil
 	}
 	if value, ok := mapping[model]; ok {
 		if value == "" {
-			return model, nil
+			return model, true, nil
 		}
-		return value, nil
+		return value, true, nil
 	}
 	patterns := make([]string, 0, len(mapping))
 	for pattern := range mapping {
@@ -374,12 +379,12 @@ func (u *upstreamAccount) mappedModel(model string) (string, error) {
 		if strings.HasPrefix(model, strings.TrimSuffix(pattern, "*")) {
 			value := mapping[pattern]
 			if value == "" || value == "*" {
-				return model, nil
+				return model, true, nil
 			}
-			return value, nil
+			return value, true, nil
 		}
 	}
-	return "", bad("model is not allowed by this account")
+	return "", false, bad("model is not allowed by this account")
 }
 func (a *App) resolveProxy(ctx context.Context, id int64) (*url.URL, error) {
 	p, err := resolveProxyTarget(ctx, a.DB, id, time.Now())

@@ -139,7 +139,7 @@ func testGroupFast(t *testing.T, a *App, admin string) {
 	for _, groupPlatform := range []string{"openai", "composite"} {
 		for _, wire := range []string{"chat_completions", "responses"} {
 			prices := []modelPrice{{Platform: "openai", Models: []string{"fast-test"}, Input: number("0.001"), Output: number("0.002"), CacheRead: number("0"), CacheWrite: number("0"), Fast: number("3")}}
-			group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Fast " + groupPlatform + wire, "platform": groupPlatform, "rate_multiplier": "0.5", "force_openai_fast": true, "free_openai_fast": true, "model_pricing": prices})
+			group := must("POST", "/api/v1/admin/groups", admin, map[string]any{"allow_messages_dispatch": true, "name": "Fast " + groupPlatform + wire, "platform": groupPlatform, "rate_multiplier": "0.5", "force_openai_fast": true, "free_openai_fast": true, "model_pricing": prices})
 			gid := id(group)
 			gp := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
 			if group["force_openai_fast"] != true || group["free_openai_fast"] != true {
