@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,60 +13,226 @@ import (
 	"github.com/lib/pq"
 )
 
-func usageFilters(r *http.Request) (string, []any, error) {
-	uid := current(r).ID
-	if strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
-		uid = 0
-		if s := r.URL.Query().Get("user_id"); s != "" {
-			var err error
-			uid, err = strconv.ParseInt(s, 10, 64)
-			if err != nil || uid < 1 {
-				return "", nil, bad("invalid user_id")
+const usageRequestedModel = "COALESCE(NULLIF(TRIM(requested_model),''),model)"
+
+func (a *App) usageFilters(r *http.Request) (string, []any, error) {
+	q := r.URL.Query()
+	admin := current(r).Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/v1/admin/")
+	conditions := []string{"TRUE"}
+	args := []any{}
+	add := func(expression string, value any) {
+		args = append(args, value)
+		conditions = append(conditions, fmt.Sprintf(expression, len(args)))
+	}
+	if !admin {
+		add("user_id=$%d", current(r).ID)
+	}
+	for _, field := range []string{"user_id", "api_key_id", "account_id", "group_id"} {
+		if !admin && (field == "user_id" || field == "account_id") {
+			continue
+		}
+		if raw := strings.TrimSpace(q.Get(field)); raw != "" {
+			id, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || id < 0 || id == 0 && field == "api_key_id" && !admin {
+				return "", nil, bad("invalid " + field)
+			}
+			if field == "api_key_id" && !admin {
+				var owner int64
+				if err := a.DB.QueryRowContext(r.Context(), "SELECT user_id FROM api_keys WHERE id=$1 AND deleted_at IS NULL", id).Scan(&owner); err != nil {
+					return "", nil, err
+				}
+				if owner != current(r).ID {
+					return "", nil, denied()
+				}
+			}
+			if id > 0 {
+				add(field+"=$%d", id)
 			}
 		}
 	}
-	kid := int64(0)
-	if s := r.URL.Query().Get("api_key_id"); s != "" {
-		var err error
-		kid, err = strconv.ParseInt(s, 10, 64)
-		if err != nil || kid < 1 {
-			return "", nil, bad("invalid api_key_id")
+	if model := strings.TrimSpace(q.Get("model")); model != "" {
+		if len([]rune(model)) > 100 {
+			return "", nil, bad("model filter too long")
+		}
+		add(usageRequestedModel+"=$%d", model)
+	}
+	if admin {
+		if id := strings.TrimSpace(q.Get("request_id")); id != "" {
+			if len(id) > 64 {
+				return "", nil, bad("request_id filter too long")
+			}
+			add("request_id=$%d", id)
+		}
+		if raw := q.Get("exact_total"); raw != "" {
+			if _, err := strconv.ParseBool(strings.TrimSpace(raw)); err != nil {
+				return "", nil, bad("invalid exact_total")
+			}
 		}
 	}
-	var from, to any
-	for i, key := range []string{"start_date", "end_date"} {
-		if s := r.URL.Query().Get(key); s != "" {
-			v, err := time.Parse(time.RFC3339, s)
+	if raw := strings.ToLower(strings.TrimSpace(q.Get("request_type"))); raw != "" {
+		kind, ok := map[string]int{"unknown": 0, "sync": 1, "stream": 2, "ws_v2": 3, "cyber": 4, "live": 5}[raw]
+		if !ok {
+			return "", nil, bad("invalid request_type")
+		}
+		expression := "request_type=$%d"
+		switch kind {
+		case 1:
+			expression = "(request_type=$%d OR (request_type=0 AND NOT stream AND NOT openai_ws_mode))"
+		case 2:
+			expression = "(request_type=$%d OR (request_type=0 AND stream AND NOT openai_ws_mode))"
+		case 3:
+			expression = "(request_type=$%d OR (request_type=0 AND openai_ws_mode))"
+		}
+		add(expression, kind)
+	}
+	for _, field := range []string{"stream", "native_compaction_v2", "upstream_model_mismatch"} {
+		if field == "stream" && strings.TrimSpace(q.Get("request_type")) != "" || field == "upstream_model_mismatch" && !admin {
+			continue
+		}
+		if raw := strings.TrimSpace(q.Get(field)); raw != "" {
+			value, err := strconv.ParseBool(raw)
 			if err != nil {
-				v, err = time.Parse("2006-01-02", s)
+				return "", nil, bad("invalid " + field)
+			}
+			// Equality preserves unknown (NULL) model observations as unknown.
+			add(field+"=$%d", value)
+		}
+	}
+	if raw := strings.TrimSpace(q.Get("billing_type")); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 8)
+		if err != nil {
+			return "", nil, bad("invalid billing_type")
+		}
+		add("billing_type=$%d", value)
+	}
+	if mode := strings.TrimSpace(q.Get("billing_mode")); mode != "" {
+		expression := "billing_mode=$%d"
+		switch mode {
+		case "token":
+			expression = "(billing_mode=$%d OR (COALESCE(billing_mode,'')='' AND COALESCE(image_count,0)<=0))"
+		case "image":
+			expression = "(billing_mode=$%d OR (COALESCE(billing_mode,'')='' AND COALESCE(image_count,0)>0))"
+		case "video", "per_request":
+		default:
+			return "", nil, bad("invalid billing_mode")
+		}
+		add(expression, mode)
+	}
+	start, end, err := usageFilterRange(r, admin, time.Now())
+	if err != nil {
+		return "", nil, err
+	}
+	if !start.IsZero() {
+		add("created_at>=$%d", start)
+	}
+	if !end.IsZero() {
+		add("created_at<$%d", end)
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args, nil
+}
+
+func usageFilterRange(r *http.Request, admin bool, now time.Time) (time.Time, time.Time, error) {
+	q := r.URL.Query()
+	zone := strings.TrimSpace(q.Get("timezone"))
+	if zone == "" {
+		zone = "Asia/Shanghai"
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil || zone == "Local" {
+		return time.Time{}, time.Time{}, bad("invalid timezone")
+	}
+	var dates [2]time.Time
+	for i, field := range []string{"start_date", "end_date"} {
+		if raw := strings.TrimSpace(q.Get(field)); raw != "" {
+			value, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				value, err = time.ParseInLocation("2006-01-02", raw, loc)
 				if err == nil && i == 1 {
-					v = v.AddDate(0, 0, 1)
+					value = value.AddDate(0, 0, 1)
 				}
 			}
 			if err != nil {
-				return "", nil, bad("invalid date filter")
+				return time.Time{}, time.Time{}, bad("invalid " + field)
 			}
-			if i == 0 {
-				from = v
-			} else {
-				to = v
-			}
+			dates[i] = value
 		}
 	}
-	return ` WHERE ($1::bigint=0 OR user_id=$1) AND ($2::bigint=0 OR api_key_id=$2) AND ($3='' OR model=$3) AND ($4::timestamptz IS NULL OR created_at>=$4) AND ($5::timestamptz IS NULL OR created_at<$5)`, []any{uid, kid, r.URL.Query().Get("model"), from, to}, nil
+	if strings.HasSuffix(r.URL.Path, "/stats") {
+		now = now.In(loc)
+		day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		period := strings.TrimSpace(q.Get("period"))
+		if period == "" && admin {
+			period = "today"
+		}
+		start, end := day.AddDate(0, 0, -7), day.AddDate(0, 0, 1)
+		switch period {
+		case "today":
+			start, end = day, now
+		case "week":
+			start, end = now.AddDate(0, 0, -7), now
+		case "month":
+			start, end = now.AddDate(0, -1, 0), now
+		case "":
+		default:
+			return time.Time{}, time.Time{}, bad("period must be today, week or month")
+		}
+		if dates[0].IsZero() {
+			dates[0] = start
+		}
+		if dates[1].IsZero() {
+			dates[1] = end
+		}
+	}
+	if !dates[0].IsZero() && !dates[1].IsZero() && !dates[0].Before(dates[1]) {
+		return time.Time{}, time.Time{}, bad("start_date must precede the end of end_date")
+	}
+	return dates[0], dates[1], nil
+}
+
+func usageOrder(r *http.Request) string {
+	field := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	switch field {
+	case "", "created_at":
+		field = "created_at"
+	case "model":
+		field = usageRequestedModel
+	default:
+		field = "id"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
+	if field == "id" {
+		return field + direction
+	}
+	return field + direction + ",id" + direction
 }
 
 // User views expose usage and price snapshots, not upstream account/channel identities.
-const userUsageColumns = `id,request_id,api_key_id,model,requested_model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,rate_multiplier,stream,duration_ms,first_token_ms,created_at,group_id,billing_type,billing_mode,request_type,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,service_tier,reasoning_effort,requested_reasoning_effort,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size,image_output_size,image_size_breakdown`
+const userUsageColumns = `native_compaction_v2,ip_address,inbound_endpoint,user_agent,session_id,cache_ttl_overridden,long_context_billing_applied,openai_ws_mode,id,request_id,api_key_id,model,requested_model,input_tokens,output_tokens,cache_creation_tokens,cache_read_tokens,cache_creation_5m_tokens,cache_creation_1h_tokens,input_cost,output_cost,cache_creation_cost,cache_read_cost,total_cost,actual_cost,rate_multiplier,stream,duration_ms,first_token_ms,created_at,group_id,billing_type,billing_mode,request_type,image_input_tokens,image_output_tokens,image_input_cost,image_output_cost,service_tier,reasoning_effort,requested_reasoning_effort,video_count,video_resolution,video_duration_seconds,image_count,image_size,image_size_source,image_input_size,image_output_size,image_size_breakdown`
+
+// Public fields describe the client's request; stored model and request_type
+// retain their billing and numeric meanings in the database.
+const usageView = `to_jsonb(u) || jsonb_build_object('model',` + usageRequestedModel + `,
+ 'request_type',CASE request_type WHEN 1 THEN 'sync' WHEN 2 THEN 'stream' WHEN 3 THEN 'ws_v2'
+ WHEN 4 THEN 'cyber' WHEN 5 THEN 'live' ELSE CASE WHEN openai_ws_mode THEN 'ws_v2' WHEN stream THEN 'stream' ELSE 'sync' END END,
+ 'stream',CASE request_type WHEN 1 THEN false WHEN 2 THEN true WHEN 3 THEN true ELSE stream END,
+ 'openai_ws_mode',CASE request_type WHEN 1 THEN false WHEN 2 THEN false WHEN 3 THEN true ELSE openai_ws_mode END)`
 
 func (a *App) listUsage(w http.ResponseWriter, r *http.Request) error {
-	where, args, err := usageFilters(r)
+	where, args, err := a.usageFilters(r)
 	if err != nil {
 		return err
 	}
 	page, size := pagination(r)
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var total int
-	if err = a.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM usage_logs"+where, args...).Scan(&total); err != nil {
+	if err = tx.QueryRowContext(r.Context(), "SELECT count(*) FROM usage_logs"+where, args...).Scan(&total); err != nil {
 		return err
 	}
 	columns := userUsageColumns
@@ -72,7 +240,7 @@ func (a *App) listUsage(w http.ResponseWriter, r *http.Request) error {
 		columns = "*"
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(u) FROM(SELECT "+columns+" FROM usage_logs"+where+" ORDER BY id DESC LIMIT $6 OFFSET $7)u", args...)
+	rows, err := tx.QueryContext(r.Context(), "SELECT "+usageView+" FROM(SELECT "+columns+" FROM usage_logs"+where+" ORDER BY "+usageOrder(r)+fmt.Sprintf(" LIMIT $%d OFFSET $%d)u", len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}
@@ -87,18 +255,32 @@ func (a *App) getUsage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT to_jsonb(u) FROM(SELECT "+userUsageColumns+" FROM usage_logs WHERE id=$1 AND user_id=$2)u", id, current(r).ID))
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), "SELECT "+usageView+" FROM(SELECT "+userUsageColumns+" FROM usage_logs WHERE id=$1 AND user_id=$2)u", id, current(r).ID))
 	if err != nil {
 		return err
 	}
 	return reply(w, raw)
 }
 func (a *App) usageStats(w http.ResponseWriter, r *http.Request) error {
-	where, args, err := usageFilters(r)
+	where, args, err := a.usageFilters(r)
 	if err != nil {
 		return err
 	}
-	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT jsonb_build_object('total_requests',count(*),'input_tokens',COALESCE(sum(input_tokens),0),'output_tokens',COALESCE(sum(output_tokens),0),'cache_creation_tokens',COALESCE(sum(cache_creation_tokens),0),'cache_read_tokens',COALESCE(sum(cache_read_tokens),0),'total_cost',COALESCE(sum(total_cost),0),'actual_cost',COALESCE(sum(actual_cost),0)) FROM usage_logs`+where, args...))
+	projection := `to_jsonb(s)-'total_account_cost' || jsonb_build_object(
+ 'input_tokens',s.total_input_tokens,'output_tokens',s.total_output_tokens,
+ 'cache_creation_tokens',s.total_cache_creation_tokens,'cache_read_tokens',s.total_cache_read_tokens,'actual_cost',s.total_actual_cost)`
+	if current(r).Role == "admin" && strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+		projection += ` || jsonb_build_object('total_account_cost',s.total_account_cost)`
+	}
+	raw, err := jsonRow(a.DB.QueryRowContext(r.Context(), `SELECT `+projection+` FROM (
+ SELECT count(*) AS total_requests,COALESCE(sum(input_tokens),0) AS total_input_tokens,
+ COALESCE(sum(output_tokens),0) AS total_output_tokens,COALESCE(sum(cache_creation_tokens),0) AS total_cache_creation_tokens,
+ COALESCE(sum(cache_read_tokens),0) AS total_cache_read_tokens,
+ COALESCE(sum(cache_creation_tokens::bigint+cache_read_tokens),0) AS total_cache_tokens,
+ COALESCE(sum(input_tokens::bigint+output_tokens+cache_creation_tokens+cache_read_tokens),0) AS total_tokens,
+ COALESCE(sum(total_cost),0) AS total_cost,COALESCE(sum(actual_cost),0) AS total_actual_cost,
+ COALESCE(sum(COALESCE(account_stats_cost,total_cost)*COALESCE(account_rate_multiplier,1)),0) AS total_account_cost,
+ COALESCE(avg(duration_ms),0) AS average_duration_ms FROM usage_logs`+where+`)s`, args...))
 	if err != nil {
 		return err
 	}

@@ -312,6 +312,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testAdminKey(t, a, admin, otherToken)
 	testGroupModelCandidates(t, a, admin, otherToken)
 	testGatewayUsage(t, a, admin, otherToken)
+	testUsageQueries(t, a, admin, otherToken)
 	testStreamTimeout(t, a, admin, otherToken)
 	testAnthropicPolicy(t, a, admin, otherToken)
 	testBillingProbes(t, a, admin, otherToken)

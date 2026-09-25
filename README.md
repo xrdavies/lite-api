@@ -399,6 +399,14 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 用户通过 `/api/v1/usage`、`/stats`、`/{id}` 和 `/errors` 查询本人原始用量、汇总和错误，管理员通过 `/api/v1/admin/usage`、`/stats` 查询。`GET /v1/billing` 使用客户端 Key 查询余额及额度；余额耗尽仍可查询。管理员通过 `/api/v1/admin/users/{id}/platform-quotas` 的 GET/PUT 配置平台额度，`/reset` 重置指定窗口；用户通过 `/api/v1/user/platform-quotas` 查询。平台额度 NULL 为不限、0 为禁止，日/周按 Asia/Shanghai 自然日/周，月按滚动 30 天。
 
+原始用量列表与汇总共用 `api_key_id`、`group_id`、`model`、`request_type`、`stream`、`native_compaction_v2`、`billing_type`、`billing_mode` 及日期筛选。模型按客户端 `requested_model` 精确匹配，空值回落到计费模型；不使用上游映射名查询。管理员另可按 `user_id`、`account_id`、`request_id`、`upstream_model_mismatch` 查询。普通用户的身份范围固定，显式查询他人 Key 返回 403，已删除 Key 返回 404；不指定 Key 时仍可查看自己的历史消费。模型观测为 NULL 时不计入 mismatch=true 或 false。
+
+列表和详情的 `model` 返回客户端模型名，`request_type` 返回 sync/stream/ws_v2 等字符串；旧记录由 stream/openai_ws_mode 推导类型，显式类型优先决定两个兼容布尔字段。用户视图包含本人 IP、客户端端点、User-Agent、会话标识、缓存/长上下文标志和原生压缩标志；上游模型、账号成本及渠道信息仅在管理视图返回。查询不改写数据库中的计费模型、数字类型或消费记录。
+
+列表 `sort_by` 支持 created_at（默认）、model、id，未知字段回落 id；`sort_order=asc|desc` 默认 desc，同值按 ID 同序。筛选、排序先于分页，总数和记录使用同一数据库快照；管理员 `exact_total` 接受布尔值，当前始终返回精确总数。request_type 优先于 stream，接受 sync/stream/ws_v2/unknown/cyber/live；后两项仅识别原数据类型，不开放对应业务。旧 request_type=0 记录按 stream/openai_ws_mode 兼容筛选；缺少 billing_mode 时沿用图片数量区分 token/image。
+
+日期支持 `YYYY-MM-DD` 和 RFC3339。日历日期默认 Asia/Shanghai，可通过 `timezone` 指定 IANA 时区，结束日期包含全天并按夏令时计算；时间戳采用精确的半开区间。列表缺省不限制日期；用户汇总默认从七天前零点到明日零点，管理员汇总默认今日零点到当前时间，`period=today|week|month` 可指定范围，显式日期优先。汇总返回 total_requests、total_*_tokens、total_cost、total_actual_cost、average_duration_ms，并保留已有简短字段别名；账号历史成本仅在管理入口返回。金额由 PostgreSQL 精确求和，不读取上游或产生消费。
+
 `GET /v1/usage` 使用客户端 Key 返回 `quota_limited`（有总额度或消费窗口）或 `unrestricted`（钱包余额）视图，以及当前 Key 的今日/累计用量、每日用量和模型汇总。额度耗尽、零余额仍可查询，禁用/删除/到期 Key 和失效分组权限仍拒绝；查询受网关 RPM、用户并发和 10 秒数据库超时约束。5h/1d/7d 为滚动消费窗口，过期或未开始显示零，不改写消费记录。`daily_usage` 的 `days=1–90`、`timezone` 与用户每日查询共用规则；`model_stats` 默认近 30 天，可传 Asia/Shanghai 的 `YYYY-MM-DD` 起止日期，结束日包含全天。非法日期、倒序范围、非法时区返回 400。所有汇总直接读取原始用量，金额保持精确数值；查询参数不能切换 Key/用户，不返回上游账号成本或内部身份。
 
 `GET /api/v1/admin/system/version` 返回当前本地版本，沿用管理员 JWT/机器 Key 鉴权；与公开 `/api/v1/version` 使用同一版本值（当前开发构建为 `dev`），不访问远端更新服务。
