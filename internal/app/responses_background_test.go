@@ -65,7 +65,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	prices := func(n string) []any {
 		return []any{map[string]any{"models": []string{"bg-model"}, "platform": "openai", "input_price": n, "output_price": "0.002", "cache_read_price": "0.0001", "cache_write_price": "0.003"}}
 	}
-	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Background", "platform": "openai", "model_pricing": prices("0.001"), "free_openai_fast": true}))
+	gid := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Background", "platform": "openai", "model_pricing": prices("0.001"), "free_openai_fast": true, "profit_control_enabled": true}))
 	must("PUT", "/api/v1/admin/settings", admin, map[string]any{fastPolicySetting: fastPolicySettings{Rules: []fastPolicyRule{{Tier: "missing", Action: "force_priority", Scope: "apikey", Models: []string{"native-bg"}}}}})
 	defer a.DB.Exec("DELETE FROM settings WHERE key=$1", fastPolicySetting)
 	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "background@example.test", "password": "background-password", "balance": 100, "concurrency": 5}))
@@ -294,6 +294,10 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 	}
 	exec("UPDATE users SET balance=100 WHERE id=$1", uid)
 	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.5"), "force_openai_fast": false, "free_openai_fast": false})
+	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"profit_min_margin": "0.9"})
+	if w := call("POST", "/responses", key, body, "profit-blocked-bg"); w.Code != 503 {
+		t.Fatal("new background task bypassed profit gate", w.Code)
+	}
 	must("PUT", "/api/v1/admin/settings", admin, map[string]any{fastPolicySetting: fastPolicySettings{Rules: []fastPolicyRule{{Tier: "all", Action: "block", Scope: "apikey"}}}})
 	exec("ALTER TABLE usage_logs ADD CONSTRAINT test_background_failure CHECK(api_key_id<>" + fmt.Sprint(kid) + ") NOT VALID")
 	defer a.DB.Exec("ALTER TABLE usage_logs DROP CONSTRAINT IF EXISTS test_background_failure")
@@ -383,7 +387,7 @@ func testBackgroundResponses(t *testing.T, a *App, admin string) {
 		t.Error("background delete replay dispatched", deletes)
 	}
 	mu.Unlock()
-	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.001")})
+	must("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"model_pricing": prices("0.001"), "profit_min_margin": "0"})
 	queued := create("cancel-bg")
 	for i := 0; i < 2; i++ {
 		if w := call("POST", "/responses/"+queued+"/cancel", key, nil, ""); w.Code != 200 || !strings.Contains(w.Body.String(), "cancelled") {

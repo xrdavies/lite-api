@@ -34,6 +34,7 @@ type groupInput struct {
 	batchGroupInput
 	fastGroupInput
 	messagesDispatchInput
+	profitInput
 	Name             *string              `json:"name"`
 	Description      *string              `json:"description"`
 	Platform         *string              `json:"platform"`
@@ -279,6 +280,9 @@ func (a *App) createGroup(w http.ResponseWriter, r *http.Request) error {
 	if err = in.messagesDispatchInput.apply(r.Context(), tx, created.ID); err != nil {
 		return err
 	}
+	if err = in.profitInput.apply(r.Context(), tx, created.ID, true); err != nil {
+		return err
+	}
 	raw, err = jsonRow(tx.QueryRowContext(r.Context(), "SELECT to_jsonb(g)-'deleted_at' FROM groups g WHERE id=$1", created.ID))
 	if err != nil {
 		return err
@@ -455,6 +459,9 @@ func (a *App) updateGroup(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if err = in.messagesDispatchInput.apply(r.Context(), tx, id); err != nil {
+		return err
+	}
+	if err = in.profitInput.apply(r.Context(), tx, id, false); err != nil {
 		return err
 	}
 	if err = validateGroupFallback(r.Context(), tx, id, in.FallbackGroupID != nil && *in.FallbackGroupID > 0); err != nil {

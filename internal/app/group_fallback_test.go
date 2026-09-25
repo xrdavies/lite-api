@@ -168,6 +168,18 @@ func testGroupFallback(t *testing.T, a *App, admin string) {
 		}
 	}
 	assertUsage(request(nil), ta)
+	// The target owns admission margins; the source owns the customer's rate.
+	// A target default of 9 must not admit cost 1 when source 2 * (1-.6)=.8.
+	must("PUT", tp, admin, map[string]any{"profit_control_enabled": true, "profit_min_margin": "0.6"})
+	profitCalls := calls.Load()
+	check(request(nil), 503)
+	if calls.Load() != profitCalls {
+		t.Fatal("fallback used target billing rate for profit")
+	}
+	must("PUT", sp, admin, map[string]any{"profit_control_enabled": true, "profit_min_margin": "0.9"})
+	must("PUT", tp, admin, map[string]any{"profit_control_enabled": false})
+	assertUsage(request(nil), ta)
+	must("PUT", sp, admin, map[string]any{"profit_control_enabled": false})
 	// The configured private target delegates account selection only.
 	var storedGroup int64
 	if err := a.DB.QueryRow("SELECT group_id FROM api_keys WHERE id=$1", kid).Scan(&storedGroup); err != nil || storedGroup != source {

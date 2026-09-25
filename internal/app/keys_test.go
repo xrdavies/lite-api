@@ -311,7 +311,7 @@ func testKeyManagement(t *testing.T, a *App, admin string) {
 		fmt.Fprint(w, `{"id":"relations","model":"relations-model","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	}))
 	defer provider.Close()
-	manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Relations account", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "relations-upstream", "base_url": provider.URL}})
+	manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Relations account", "platform": "openai", "type": "apikey", "rate_multiplier": "0.1", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "relations-upstream", "base_url": provider.URL}})
 	channel := manage("POST", "/api/v1/admin/channels", admin, map[string]any{"name": "Relations pricing", "group_ids": []int64{gid}, "model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"relations-model"}, "billing_mode": "per_request", "per_request_price": "0.01"}}})
 	defer manage("PUT", fmt.Sprintf("/api/v1/admin/channels/%d", id(channel)), admin, map[string]any{"status": "disabled"})
 	w = call("POST", "/v1/chat/completions", tied["key"].(string), "", map[string]any{"model": "relations-model", "messages": []any{map[string]string{"role": "user", "content": "ok"}}})

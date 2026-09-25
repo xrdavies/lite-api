@@ -32,6 +32,7 @@ type gatewayGroup struct {
 	audioPrices
 	videoPrices
 	reasoningPolicy
+	profitPolicy
 	AllowMessages   bool                   `json:"allow_messages_dispatch"`
 	MessagesModel   messagesDispatchConfig `json:"messages_dispatch_model_config"`
 	ForceFast       bool                   `json:"force_openai_fast"`
@@ -263,6 +264,10 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 	}
 	protocol := in.Protocol
 	routing := g.dispatchGroup()
+	threshold := g.profitThreshold(in)
+	if ctx.Value(profitRequestKey{}) == nil {
+		threshold = nil
+	}
 	s := &gatewaySelection{ChannelModel: model, BillingSource: "channel_mapped", Catalog: catalog, GroupPricing: g.Group.Pricing, ResponseImage: in.ResponseImage}
 	if audioProtocol(protocol) {
 		s.Audio = protocol
@@ -378,7 +383,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 	}
 	var busy *accountBusy
 	for _, c := range candidates {
-		if exclude[c.id] || binding != nil && binding.AccountID != c.id {
+		if exclude[c.id] || binding != nil && binding.AccountID != c.id || !profitAllows(threshold, c.rate) {
 			continue
 		}
 		u, err := a.loadAccount(ctx, c.id)
@@ -494,6 +499,24 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 				busy = &accountBusy{ID: c.id}
 			}
 			continue
+		}
+		if threshold != nil {
+			// Recheck after acquiring the slot: pricing sync or an administrator
+			// may have changed the cost while candidate details were being read.
+			err = a.DB.QueryRowContext(ctx, `SELECT a.rate_multiplier::text FROM accounts a
+ JOIN account_groups ag ON ag.account_id=a.id AND ag.group_id=$2
+ WHERE a.id=$1 AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable
+ AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now())
+ AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now())
+ AND (a.overload_until IS NULL OR a.overload_until<=now())
+ AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now())`, u.ID, routing.ID).Scan(&c.rate)
+			if err != nil || !profitAllows(threshold, c.rate) {
+				a.releaseSlot("account", u.ID)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return nil, err
+				}
+				continue
+			}
 		}
 		s.Account = u
 		s.Rate = c.rate
@@ -993,6 +1016,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	var chatRequest *responsesChatRequest
 	maxAttempts := 3
 	originalTier := request["service_tier"]
+	ctx = context.WithValue(ctx, profitRequestKey{}, true)
 	fastPolicy, _ := ctx.Value(fastPolicyKey{}).(*fastPolicySettings)
 	if in.Search != nil || audioIn != nil {
 		maxAttempts = 4

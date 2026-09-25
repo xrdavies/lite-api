@@ -490,6 +490,22 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 	}
 	c.CloseNow()
 	mode.Store(0)
+	// Unlike the connection-level Fast policy, profit admission uses each
+	// turn's current group and account costs, including a reused connection.
+	must("PUT", gp, admin, map[string]any{"profit_control_enabled": true})
+	c = dial("/responses", key, nil, 101)
+	write(c, body())
+	assertResult(terminal(c), "response.completed")
+	before = calls.Load()
+	must("PUT", ap, admin, map[string]any{"rate_multiplier": "2"})
+	write(c, body())
+	assertResult(terminal(c), "error")
+	c.CloseNow()
+	if calls.Load() != before {
+		t.Fatal("reused WebSocket bypassed current profit cost")
+	}
+	must("PUT", ap, admin, map[string]any{"rate_multiplier": "1"})
+	must("PUT", gp, admin, map[string]any{"profit_control_enabled": false})
 	// Queued disconnects release user/account wait state without dispatch.
 	must("PUT", ap, admin, map[string]any{"concurrency": 1})
 	if !a.takeSlot("account", aid, 1) {

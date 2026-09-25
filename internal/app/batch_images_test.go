@@ -238,7 +238,7 @@ func testBatchImages(t *testing.T, a *App, admin string) {
 	defer provider.Close()
 	uid := int64(manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": "batch-images@example.test", "password": "batch-images-password", "balance": 10})["id"].(float64))
 	user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": "batch-images@example.test", "password": "batch-images-password"})["access_token"].(string)
-	gid := int64(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Batch images", "platform": "gemini", "allow_batch_image_generation": true, "image_price_1k": json.Number("0.1"), "rate_multiplier": 2, "batch_image_discount_multiplier": json.Number("0.5"), "batch_image_hold_multiplier": json.Number("0.6")})["id"].(float64))
+	gid := int64(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Batch images", "platform": "gemini", "allow_batch_image_generation": true, "image_price_1k": json.Number("0.1"), "rate_multiplier": 2, "batch_image_discount_multiplier": json.Number("0.5"), "batch_image_hold_multiplier": json.Number("0.6"), "profit_control_enabled": true, "profit_min_margin": "0.9"})["id"].(float64))
 	groupPath := fmt.Sprintf("/api/v1/admin/groups/%d", gid)
 	aid := int64(manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Batch provider", "platform": "gemini", "type": "apikey", "group_ids": []int64{gid}, "rate_multiplier": json.Number("1.25"), "credentials": map[string]any{"api_key": "batch-provider-secret", "base_url": provider.URL + "/v1beta", "model_mapping": map[string]string{"team-image": "gemini-3-pro-image-preview"}}})["id"].(float64))
 	keyData := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Batch key", "group_id": gid, "quota": 100})

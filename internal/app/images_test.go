@@ -125,7 +125,7 @@ func testGrokImages(t *testing.T, a *App, admin string) {
 	defer upstream.Close()
 	manage("/api/v1/admin/users", admin, map[string]any{"email": "grok-images@example.test", "password": "grok-images-password", "balance": 1})
 	user := manage("/api/v1/auth/login", "", map[string]any{"email": "grok-images@example.test", "password": "grok-images-password"})["access_token"].(string)
-	gid := int64(manage("/api/v1/admin/groups", admin, map[string]any{"name": "Grok images", "platform": "grok", "allow_image_generation": true})["id"].(float64))
+	gid := int64(manage("/api/v1/admin/groups", admin, map[string]any{"name": "Grok images", "platform": "grok", "allow_image_generation": true, "profit_control_enabled": true, "profit_min_margin": "0.9"})["id"].(float64))
 	manage("/api/v1/admin/channels", admin, map[string]any{"name": "Grok image tariff", "group_ids": []int64{gid}, "model_pricing": []any{map[string]any{"platform": "grok", "models": []string{"client-grok-image"}, "billing_mode": "image", "per_request_price": json.Number("0.02")}}})
 	manage("/api/v1/admin/accounts", admin, map[string]any{"name": "Grok image account", "platform": "grok", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "grok-image-key", "base_url": upstream.URL, "api_protocol": "chat_completions", "model_mapping": map[string]string{"client-grok-image": "grok-imagine-image-2.0"}}})
 	key := manage("/api/v1/keys", user, map[string]any{"name": "Grok image key", "group_id": gid})["key"].(string)

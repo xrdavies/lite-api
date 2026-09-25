@@ -277,6 +277,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testReasoningPolicy(t, a, admin)
 	testGroupFast(t, a, admin)
 	testFastPolicy(t, a, admin)
+	testProfitControl(t, a, admin)
 	testMessagesDispatch(t, a, admin)
 	testStickyGateway(t, a, admin)
 	testGatewayQueues(t, a, admin)
