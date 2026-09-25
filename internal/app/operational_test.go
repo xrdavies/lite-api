@@ -7,12 +7,140 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func testOperationalQueries(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	var uid int64
+	if err := a.DB.QueryRow("INSERT INTO users(email,password_hash) SELECT 'ops-query_%@example.test',password_hash FROM users WHERE role='admin' LIMIT 1 RETURNING id").Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	ids := map[string]int64{}
+	for _, row := range []struct {
+		name, phase, owner, requested string
+		status, upstream              any
+		limited, resolved             bool
+		age                           time.Duration
+	}{
+		{"z", "gateway", "gateway", "zeta", 502, 504, false, false, time.Minute},
+		{"a", "gateway", "gateway", "alpha", 500, nil, false, true, time.Minute},
+		{"rate", "request", "gateway", "rate-model", 429, nil, true, false, time.Minute},
+		{"quota", "gateway", "gateway", "quota-model", 402, nil, true, false, time.Minute},
+		{"old", "gateway", "gateway", "old-model", 500, nil, false, false, 2 * time.Hour},
+		{"z", "upstream", "provider", "zeta", nil, 503, true, false, 2 * time.Hour},
+		{"auth", "account_auth", "provider", "auth-model", 200, 401, false, true, time.Minute},
+		{"client", "gateway", "gateway", "client-model", 500, nil, false, false, time.Minute},
+		{"client", "upstream", "provider", "client-model", nil, 502, false, false, 10 * 24 * time.Hour},
+	} {
+		var request any = "ops-query-" + row.name
+		if row.name == "client" {
+			request = nil
+		}
+		kind := "request_failed"
+		if row.name == "rate" {
+			kind = "rate_limit_error"
+		}
+		var id int64
+		err := a.DB.QueryRow(`INSERT INTO ops_error_logs(request_id,client_request_id,user_id,platform,model,requested_model,error_phase,error_type,error_owner,error_source,status_code,upstream_status_code,is_business_limited,resolved,created_at,error_message,error_body)
+VALUES($1,$2,$3,'openai','private-upstream-model',$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,'safe summary','do-not-expose-body') RETURNING id`, request, "ops-query-client-"+row.name, uid, row.requested, row.phase, kind, row.owner, row.status, row.upstream, row.limited, row.resolved, now.Add(-row.age)).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[row.name+":"+row.phase] = id
+	}
+	call := func(path, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/v1/admin/ops/"+path, nil)
+		r.RemoteAddr = "192.0.2.207:1234"
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	check := func(path, query string, total, size int, want ...int64) {
+		t.Helper()
+		w := call(path+"?q=ops-query&"+query, admin)
+		var result struct {
+			Data struct {
+				Items []struct{ ID int64 }
+				Total int
+				Size  int `json:"page_size"`
+			}
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Data.Total != total || result.Data.Size != size || len(result.Data.Items) != len(want) || strings.Contains(w.Body.String(), "do-not-expose-body") {
+			t.Fatalf("ops query %s %s: %d %s", path, query, w.Code, w.Body.String())
+		}
+		for i, id := range want {
+			if result.Data.Items[i].ID != id {
+				t.Fatalf("ops ordering %s %s: %s", path, query, w.Body.String())
+			}
+		}
+	}
+	z, alpha, client := ids["z:gateway"], ids["a:gateway"], ids["client:gateway"]
+	rate, quota, old := ids["rate:request"], ids["quota:gateway"], ids["old:gateway"]
+	for _, path := range []string{"errors", "request-errors"} {
+		check(path, "sort_by=model&sort_order=asc", 3, 20, alpha, client, z)
+		check(path, "sort_by=status_code&sort_order=asc&page_size=1&page=2", 3, 1, client)
+		check(path, "sort_by=status_code&sort_order=desc&page_size=1", 3, 1, z)
+		check(path, "sort_by=invalid&sort_order=asc", 3, 20, z, alpha, client)
+		check(path, "view=excluded&sort_order=asc", 2, 20, rate, quota)
+		check(path, "view=all&category=quota", 1, 20, quota)
+		check(path, "view=excluded&category=rate_limit&phase=REQUEST", 1, 20, rate)
+		check(path, "view=all&category=quota&phase=request", 0, 20)
+		check(path, "view=unknown&category=unknown&sort_order=asc", 3, 20, z, alpha, client)
+		check(path, "status_codes=504,,429,&view=all&sort_by=status_code&sort_order=asc", 2, 20, rate, z)
+		check(path, "status_codes=0", 0, 20)
+		check(path, "model=zeta&error_owner=GATEWAY&error_source=GATEWAY&resolved=no", 1, 20, z)
+		check(path, "model=private-upstream-model", 0, 20)
+		check(path, "resolved=YES&user_query="+url.QueryEscape("ops-query_%"), 1, 20, alpha)
+		check(path, "resolved=YES&user_query="+url.QueryEscape("ops-query_Z%"), 0, 20)
+		check(path, "client_request_id=ops-query-client-a", 1, 20, alpha)
+		check(path, "time_range=24h&sort_order=asc", 4, 20, old, z, alpha, client)
+		check(path, "time_range=unknown&sort_order=asc", 3, 20, z, alpha, client)
+		check(path, "end_time="+url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339)), 1, 20, old)
+		check(path, "start_time="+url.QueryEscape(now.Format(time.RFC3339))+"&end_time="+url.QueryEscape(now.Format(time.RFC3339)), 0, 20)
+		check(path, "page_size=700&sort_order=asc", 3, 500, z, alpha, client)
+	}
+	check("upstream-errors", "status_codes=401&resolved=yes", 1, 20, ids["auth:account_auth"])
+	check("upstream-errors", "time_range=24h&view=all&sort_by=status_code&sort_order=asc", 2, 20, ids["auth:account_auth"], ids["z:upstream"])
+	check("upstream-errors", "time_range=24h&view=excluded", 1, 20, ids["z:upstream"])
+	check(fmt.Sprintf("request-errors/%d/upstream-errors", z), "", 1, 20, ids["z:upstream"])
+	check(fmt.Sprintf("request-errors/%d/upstream-errors", client), "", 1, 20, ids["client:upstream"])
+	check(fmt.Sprintf("request-errors/%d/upstream-errors", z), "time_range=1h", 0, 20)
+	// The ingress list shares the same time parser and must honor a historical
+	// end-only range rather than deriving its start from today's clock.
+	if _, err := a.DB.Exec(`INSERT INTO ops_ingress_reject_aggregates(bucket_start,client_ip,route_family,protocol,reject_reason,request_count,first_seen,last_seen) VALUES($1,'192.0.2.207','chat','openai','invalid_api_key',1,$1,$1)`, now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"time_range=24h", "end_time=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339))} {
+		w := call("ingress-rejections?client_ip=192.0.2.207&"+query, admin)
+		var result struct{ Data struct{ Total int } }
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Data.Total != 1 {
+			t.Fatal("ingress time range", w.Code, w.Body.String())
+		}
+	}
+	for _, query := range []string{"status_codes=-1", "status_codes=99999999999999999999", "status_codes=bad", "status_codes=600", "model=%00", "q=%00", "user_query=%00", "request_id=%00", "client_request_id=%00", "end_time=bad", "start_time=" + url.QueryEscape(now.Add(-31*24*time.Hour).Format(time.RFC3339))} {
+		if w := call("errors?"+query, admin); w.Code != 400 {
+			t.Fatal("invalid operational query accepted", query, w.Code)
+		}
+	}
+	for _, path := range []string{"errors", "request-errors", "upstream-errors", fmt.Sprintf("request-errors/%d/upstream-errors", z)} {
+		for _, tc := range []struct {
+			token string
+			code  int
+		}{{ordinary, 403}, {"", 401}} {
+			if w := call(path+"?view=all", tc.token); w.Code != tc.code {
+				t.Fatal("operational query authorization", path, w.Code)
+			}
+		}
+	}
+}
 
 func testErrorRequestMetadata(t *testing.T, a *App, admin string) {
 	t.Helper()

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // These queries read current account state and raw usage, without rollup jobs.
@@ -185,8 +188,8 @@ func (a *App) realtimeTraffic(w http.ResponseWriter, r *http.Request) error {
 }
 
 func opsErrorColumns() string {
-	return `id,request_id,user_id,api_key_id,account_id,group_id,platform,model,request_path,stream,
-		error_phase,error_type,severity,status_code,is_business_limited,error_message,error_source,
+	return `id,request_id,client_request_id,user_id,api_key_id,account_id,group_id,platform,model,request_path,stream,
+		error_phase,error_type,severity,status_code,is_business_limited,error_message,error_owner,error_source,
 		account_status,upstream_status_code,provider_error_code,network_error_type,retry_after_seconds,
 		duration_ms,time_to_first_token_ms,created_at,is_count_tokens,resolved,inbound_endpoint,
 		upstream_endpoint,requested_model,upstream_model,request_type,api_key_prefix`
@@ -206,6 +209,7 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 		return reply(w, raw)
 	}
 	where := []string{"true"}
+	q := r.URL.Query()
 	upstream := strings.HasSuffix(r.URL.Path, "/upstream-errors")
 	if upstream {
 		where = append(where, "error_phase IN ('upstream','account_auth') AND error_owner='provider'")
@@ -218,13 +222,18 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 		args = append(args, value)
 		where = append(where, fmt.Sprintf(clause, len(args)))
 	}
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if linked {
 		id, err := pathID(r)
 		if err != nil {
 			return err
 		}
 		var requestID, clientID string
-		if err := a.DB.QueryRowContext(r.Context(), "SELECT COALESCE(request_id,''),COALESCE(client_request_id,'') FROM ops_error_logs WHERE id=$1", id).Scan(&requestID, &clientID); err != nil {
+		if err := tx.QueryRowContext(r.Context(), "SELECT COALESCE(request_id,''),COALESCE(client_request_id,'') FROM ops_error_logs WHERE id=$1", id).Scan(&requestID, &clientID); err != nil {
 			return err
 		}
 		if requestID != "" {
@@ -233,6 +242,17 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 			add("client_request_id=$%d", clientID)
 		} else {
 			where = append(where, "false")
+		}
+	}
+	// Linked diagnostics include business-limited attempts; ordinary lists use
+	// the configured view without changing the persisted error classification.
+	if !linked {
+		switch strings.ToLower(strings.TrimSpace(q.Get("view"))) {
+		case "all":
+		case "excluded":
+			where = append(where, "COALESCE(is_business_limited,false)")
+		default:
+			where = append(where, "NOT COALESCE(is_business_limited,false)")
 		}
 	}
 	for _, column := range []string{"user_id", "api_key_id", "account_id", "group_id"} {
@@ -244,27 +264,62 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 			add(column+"=$%d", id)
 		}
 	}
-	if value := r.URL.Query().Get("resolved"); value != "" {
+	if value := strings.ToLower(strings.TrimSpace(q.Get("resolved"))); value != "" {
+		if value == "yes" {
+			value = "true"
+		} else if value == "no" {
+			value = "false"
+		}
 		resolved, err := strconv.ParseBool(value)
 		if err != nil {
 			return bad("invalid resolved")
 		}
-		add("resolved=$%d", resolved)
+		add("COALESCE(resolved,false)=$%d", resolved)
 	}
-	for _, column := range []string{"model", "error_phase", "error_type", "error_source"} {
-		if value := r.URL.Query().Get(column); value != "" {
-			if len(value) > 100 {
-				return bad("invalid " + column)
+	for _, filter := range [][2]string{{"model", usageRequestedModel}, {"phase", "error_phase"}, {"error_phase", "error_phase"}, {"error_type", "error_type"}, {"error_source", "LOWER(COALESCE(error_source,''))"}, {"error_owner", "LOWER(COALESCE(error_owner,''))"}} {
+		if value := strings.TrimSpace(q.Get(filter[0])); value != "" {
+			if len(value) > 100 || strings.ContainsRune(value, 0) {
+				return bad("invalid " + filter[0])
 			}
-			add(column+"=$%d", value)
+			if filter[0] != "model" && filter[0] != "error_type" {
+				value = strings.ToLower(value)
+			}
+			add(filter[1]+"=$%d", value)
 		}
 	}
-	from, to, err := operationalTimes(r)
+	switch category := strings.TrimSpace(q.Get("category")); category {
+	case "auth", "service_unavailable", "upstream", "internal", "rate_limit", "quota", "invalid_request":
+		add("("+userErrorCategory+")=$%d", category)
+	}
+	window := time.Hour
+	if linked {
+		window = 30 * 24 * time.Hour
+	}
+	from, to, err := operationalTimes(r, window)
 	if err != nil {
 		return err
 	}
 	add("created_at >= $%d", from)
 	add("created_at < $%d", to)
+	if raw := strings.TrimSpace(q.Get("status_codes")); raw != "" {
+		if len(raw) > 4096 {
+			return bad("too many status_codes")
+		}
+		codes := []int{}
+		for _, part := range strings.Split(raw, ",") {
+			if part = strings.TrimSpace(part); part == "" {
+				continue
+			}
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 || n > 599 {
+				return bad("invalid status_codes")
+			}
+			codes = append(codes, n)
+		}
+		if len(codes) > 0 {
+			add("COALESCE(upstream_status_code,status_code,0)=ANY($%d)", pq.Array(codes))
+		}
+	}
 	if value := strings.TrimSpace(r.URL.Query().Get("status_code")); value != "" {
 		status, err := strconv.Atoi(value)
 		if err != nil || status < 100 || status > 599 {
@@ -282,26 +337,48 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 		}
 		add("platform=$%d", value)
 	}
-	if value := strings.TrimSpace(r.URL.Query().Get("request_id")); value != "" {
-		add("request_id=$%d", value)
+	for _, column := range []string{"request_id", "client_request_id"} {
+		if value := strings.TrimSpace(q.Get(column)); value != "" {
+			if len(value) > 255 || strings.ContainsRune(value, 0) {
+				return bad("invalid " + column)
+			}
+			add(column+"=$%d", value)
+		}
 	}
 	if value := strings.TrimSpace(r.URL.Query().Get("q")); value != "" {
-		if len(value) > 255 {
+		if len(value) > 255 || strings.ContainsRune(value, 0) {
 			return bad("q is too long")
 		}
 		args = append(args, value)
 		last := len(args)
-		where = append(where, fmt.Sprintf("(position(lower($%d) in lower(COALESCE(error_message,'')))>0 OR position(lower($%d) in lower(COALESCE(model,'')))>0)", last, last))
+		where = append(where, fmt.Sprintf("(position(lower($%d) in lower(COALESCE(error_message,'')))>0 OR position(lower($%d) in lower("+usageRequestedModel+"))>0 OR position(lower($%d) in lower(COALESCE(request_id,'')))>0 OR position(lower($%d) in lower(COALESCE(client_request_id,'')))>0)", last, last, last, last))
 	}
-	base := " FROM ops_error_logs WHERE " + strings.Join(where, " AND ")
+	if value := strings.TrimSpace(q.Get("user_query")); value != "" {
+		if len(value) > 255 || strings.ContainsRune(value, 0) {
+			return bad("invalid user_query")
+		}
+		add("EXISTS(SELECT 1 FROM users u WHERE u.id=e.user_id AND position(lower($%d) in lower(u.email))>0)", value)
+	}
+	field := "created_at"
+	switch strings.ToLower(strings.TrimSpace(q.Get("sort_by"))) {
+	case "model":
+		field = usageRequestedModel
+	case "status_code":
+		field = "COALESCE(upstream_status_code,status_code,0)"
+	}
+	direction := " DESC"
+	if strings.EqualFold(strings.TrimSpace(q.Get("sort_order")), "asc") {
+		direction = " ASC"
+	}
+	base := " FROM ops_error_logs e WHERE " + strings.Join(where, " AND ")
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*)"+base, args...).Scan(&total); err != nil {
+	if err := tx.QueryRowContext(r.Context(), "SELECT count(*)"+base, args...).Scan(&total); err != nil {
 		return err
 	}
 	page, size := pagination(r)
-	size = min(size, 200)
+	size = min(size, 500)
 	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(x) FROM (SELECT "+opsErrorColumns()+base+" ORDER BY id DESC LIMIT $"+strconv.Itoa(len(args)-1)+" OFFSET $"+strconv.Itoa(len(args))+")x", args...)
+	rows, err := tx.QueryContext(r.Context(), "SELECT to_jsonb(x) FROM (SELECT "+opsErrorColumns()+base+" ORDER BY "+field+direction+",id"+direction+" LIMIT $"+strconv.Itoa(len(args)-1)+" OFFSET $"+strconv.Itoa(len(args))+")x", args...)
 	if err != nil {
 		return err
 	}
@@ -312,11 +389,12 @@ func (a *App) opsErrors(w http.ResponseWriter, r *http.Request) error {
 	return pageReply(w, items, total, page, size)
 }
 
-func operationalTimes(r *http.Request) (time.Time, time.Time, error) {
+func operationalTimes(r *http.Request, window time.Duration) (time.Time, time.Time, error) {
+	q := r.URL.Query()
 	end := time.Now().UTC()
-	start := end.Add(-time.Hour)
+	var start time.Time
 	for _, name := range []string{"start_time", "end_time"} {
-		if raw := r.URL.Query().Get(name); raw != "" {
+		if raw := strings.TrimSpace(q.Get(name)); raw != "" {
 			at, err := time.Parse(time.RFC3339, raw)
 			if err != nil {
 				return start, end, bad("invalid " + name)
@@ -328,14 +406,22 @@ func operationalTimes(r *http.Request) (time.Time, time.Time, error) {
 			}
 		}
 	}
-	if !start.Before(end) || end.Sub(start) > 31*24*time.Hour {
-		return start, end, bad("invalid time range (maximum 31 days)")
+	if strings.TrimSpace(q.Get("start_time")) == "" && strings.TrimSpace(q.Get("end_time")) == "" {
+		if duration := map[string]time.Duration{"5m": 5 * time.Minute, "30m": 30 * time.Minute, "1h": time.Hour, "6h": 6 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour}[strings.TrimSpace(q.Get("time_range"))]; duration != 0 {
+			window = duration
+		}
+	}
+	if start.IsZero() {
+		start = end.Add(-window)
+	}
+	if start.After(end) || end.Sub(start) > 30*24*time.Hour {
+		return start, end, bad("invalid time range (maximum 30 days)")
 	}
 	return start, end, nil
 }
 
 func (a *App) ingressRejections(w http.ResponseWriter, r *http.Request) error {
-	start, end, err := operationalTimes(r)
+	start, end, err := operationalTimes(r, time.Hour)
 	if err != nil {
 		return err
 	}
