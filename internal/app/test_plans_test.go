@@ -127,6 +127,57 @@ func testPlanLifecycle(t *testing.T, a *App, admin, ordinary string) {
 			t.Fatal("plan permission boundary", endpoint, w.Code)
 		}
 	}
+	// Creation times and IDs need not be ordered alike. Listing and pruning
+	// must agree on the newest results, including deterministic timestamp ties.
+	func() {
+		exec := func(query string, args ...any) {
+			t.Helper()
+			if _, err := a.DB.Exec(query, args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		disabled := map[string]any{"account_id": aid, "cron_expression": "0 * * * *", "enabled": false}
+		second := planReply(call("POST", root, admin, disabled))
+		third := planReply(call("POST", root, admin, disabled))
+		defer exec("DELETE FROM scheduled_test_plans WHERE id IN($1,$2)", second.ID, third.ID)
+		exec(`UPDATE scheduled_test_plans SET created_at=CASE WHEN id=$1 THEN '2020-01-01'::timestamptz ELSE '2020-01-02'::timestamptz END WHERE account_id=$2`, third.ID, aid)
+		list := call("GET", fmt.Sprintf("/api/v1/admin/accounts/%d/scheduled-test-plans", aid), admin, nil)
+		var plans []testPlan
+		if list.Code != 200 || json.Unmarshal(list.Body.Bytes(), &plans) != nil || len(plans) != 3 || plans[0].ID != second.ID || plans[1].ID != plan.ID || plans[2].ID != third.ID {
+			t.Fatal("plan creation order", list.Code, list.Body.String())
+		}
+		exec("DELETE FROM scheduled_test_results WHERE plan_id=$1", plan.ID)
+		for i, stamp := range []string{"2020-01-01", "2020-01-03", "2020-01-03", "2020-01-02"} {
+			exec(`INSERT INTO scheduled_test_results(plan_id,status,response_text,latency_ms,started_at,finished_at,created_at) VALUES($1,'success',$2,1,$3,$3,$3)`, plan.ID, fmt.Sprint(i), stamp)
+		}
+		exec(`INSERT INTO scheduled_test_results(plan_id,status,response_text,latency_ms,started_at,finished_at,created_at) VALUES($1,'success','other plan',1,now(),now(),now())`, second.ID)
+		results := func(endpoint string, want []string) {
+			t.Helper()
+			w := call("GET", endpoint, admin, nil)
+			var rows []struct {
+				Text string `json:"response_text"`
+			}
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &rows) != nil || len(rows) != len(want) {
+				t.Fatal("result page", w.Code, w.Body.String())
+			}
+			for i := range rows {
+				if rows[i].Text != want[i] {
+					t.Fatal("result creation order", i, rows[i].Text, want[i])
+				}
+			}
+		}
+		results(path+"/results", []string{"2", "1", "3", "0"})
+		results(path+"/results?limit=1", []string{"2"})
+		results(path+"/results?limit=2", []string{"2", "1"})
+		if err := a.runTestPlan(context.Background(), plan); err != nil {
+			t.Fatal(err)
+		}
+		results(path+"/results", []string{"OK", "2"})
+		results(fmt.Sprintf("%s/%d/results", root, second.ID), []string{"other plan"})
+		if calls.Load() != 4 {
+			t.Fatal("listing dispatched extra tests", calls.Load())
+		}
+	}()
 	// Hold the account row as a deleting transaction does. Both create and edit
 	// must wait here, then observe deletion; neither may leave an enabled plan.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

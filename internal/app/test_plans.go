@@ -158,7 +158,7 @@ func (a *App) listAccountPlans(w http.ResponseWriter, r *http.Request) error {
 	if _, err = a.loadAccount(r.Context(), id); err != nil {
 		return err
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(p) FROM scheduled_test_plans p WHERE account_id=$1 ORDER BY id", id)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(p) FROM scheduled_test_plans p WHERE account_id=$1 ORDER BY created_at DESC,id DESC", id)
 	if err != nil {
 		return err
 	}
@@ -205,7 +205,7 @@ func (a *App) testResults(w http.ResponseWriter, r *http.Request) error {
 	if limit > 1000 {
 		limit = 1000
 	}
-	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(t) FROM scheduled_test_results t WHERE plan_id=$1 ORDER BY id DESC LIMIT $2", id, limit)
+	rows, err := a.DB.QueryContext(r.Context(), "SELECT to_jsonb(t) FROM scheduled_test_results t WHERE plan_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2", id, limit)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func (a *App) runTestPlan(ctx context.Context, plan testPlan) error {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO scheduled_test_results(plan_id,status,response_text,error_message,latency_ms,started_at,finished_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, plan.ID, result.Status, result.Text, result.Error, result.Latency, result.Started, result.Finished); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM scheduled_test_results WHERE plan_id=$1 AND id IN(SELECT id FROM scheduled_test_results WHERE plan_id=$1 ORDER BY id DESC OFFSET $2)`, plan.ID, maxResults); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM scheduled_test_results WHERE plan_id=$1 AND id IN(SELECT id FROM scheduled_test_results WHERE plan_id=$1 ORDER BY created_at DESC,id DESC OFFSET $2)`, plan.ID, maxResults); err != nil {
 		return err
 	}
 	if updated.Equal(plan.Updated) {
