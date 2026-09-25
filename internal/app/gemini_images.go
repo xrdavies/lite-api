@@ -157,6 +157,25 @@ func (s *gatewaySelection) generatedImagePrice(g gatewayGroup, model, size strin
 	if price == nil && channelSet {
 		return channel, g.imageRate(), nil
 	}
+	if price == nil && s.Account.Platform == "grok" {
+		// Fixed compatibility prices; 4K shares the existing 2K tariff.
+		var small, large string
+		switch strings.ToLower(strings.TrimSpace(model)) {
+		case "grok-imagine", "grok-imagine-image", "grok-imagine-edit":
+			small, large = "0.02", "0.02"
+		case "grok-imagine-image-quality":
+			small, large = "0.05", "0.07"
+		case "grok-imagine-image-2.0":
+			small, large = "0.06", "0.08"
+		}
+		if small != "" {
+			v := json.Number(large)
+			if size == "1K" {
+				v = json.Number(small)
+			}
+			price = &v
+		}
+	}
 	if price == nil {
 		// Dated compatibility fallback, not a live provider price feed.
 		factor := map[string]string{"1K": "1", "2K": "1.5", "4K": "2"}[size]

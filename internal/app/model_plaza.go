@@ -192,7 +192,7 @@ WHERE g.status='active' AND g.deleted_at IS NULL AND g.subscription_type='standa
 						entry["time_pricing"] = price.TimePricing
 					}
 				}
-				if model.Platform == "gemini" {
+				if model.Platform == "gemini" || model.Platform == "openai" || model.Platform == "grok" {
 					// Separate image tariffs from text prices: aliases may generate
 					// either depending on the requested modalities and actual output.
 					var imageGroup gatewayGroup

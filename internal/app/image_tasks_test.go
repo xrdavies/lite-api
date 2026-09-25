@@ -154,7 +154,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	}
 	uid := int64(manage("POST", "/api/v1/admin/users", admin, map[string]any{"email": "async-images@example.test", "password": "async-images-password", "balance": 10})["id"].(float64))
 	user := manage("POST", "/api/v1/auth/login", "", map[string]any{"email": "async-images@example.test", "password": "async-images-password"})["access_token"].(string)
-	gid := int64(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Async images", "platform": "openai", "allow_image_generation": true})["id"].(float64))
+	gid := int64(manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Async images", "platform": "openai", "allow_image_generation": true, "image_price_2k": "0.04", "image_rate_independent": true, "image_rate_multiplier": "0.5"})["id"].(float64))
 	manage("POST", "/api/v1/admin/channels", admin, map[string]any{"name": "Async image prices", "group_ids": []int64{gid}, "model_pricing": []any{map[string]any{"platform": "openai", "models": []string{"async-image"}, "billing_mode": "image", "per_request_price": json.Number("0.02")}}})
 	manage("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Async image provider", "platform": "openai", "type": "apikey", "group_ids": []int64{gid}, "credentials": map[string]any{"api_key": "async-upstream", "base_url": upstream.URL, "model_mapping": map[string]string{"async-image": "async-upstream-model"}}})
 	keyData := manage("POST", "/api/v1/keys", user, map[string]any{"name": "Async image key", "group_id": gid, "quota": 100})
@@ -228,6 +228,11 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	var cost, balance, quota string
 	if err := a.DB.QueryRow("SELECT actual_cost::text FROM usage_logs WHERE request_id=$1", id).Scan(&cost); err != nil || cost != "0.0200000000" {
 		t.Fatal("async cost", cost, err)
+	}
+	var countImages int
+	var imageSize, imageSource, rate string
+	if err := a.DB.QueryRow("SELECT image_count,image_size,image_size_source,rate_multiplier::text FROM usage_logs WHERE request_id=$1", id).Scan(&countImages, &imageSize, &imageSource, &rate); err != nil || countImages != 1 || imageSize != "2K" || imageSource != "default" || rate != "0.5000" {
+		t.Fatal("async image accounting", countImages, imageSize, imageSource, rate, err)
 	}
 	if err := a.DB.QueryRow("SELECT balance::text FROM users WHERE id=$1", uid).Scan(&balance); err != nil || balance != "9.98000000" {
 		t.Fatal("async balance", balance, err)
@@ -312,6 +317,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	}
 	a.imageTaskMu.Lock()
 	locked = true
+	manage("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"image_price_2k": 9, "image_rate_multiplier": 7})
 	if _, err := a.DB.Exec(`DROP TRIGGER reject_async_bill ON usage_logs; DROP FUNCTION reject_async_bill()`); err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +337,10 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE request_id=$1", recoverID).Scan(&logged); err != nil || logged != 1 {
 		t.Fatal("recovery charged twice", logged, err)
 	}
+	if err := a.DB.QueryRow("SELECT actual_cost::text,image_count,image_size,rate_multiplier::text FROM usage_logs WHERE request_id=$1", recoverID).Scan(&cost, &countImages, &imageSize, &rate); err != nil || cost != "0.0200000000" || countImages != 1 || imageSize != "2K" || rate != "0.5000" {
+		t.Fatal("recovery changed image price snapshot", cost, countImages, imageSize, rate, err)
+	}
+	manage("PUT", fmt.Sprintf("/api/v1/admin/groups/%d", gid), admin, map[string]any{"image_price_2k": "0.04", "image_rate_multiplier": "0.5"})
 	// Interrupted dispatch is terminal without unsafe replay. A queued request can resume.
 	orphan := imageTaskRecord{ID: "imgtask_interrupted", UserID: uid, APIKeyID: kid, GroupID: gid, Status: "processing", Stage: "running", CreatedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(imageTaskTTL).Unix()}
 	if err := a.saveImageTask(ctx, orphan); err != nil {

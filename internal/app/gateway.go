@@ -1357,7 +1357,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if !in.CountOnly && selected.Search == "" && audioIn == nil {
 			preflight, priceErr := selected.price(billingModel)
 			rate, label := g.Group.Rate, ""
-			if wireIn.Protocol == "gemini" && wireIn.ImageGeneration {
+			if (wireIn.Protocol == "gemini" || wireIn.Protocol == "images") && wireIn.ImageGeneration {
 				preflight, rate, priceErr = selected.generatedImagePrice(g.Group, billingModel, wireIn.ImageSize)
 				label = wireIn.ImageSize
 			}
@@ -1523,6 +1523,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	defer selected.Release()
 	defer resp.Body.Close()
 	observation := textObservation{Protocol: wireIn.Protocol, Tier: tier, CountOnly: in.CountOnly, Action: in.Action, Programmatic: in.NativeProgrammatic}
+	if wireIn.Protocol == "images" {
+		observation.Usage.ImageInputSize = wireIn.ImageInputSize
+	}
 	upstreamID := resp.Header.Get("X-Request-ID")
 	if upstreamID == "" {
 		upstreamID = resp.Header.Get("Xai-Request-Id")
@@ -1932,6 +1935,21 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				observation.HasUsage = priceErr == nil && (p.BillingMode == "image" || p.BillingMode == "per_request")
 			}
 		}
+	}
+	if wireIn.Protocol == "images" && observation.Usage.ImageCount > 0 && !observation.HasUsage {
+		billingModel := selected.ChannelModel
+		switch selected.BillingSource {
+		case "requested":
+			billingModel = model
+		case "upstream":
+			billingModel = selected.UpstreamModel
+		case "response_model":
+			if observation.Model != "" {
+				billingModel = observation.Model
+			}
+		}
+		p, _, err := selected.generatedImagePrice(g.Group, billingModel, observation.Usage.ImageSize)
+		observation.HasUsage = err == nil && (p.BillingMode == "image" || p.BillingMode == "per_request")
 	}
 	knownImageUsage := false
 	if imageMeter != nil {

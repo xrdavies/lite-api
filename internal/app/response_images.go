@@ -173,15 +173,24 @@ func (m *responseImageMeter) apply(u *priceUsage, config *responseImageConfig) {
 		return
 	}
 	u.Requests = u.ImageCount
-	u.ImageSize, u.ImageSizeSource = "2K", "default"
-	if config != nil {
-		u.ImageInputSize = config.Size
-		if size := imageSizeTier(config.Size); size != "" {
-			u.ImageSize, u.ImageSizeSource = size, "input"
-		}
-	}
+	sizes := make([]string, 0, len(m.order))
 	for _, id := range m.order {
-		size := m.seen[id]
+		sizes = append(sizes, m.seen[id])
+	}
+	input := ""
+	if config != nil {
+		input = config.Size
+	}
+	applyImageSizes(u, input, sizes)
+}
+
+func applyImageSizes(u *priceUsage, input string, sizes []string) {
+	u.ImageSizes, u.ImageOutputSize = [3]int64{}, ""
+	u.ImageSize, u.ImageSizeSource, u.ImageInputSize = "2K", "default", input
+	if size := imageSizeTier(input); size != "" {
+		u.ImageSize, u.ImageSizeSource = size, "input"
+	}
+	for _, size := range sizes {
 		if u.ImageOutputSize == "" {
 			u.ImageOutputSize = size
 		}
@@ -194,6 +203,65 @@ func (m *responseImageMeter) apply(u *priceUsage, config *responseImageConfig) {
 			u.ImageSizeSource = "output"
 		}
 	}
+}
+
+// Direct image responses share the size contract with hosted image output, but
+// each data entry is one image even when two entries contain the same bytes.
+func (o *textObservation) observeImages(raw []byte) error {
+	var result struct {
+		Data         []map[string]json.RawMessage
+		Model, Size  string
+		Usage, Error json.RawMessage
+	}
+	invalid := func() error { return &apiError{502, "upstream image response is invalid"} }
+	if json.Unmarshal(raw, &result) != nil || len(result.Data) == 0 || len(result.Data) > 10 || len(result.Size) > 32 || result.Error != nil && string(result.Error) != "null" {
+		return invalid()
+	}
+	u := priceUsage{ImageRequest: true}
+	sizes := []string{}
+	for _, fields := range result.Data {
+		if fields == nil {
+			return invalid()
+		}
+		if strings.TrimSpace(credentialString(fields, "url")) == "" && strings.TrimSpace(credentialString(fields, "b64_json")) == "" {
+			continue
+		}
+		size := credentialString(fields, "size")
+		if size == "" {
+			size = result.Size
+		}
+		if len(size) > 32 {
+			return invalid()
+		}
+		sizes = append(sizes, size)
+		u.ImageCount++
+	}
+	u.Requests = u.ImageCount
+	applyImageSizes(&u, o.Usage.ImageInputSize, sizes)
+	o.Usage, o.Model = u, result.Model
+	if result.Usage != nil && string(result.Usage) != "null" {
+		var values map[string]json.RawMessage
+		if json.Unmarshal(result.Usage, &values) != nil || values == nil {
+			return invalid()
+		}
+		for _, pair := range [][2]string{{"input_tokens", "prompt_tokens"}, {"output_tokens", "completion_tokens"}, {"input_tokens_details", "prompt_tokens_details"}, {"output_tokens_details", "completion_tokens_details"}} {
+			if value := values[pair[0]]; value != nil {
+				values[pair[1]] = value
+			}
+		}
+		encoded, _ := json.Marshal(values)
+		tokens, err := parseChatUsage(encoded)
+		if err != nil {
+			return err
+		}
+		u.Input, u.Output, u.CacheRead, u.CacheWrite = tokens.Input, tokens.Output, tokens.CacheRead, tokens.CacheWrite
+		u.ImageInput, u.ImageOutput = tokens.ImageInput, tokens.ImageOutput
+		o.Usage, o.HasUsage = u, true
+	}
+	if u.ImageCount == 0 {
+		return invalid()
+	}
+	return nil
 }
 
 func imageSizeBreakdown(sizes [3]int64) any {

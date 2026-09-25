@@ -183,7 +183,7 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 `GET /api/v1/model-plaza` 是分组模型价格目录，由 `model_plaza_enabled`（默认关闭）、`model_plaza_require_auth` 和 `model_plaza_description` 控制。匿名只见公开分组；使用登录令牌可查询已授权专属分组和本人的 `user_rate_multiplier`，受公开分组限制的用户仍需授权。无效令牌明确拒绝，API Key 不能代替登录。目录每个 IP 每分钟最多 60 次，响应禁止缓存；不调用上游或产生消费，也不保证列出的模型当前可调度。
 
-广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。Gemini 模型另返回按 1K/2K/4K 分档的 `image_pricing`，与原生图片结算共用价格解析；明确的 token 价卡继续以 token 单价展示。
+广场价格单位为 USD/token，倍率另列。token 阶梯展示绝对单价，与扣费共用解析规则，包括缓存 5m/1h、阶梯空档回落、显式零价、时段/推理倍率；关闭分组长上下文计费后展示基础档。渠道的图片/按次价和档位保留。缺价返回 `null`；按上游/响应模型决定价格时，也不预报未经确认的价格。`official_pricing` 返回可识别模型的固定参考价，目录附 `pricing_as_of` 和 `pricing_checksum`；别名不猜测官方身份。OpenAI、Grok、Gemini 模型另返回按 1K/2K/4K 分档的 `image_pricing`，与图片结算共用价格解析；这是该模型用于图片请求时的价格，不是上游图片能力声明。明确的 token 价卡继续以 token 单价展示。
 
 ## 网关、用量与账务
 
@@ -400,6 +400,12 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`api_key_ids` 最多 100 个，只返回本人 Key）：`today_actual_cost` 为 Asia/Shanghai 当日费用，原 `total_actual_cost` 字段为近 30 天费用。`GET /api/v1/user/api-keys/{id}/usage/daily` 支持 1–90 天和显式 `timezone`，默认 30 天、Asia/Shanghai。金额直接在数据库精确汇总，不改变原始消费。
 
 管理员审计查询为 `/api/v1/admin/audit-logs` 和 `/{id}`，支持操作者、动作、方法、IP、RFC3339 时间、成功状态及关键词筛选；每页最多 200 条。查询不提供清空能力。`/api/v1/admin/usage/search-users` 与 `/search-api-keys` 为账务筛选提供用户/Key 简要信息，包含历史用户归属，不返回密码和 Key 原文。
+
+独立 OpenAI/Grok 图片生成和编辑按 `data` 中含非空 `url` 或 `b64_json` 的结果数量记账，重复图片仍按返回数量计费，空对象不计数；没有图片的成功响应返回 502。`usage` 中真实的输入、输出、缓存及图片 token 明细进入原用量字段，兼容 input/output 与 prompt/completion 两套命名；未提供的 token 不从图片数量估算。字段依据 [OpenAI 图片 API](https://developers.openai.com/api/reference/resources/images/methods/generate)。
+
+计费尺寸优先采用图片项 `size`（省略时取响应顶层 `size`），多张图片按最大档位统一结算并记录各档数量；没有有效输出尺寸则取请求 `size`，再默认 2K。沿用最长边 ≤1024 为 1K、≤2048 为 2K、其余为 4K；输出元数据不通过额外下载或像素解码改写。原请求尺寸、输出尺寸、来源和档位分布写入用量。
+
+显式分组/渠道 token 价卡优先，必须有真实 token 用量并使用普通有效用户倍率；其他情况依次采用分组模型价卡、分组尺寸覆盖、渠道图片/按次价和固定兼容基线，使用有效用户倍率或已开启的图片独立倍率。Grok 已知图片族保留固定尺寸价（不是实时原厂报价），其余模型沿用参考按张价格或默认基线。请求开始后的改价不影响该次结算，异步 SQL 故障恢复使用原费用检查点；重复查询和幂等重放不重复扣费。
 
 ## 异步图片任务
 

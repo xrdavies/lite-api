@@ -52,7 +52,7 @@ func (a *App) makeReceipt(id string, g *gatewayIdentity, s *gatewaySelection, re
 	if u.ImageCount > 0 && s.ResponseImage != nil && s.Account.Platform == "openai" {
 		model = s.responseImageModel(requested, response)
 		cost, p.BillingMode, rate, err = s.generatedImageCost(g.Group, model, u, tier, effort, at)
-	} else if (u.ImageCount > 0 || u.ImageRequest) && s.Account.Platform == "gemini" {
+	} else if u.ImageRequest && (s.Account.Platform == "openai" || s.Account.Platform == "grok") || (u.ImageCount > 0 || u.ImageRequest) && s.Account.Platform == "gemini" {
 		cost, p.BillingMode, rate, err = s.generatedImageCost(g.Group, model, u, tier, effort, at)
 	} else if u.VideoCount > 0 {
 		p.BillingMode = "video"

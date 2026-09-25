@@ -96,6 +96,14 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 		if raw := body["stream"]; raw != nil && string(raw) != "false" {
 			return in, bad("image generation does not stream")
 		}
+		if raw := body["size"]; raw != nil && (json.Unmarshal(raw, &in.ImageInputSize) != nil || len(in.ImageInputSize) > 32 || in.ImageInputSize != "auto" && imageSizeTier(in.ImageInputSize) == "") {
+			return in, bad("invalid image size")
+		}
+		in.ImageGeneration = true
+		in.ImageSize, in.ImageSizeSource = "2K", "default"
+		if size := imageSizeTier(in.ImageInputSize); size != "" {
+			in.ImageSize, in.ImageSizeSource = size, "input"
+		}
 		if in.Action == "edits" {
 			var images []json.RawMessage
 			if raw := body["images"]; raw != nil {
@@ -453,7 +461,7 @@ func imagesToGrok(body map[string]json.RawMessage) (map[string]json.RawMessage, 
 
 func (in textRequest) preflightUsage() priceUsage {
 	if in.Protocol == "images" {
-		return priceUsage{Requests: 1}
+		return priceUsage{Requests: 1, Input: 2, ImageInput: 1, Output: 1, ImageOutput: 1}
 	}
 	if in.Protocol == "embeddings" {
 		return priceUsage{Input: 1}
@@ -542,22 +550,7 @@ func (o *textObservation) complete() bool {
 
 func (o *textObservation) observe(data []byte) error {
 	if o.Protocol == "images" {
-		var result struct {
-			Data  []json.RawMessage `json:"data"`
-			Error json.RawMessage   `json:"error"`
-		}
-		if json.Unmarshal(data, &result) != nil || len(result.Data) == 0 || len(result.Data) > 10 || result.Error != nil && string(result.Error) != "null" {
-			return &apiError{502, "upstream image response is invalid"}
-		}
-		for _, item := range result.Data {
-			var fields map[string]json.RawMessage
-			if json.Unmarshal(item, &fields) != nil || fields == nil {
-				return &apiError{502, "upstream image result is invalid"}
-			}
-		}
-		o.Usage = priceUsage{Requests: int64(len(result.Data))}
-		o.HasUsage = true
-		return nil
+		return o.observeImages(data)
 	}
 	if o.Protocol == "alpha_search" {
 		var result map[string]json.RawMessage
