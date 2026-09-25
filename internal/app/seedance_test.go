@@ -304,8 +304,10 @@ func testSeedance(t *testing.T, a *App, admin string) {
 	if w := call("DELETE", path(first), key, nil, ""); w.Code != 200 {
 		t.Fatal("delete settled", w.Code)
 	}
-	if w := call("DELETE", path(first), key, nil, ""); w.Code != 200 {
-		t.Fatal("repeat delete", w.Code)
+	for _, prefix := range []string{"/api/v3", "/v3", "/v1", ""} {
+		if w := call("DELETE", prefix+"/contents/generations/tasks/"+first, key, nil, ""); w.Code != 200 {
+			t.Fatal("repeat delete alias", prefix, w.Code)
+		}
 	}
 	if w := call("GET", path(first), key, nil, ""); w.Code != 404 {
 		t.Fatal("deleted task exposed", w.Code)

@@ -175,8 +175,10 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := call("POST", "/v1/videos/generations", key, body, "grok-video-one"); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "true" {
-		t.Fatal("video alias replay", w.Code, w.Body.String())
+	for _, path := range []string{"/v1/videos/generations", "/v1/videos", "/videos/generations"} {
+		if w := call("POST", path, key, body, "grok-video-one"); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "true" || !strings.Contains(w.Body.String(), first) {
+			t.Fatal("video alias replay", path, w.Code, w.Body.String())
+		}
 	}
 	if w := lookup(first, other); w.Code != 404 {
 		t.Fatal("foreign video", w.Code)
@@ -279,7 +281,7 @@ func testGrokVideo(t *testing.T, a *App, admin string) {
 		if w := lookup(job, key); w.Code != 200 || strings.Contains(w.Body.String(), "private-provider-error") {
 			t.Fatal("video failure", w.Code, w.Body.String())
 		}
-		job = create("/v1/videos/"+op, key, op+"-done")
+		job = create("/videos/"+op, key, op+"-done")
 		v, err := a.loadVideoTask(context.Background(), job)
 		if err != nil {
 			t.Fatal(err)

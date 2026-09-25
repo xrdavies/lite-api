@@ -133,15 +133,36 @@ func accountQuotaDelta(extra map[string]json.RawMessage, cost string, now time.T
 }
 func (a *App) platformQuotas(w http.ResponseWriter, r *http.Request) error {
 	uid := current(r).ID
-	if strings.HasPrefix(r.URL.Path, "/api/v1/admin/") {
+	admin := strings.HasPrefix(r.URL.Path, "/api/v1/admin/")
+	if admin {
 		var err error
 		uid, err = pathID(r)
 		if err != nil {
 			return err
 		}
 	}
-	day, week := quotaStarts(time.Now())
-	rows, err := a.DB.QueryContext(r.Context(), `SELECT to_jsonb(q)-'deleted_at' || jsonb_build_object('daily_usage_usd',CASE WHEN daily_window_start=$2 THEN daily_usage_usd ELSE 0 END,'weekly_usage_usd',CASE WHEN weekly_window_start=$3 THEN weekly_usage_usd ELSE 0 END,'monthly_usage_usd',CASE WHEN monthly_window_start+interval '720 hours'>now() THEN monthly_usage_usd ELSE 0 END) FROM user_platform_quotas q WHERE user_id=$1 AND deleted_at IS NULL ORDER BY platform`, uid, day, week)
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = tx.QueryRowContext(r.Context(), "SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL", uid).Scan(&uid); err != nil {
+		return err
+	}
+	now := time.Now()
+	day, week := quotaStarts(now)
+	// Expose only quota fields. Expiry is a read-only projection; unset starts
+	// retain stored usage and have no reset time, while monthly resets stay anchored.
+	rows, err := tx.QueryContext(r.Context(), `SELECT jsonb_build_object(
+ 'platform',platform,'daily_limit_usd',daily_limit_usd,'weekly_limit_usd',weekly_limit_usd,'monthly_limit_usd',monthly_limit_usd,
+ 'daily_usage_usd',CASE WHEN daily_window_start<$2 THEN 0 ELSE daily_usage_usd END,
+ 'weekly_usage_usd',CASE WHEN weekly_window_start<$3 THEN 0 ELSE weekly_usage_usd END,
+ 'monthly_usage_usd',CASE WHEN monthly_window_start+interval '720 hours'<=$4 THEN 0 ELSE monthly_usage_usd END,
+ 'daily_window_resets_at',CASE WHEN daily_window_start>=$2 THEN $6::timestamptz END,
+ 'weekly_window_resets_at',CASE WHEN weekly_window_start>=$3 THEN $7::timestamptz END,
+ 'monthly_window_resets_at',CASE WHEN monthly_window_start+interval '720 hours'>$4 THEN monthly_window_start+interval '720 hours' END)
+ || CASE WHEN $5 THEN jsonb_build_object('daily_window_start',daily_window_start,'weekly_window_start',weekly_window_start,'monthly_window_start',monthly_window_start) ELSE '{}'::jsonb END
+ FROM user_platform_quotas WHERE user_id=$1 AND deleted_at IS NULL ORDER BY platform`, uid, day, week, now, admin, day.AddDate(0, 0, 1), week.AddDate(0, 0, 7))
 	if err != nil {
 		return err
 	}
@@ -232,7 +253,15 @@ func (a *App) resetPlatformQuota(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return bad("invalid quota window")
 	}
-	result, err := a.DB.ExecContext(r.Context(), "UPDATE user_platform_quotas SET "+in.Window+"_usage_usd=0,"+in.Window+"_window_start=$3,updated_at=now() WHERE user_id=$1 AND platform=$2 AND deleted_at IS NULL", uid, in.Platform, start)
+	tx, err := a.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = tx.QueryRowContext(r.Context(), "SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE", uid).Scan(&uid); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(r.Context(), "UPDATE user_platform_quotas SET "+in.Window+"_usage_usd=0,"+in.Window+"_window_start=$3,updated_at=now() WHERE user_id=$1 AND platform=$2 AND deleted_at IS NULL", uid, in.Platform, start)
 	if err != nil {
 		return err
 	}
@@ -242,6 +271,9 @@ func (a *App) resetPlatformQuota(w http.ResponseWriter, r *http.Request) error {
 	}
 	if n == 0 {
 		return missing()
+	}
+	if err = tx.Commit(); err != nil {
+		return err
 	}
 	return a.platformQuotas(w, r)
 }

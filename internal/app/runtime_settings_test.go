@@ -116,6 +116,9 @@ func testRuntimeSettings(t *testing.T, a *App, admin, ordinary string) {
 	if v := data("GET", root+"rate-limit-429-cooldown", admin, nil); v["enabled"] != true || v["cooldown_seconds"] != float64(5) {
 		t.Fatal("429 defaults", v)
 	}
+	if v := data("GET", root+"panel-rate-limit", admin, nil); v["enabled"] != true || v["user_rpm"] != float64(240) || v["heavy_rpm"] != float64(60) || v["exempt_admin"] != true || v["public_ip_rpm"] != float64(300) {
+		t.Fatal("panel defaults", v)
+	}
 	for _, raw := range []string{"", "null", "bad json", `{"enabled":true,"cooldown_minutes":"bad"}`} {
 		exec("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", overloadSetting, raw)
 		if v := data("GET", root+"overload-cooldown", admin, nil); v["cooldown_minutes"] != float64(10) {

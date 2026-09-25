@@ -99,6 +99,9 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	login := func(email, password string) map[string]any {
 		return must("POST", "/api/v1/auth/login", "", map[string]any{"email": email, "password": password})
 	}
+	if status := must("GET", "/health", "", nil)["status"]; status != "ok" {
+		t.Fatal("healthy service", status)
+	}
 	expect(404, "POST", "/api/v1/auth/register", "", map[string]string{"email": "not-allowed@example.test", "password": "password"})
 	expect(401, "POST", "/api/v1/auth/login", "", map[string]string{"email": "admin@example.test", "password": "wrong"})
 	admin := login("admin@example.test", "correct-password")["access_token"].(string)
@@ -112,6 +115,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	userToken := tokens["access_token"].(string)
 	refresh := tokens["refresh_token"].(string)
 	otherToken := login("another@example.test", "correct-password")["access_token"].(string)
+	testPlatformQuotaViews(t, a, admin, otherToken)
 	testAuditQueries(t, a, admin, userToken)
 	testUpstreamRequestIDs(t, a, admin)
 	testKeyManagement(t, a, admin)

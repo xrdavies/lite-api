@@ -306,6 +306,10 @@ func testCustomVoices(t *testing.T, a *App, admin string) {
 	if patch.Code != 200 || patchValue.Load() != `{"name":null,"tone":"calm"}` {
 		t.Fatal("voice patch", patch.Code, patch.Body, patchValue.Load())
 	}
+	before = calls.Load()
+	if w := call("PATCH", "/v1/custom-voices/"+vid, key, "application/json", "voice-patch", []byte(`{"name":null,"tone":"calm"}`)); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "true" || !bytes.Equal(w.Body.Bytes(), patch.Body.Bytes()) || calls.Load() != before {
+		t.Fatal("voice patch alias repeated mutation", w.Code, w.Body.String())
+	}
 	body, _ := json.Marshal(map[string]string{"text": "test", "voice_id": vid})
 	if w := call("POST", "/tts", key, "application/json", "voice-tts", body); w.Code != 200 || ttsVoice.Load() != "native01" {
 		t.Fatal("pinned TTS", w.Code, w.Body, ttsVoice.Load())

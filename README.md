@@ -448,6 +448,8 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 用户通过 `/api/v1/usage`、`/stats`、`/{id}` 和 `/errors` 查询本人原始用量、汇总和错误，管理员通过 `/api/v1/admin/usage`、`/stats` 查询。`GET /v1/billing` 使用客户端 Key 查询余额及额度；余额耗尽仍可查询。管理员通过 `/api/v1/admin/users/{id}/platform-quotas` 的 GET/PUT 配置平台额度，`/reset` 重置指定窗口；用户通过 `/api/v1/user/platform-quotas` 查询。平台额度 NULL 为不限、0 为禁止，日/周按 Asia/Shanghai 自然日/周，月按滚动 30 天。
 
+平台额度查询返回各窗口的限额、用量和 `*_window_resets_at`，仅管理员可见 `*_window_start`。过期窗口显示零用量及 null 重置时间，读取不修改账务；未初始化的窗口保留原用量、重置时间为 null。月窗口重置时间固定为起点加 30 天。不存在或已删除用户的管理查询及重置返回 404，个人查询始终只返回本人记录。
+
 原始用量列表与汇总共用 `api_key_id`、`group_id`、`model`、`request_type`、`stream`、`native_compaction_v2`、`billing_type`、`billing_mode` 及日期筛选。模型按客户端 `requested_model` 精确匹配，空值回落到计费模型；不使用上游映射名查询。管理员另可按 `user_id`、`account_id`、`request_id`、`upstream_model_mismatch` 查询。普通用户的身份范围固定，显式查询他人 Key 返回 403，已删除 Key 返回 404；不指定 Key 时仍可查看自己的历史消费。模型观测为 NULL 时不计入 mismatch=true 或 false。
 
 列表和详情的 `model` 返回客户端模型名，`request_type` 返回 sync/stream/ws_v2 等字符串；旧记录由 stream/openai_ws_mode 推导类型，显式类型优先决定两个兼容布尔字段。用户视图包含本人 IP、客户端端点、User-Agent、会话标识、缓存/长上下文标志和原生压缩标志；上游模型、账号成本及渠道信息仅在管理视图返回。查询不改写数据库中的计费模型、数字类型或消费记录。

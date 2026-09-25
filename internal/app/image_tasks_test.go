@@ -193,6 +193,11 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 				t.Fatal("private task data exposed")
 			}
 			if result.Status == want {
+				w := call("GET", "/v1/images/tasks/"+id, key, nil, "")
+				var alias imageTaskRecord
+				if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &alias) != nil || alias.ID != result.ID || alias.Status != result.Status {
+					t.Fatal("image task alias", w.Code, w.Body.String())
+				}
 				return result
 			}
 			time.Sleep(20 * time.Millisecond)
@@ -282,13 +287,22 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	part, _ = form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="mask"; filename="mask.png"`}, "Content-Type": {"image/png"}})
 	_, _ = part.Write([]byte("mask"))
 	_ = form.Close()
-	r := httptest.NewRequest("POST", "/images/edits/async", &edit)
-	r.Header.Set("Content-Type", form.FormDataContentType())
-	r.Header.Set("Authorization", "Bearer "+key)
-	r.RemoteAddr = "192.0.2.188:1234"
-	w := httptest.NewRecorder()
-	a.Handler().ServeHTTP(w, r)
-	poll(accepted(w), "completed")
+	var editID string
+	for _, prefix := range []string{"", "/v1"} {
+		r := httptest.NewRequest("POST", prefix+"/images/edits/async", bytes.NewReader(edit.Bytes()))
+		r.Header.Set("Content-Type", form.FormDataContentType())
+		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set("Idempotency-Key", "async-edit")
+		r.RemoteAddr = "192.0.2.188:1234"
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		id := accepted(w)
+		if editID != "" && (id != editID || w.Header().Get("Idempotency-Replayed") != "true") {
+			t.Fatal("async edit alias did not replay", w.Code, w.Body.String())
+		}
+		editID = id
+	}
+	poll(editID, "completed")
 	if upstreamCalls.Load() != 2 {
 		t.Fatal("edit was not generated exactly once")
 	}
@@ -396,7 +410,7 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 			t.Fatal(err)
 		}
 	}
-	w = call("POST", "/images/generations/async", key, body, "")
+	w := call("POST", "/images/generations/async", key, body, "")
 	_ = a.Redis.Del(ctx, imageTaskPending).Err()
 	if w.Code != 429 || upstreamCalls.Load() != count+1 {
 		t.Fatal("full image queue accepted a request", w.Code)

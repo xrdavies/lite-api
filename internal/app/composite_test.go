@@ -211,6 +211,15 @@ func testCompositeGateway(t *testing.T, a *App, admin string) {
 		value := route("alias-"+platform, platform, platform+"-internal", "any", "exact")
 		routeIDs[platform] = int64(must("POST", routes, admin, value)["id"].(float64))
 	}
+	var listed struct{ Data []compositeRoute }
+	if w := expect(200, "GET", routes, admin, nil); json.Unmarshal(w.Body.Bytes(), &listed) != nil || len(listed.Data) != len(platforms) {
+		t.Fatal("composite route list", w.Body.String())
+	}
+	for i, route := range listed.Data {
+		if route.ID != routeIDs[route.TargetPlatform] || route.GroupID != gid || route.PublicModel != "alias-"+route.TargetPlatform || i > 0 && route.ID <= listed.Data[i-1].ID {
+			t.Fatal("composite list scope or order", route)
+		}
+	}
 	expect(401, "GET", routes, "", nil)
 	expect(403, "GET", routes, user, nil)
 	expect(403, "POST", routes, user, route("forbidden", "openai", "", "any", "exact"))

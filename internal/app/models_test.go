@@ -271,9 +271,11 @@ func testModelDiscovery(t *testing.T, a *App, admin string) {
 			t.Fatal("model ETag or cache", w.Code, w.Body.String(), calls.Load())
 		}
 	}
-	detail := call("GET", "/models/client-alias?client_version=test", key, nil, map[string]string{"If-None-Match": first.Header().Get("ETag")})
-	if detail.Code != 200 || strings.Contains(detail.Body.String(), "slug") || !strings.Contains(detail.Body.String(), `"id":"client-alias"`) {
-		t.Fatal("model retrieve representation", detail.Code, detail.Body.String())
+	for _, prefix := range []string{"", "/v1"} {
+		detail := call("GET", prefix+"/models/client-alias?client_version=test", key, nil, map[string]string{"If-None-Match": first.Header().Get("ETag")})
+		if detail.Code != 200 || strings.Contains(detail.Body.String(), "slug") || !strings.Contains(detail.Body.String(), `"id":"client-alias"`) {
+			t.Fatal("model retrieve representation", detail.Code, detail.Body.String())
+		}
 	}
 	if w := call("GET", "/models/upstream-a", key, nil, nil); w.Code != 404 {
 		t.Fatal("model retrieval bypassed allowlist", w.Code)

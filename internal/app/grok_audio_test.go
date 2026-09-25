@@ -232,6 +232,10 @@ func testGrokAudio(t *testing.T, a *App, admin string) {
 		t.Fatal("transcription", transcript.Code, transcript.Body.String())
 	}
 	checkCost(transcript, "0.5000000000")
+	beforeReplay := calls.Load()
+	if w := call("POST", "/v1/stt", key, f.FormDataContentType(), "audio-stt", form.Bytes()); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "true" || !bytes.Equal(w.Body.Bytes(), transcript.Body.Bytes()) || calls.Load() != beforeReplay {
+		t.Fatal("transcription alias repeated upstream call", w.Code, w.Body.String())
+	}
 	beforePolicy := calls.Load()
 	must("PUT", gp, admin, map[string]any{"model_allowlist": map[string]any{"enabled": true, "models": []string{"tts"}}})
 	if w := call("POST", "/stt", key, f.FormDataContentType(), "", form.Bytes()); w.Code != 403 || calls.Load() != beforePolicy {
