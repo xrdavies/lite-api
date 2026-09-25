@@ -8,7 +8,12 @@ require (
 	golang.org/x/crypto v0.45.0
 )
 
-require github.com/coder/websocket v1.8.15
+require (
+	github.com/coder/websocket v1.8.15
+	github.com/tiktoken-go/tokenizer v0.7.0
+)
+
+require github.com/dlclark/regexp2 v1.11.5 // indirect
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

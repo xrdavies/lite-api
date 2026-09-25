@@ -253,7 +253,7 @@ func compositeModelTargets(c *compositeConfig, gid int64, model, platform, proto
 		endpoints = append(endpoints, "responses")
 	}
 	if (protocol == "chat_completions" || protocol == "responses") && messagesChatPlatform(platform) {
-		endpoints = append(endpoints, "messages")
+		endpoints = append(endpoints, "messages", "count_tokens")
 	}
 	if protocol == "anthropic" {
 		endpoints = []string{"messages", "count_tokens"}

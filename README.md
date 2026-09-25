@@ -223,7 +223,11 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 
 三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。OpenAI 类型账号的 `/input_tokens` 独立于其文本协议，使用配置地址和 Bearer Key 调用上游同名端点。协议转换产生的本地 response ID 不能作为原生计数的 previous_response_id，需重发完整 input。原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。未知子路径拒绝转发。
 
-`POST /v1/messages/count_tokens` 和 `/messages/count_tokens` 可通过 OpenAI 类型的 Chat/Responses 账号调用 [Responses 输入计数接口](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)。沿用 Messages 分组开关、原始模型白名单、账号准入和模型映射；系统提示、消息、工具及工具选择转换为输入，生成控制参数不发往计数端点，返回 `{"input_tokens":整数}`。不调用生成端点、不创建消费记录或扣减余额/Key 额度，不受 Fast 和利润策略限制；仍执行鉴权、余额/限额、RPM及并发准入。已完成幂等请求直接重放；上游 404 返回不支持计数，负数或缺失计数返回 502。原生 Anthropic 和 Gemini 计数分支继续使用各自协议；其他平台的本地计数尚待实现，不能据此推定可用。
+`POST /v1/messages/count_tokens` 和 `/messages/count_tokens` 可通过 OpenAI 类型的 Chat/Responses 账号调用 [Responses 输入计数接口](https://developers.openai.com/api/reference/resources/responses/subresources/input_tokens/methods/count)。沿用 Messages 分组开关、原始模型白名单、账号准入和模型映射；系统提示、消息、工具及工具选择转换为输入，生成控制参数不发往计数端点，返回 `{"input_tokens":整数}`。不调用生成端点、不创建消费记录或扣减余额/Key 额度，不受 Fast 和利润策略限制；仍执行鉴权、余额/限额、RPM及并发准入。已完成幂等请求直接重放；上游 404 返回不支持计数，负数或缺失计数返回 502。原生 Anthropic 和 Gemini 计数分支继续使用各自协议；Grok 和国内平台使用下述本地估算。
+
+Messages 计数对 Grok、Kimi、Zhipu、DeepSeek、MiniMax 使用本地分词估算，支持两个路径别名及复合分组的 `count_tokens` 路由。Grok 只需有效用户/Key、分组访问和模型白名单，不选号或检查消费余额/额度；国内四个平台仍执行余额/Key/平台额度、账号健康/模型准入与并发检查，包含配置为 Anthropic 的账号。两类均执行 RPM，支持幂等重放，不发起上游请求、不改变账号健康或写入消费账务。Claude Code fallback 使用实际目标平台。
+
+估算复用 Messages 输入转换与内置 `o200k_base`/`cl100k_base` 词表，覆盖系统提示、文本、函数参数/结果和工具定义；不下载图片/PDF，媒体描述不代表真实视觉 token，不能用于账务。长字符串按 4 KiB UTF-8 边界分块，计数可能有边界误差。依赖固定为 `github.com/tiktoken-go/tokenizer v0.7.0`，兼容现有 Go 版本，运行时无需词表下载。已用独立 Docker PostgreSQL/Redis 和本地模拟验证。
 
 三个前缀下的 `GET /responses/{id}` 也支持查询已成功结算、保存了归属的普通原生 HTTP/SSE/WS 响应；`GET /responses/{id}/input_items` 读取输入条目，接受 `after`、`limit=1..100`、`order=asc|desc`。两者支持官方 `include` 或 `include[]` 选项，两种参数形式不可混用，未知/重复标量参数拒绝。接口定义见 [查询响应](https://developers.openai.com/api/reference/resources/responses/methods/retrieve) 和 [输入条目列表](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list)。
 
@@ -339,7 +343,7 @@ OpenAI 分组的 `messages_dispatch_model_config` 接受 `opus_mapped_model`、`
 
 Messages 调度模型用于账号能力筛选和优先账号池。实际转发先应用渠道映射，命中的账号映射（包括原样透传）优先；未命中时采用分组调度模型，不对其再次做账号映射。白名单始终检查客户端原始模型，日志及 requested 计价仍保留原名，channel_mapped/upstream 计价分别使用实际对应阶段的名称；普通 Chat/Responses 不使用此配置。用户分组视图仅返回开关，不公开内部映射。
 
-Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；OpenAI 类型的 `count_tokens` 使用上文的输入计数桥接，其他兼容平台仍待各自计数实现。
+Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账号，支持 JSON/SSE、系统指令、文本/图片/PDF、函数工具、并行工具结果、结构化输出及停止序列。转换固定 `store=false`，每轮由客户端携带历史；思考明文随工具调用回传，厂商签名和隐藏思考不传给 Chat，缓存标记不伪装为 Chat 缓存控制。复合分组的 `messages` 路由和模型目录使用同一准入规则；OpenAI 类型的 `count_tokens` 使用上文的输入计数桥接，Grok/Kimi/Zhipu/DeepSeek/MiniMax 使用本地估算。
 
 该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。
 

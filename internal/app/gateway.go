@@ -400,7 +400,7 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if (protocol == "chat_completions" || protocol == "anthropic") && u.protocol() == "gemini" {
 			matches = true
 		}
-		if protocol == "anthropic" && (!in.CountOnly || u.Platform == "openai") && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
+		if protocol == "anthropic" && (u.protocol() == "chat_completions" || u.protocol() == "responses") && messagesChatPlatform(u.Platform) {
 			matches = true
 		}
 		if protocol == "responses" && in.CountOnly && u.Platform == "openai" {
@@ -792,6 +792,17 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			finish()
 		}
 	}()
+	if n, local, err := a.grokTokenCount(r, g, in, request); local {
+		if err != nil {
+			fail(err)
+			return
+		}
+		if writer != nil {
+			writer.succeeded = true
+		}
+		_ = rawReply(w, map[string]int{"input_tokens": n})
+		return
+	}
 	g, err = a.gatewayAuth(r, true)
 	if err != nil {
 		fail(err)
@@ -1075,6 +1086,26 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				fail(denied())
 				return
 			}
+		}
+		if in.CountOnly && protocol == "anthropic" && cnPaygPlatform(selected.Account.Platform) {
+			raw, countErr := messagesCountRequest(request, reasoningInput)
+			var n int
+			if countErr == nil {
+				n, countErr = estimateInputTokens(raw)
+			}
+			if countErr == nil {
+				countErr = a.gatewayRPM(ctx, g)
+			}
+			selected.Release()
+			if countErr != nil {
+				fail(countErr)
+				return
+			}
+			if writer != nil {
+				writer.succeeded = true
+			}
+			_ = rawReply(w, map[string]int{"input_tokens": n})
+			return
 		}
 		if selected.Search != "" {
 			if _, err = g.Group.searchCost(selected.Search); err != nil {

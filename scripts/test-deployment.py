@@ -356,6 +356,25 @@ with tempfile.TemporaryDirectory(prefix=project) as temp:
         assert Decimal(cost) == Decimal("0.016") + Decimal("0.072")
         assert Decimal(sql(f"SELECT balance FROM users WHERE id={uid}")) == 11 - expected - Decimal(cost)
         print("Programmatic task: SIGKILL recovery, original price, one settlement, replay and scoped continuation verified", flush=True)
+        # Exercise compiled-in token vocabularies in the scratch image. Both
+        # local count paths must leave the provider, wallet and ledger untouched.
+        before_counts = dict(calls)
+        ledger = sql(f"SELECT balance,(SELECT count(*) FROM usage_logs) FROM users WHERE id={uid}")
+        for platform in ("grok", "deepseek"):
+            cg = api("POST", "/api/v1/admin/groups", admin, {"name": "Count " + platform, "platform": platform})["id"]
+            if platform == "deepseek":
+                api("POST", "/api/v1/admin/accounts", admin, {"name": "Count supplier", "platform": platform,
+                    "type": "apikey", "group_ids": [cg], "credentials": {"api_key": provider_key, "base_url": upstream}})
+            ck = api("POST", "/api/v1/keys", token, {"name": "Count " + platform, "group_id": cg})["key"]
+            secrets_seen.append(ck)
+            count_body = {"model": "local-count", "messages": [{"role": "user", "content": "Hello 世界"}]}
+            status, first_count, _ = request(base, "POST", "/v1/messages/count_tokens", ck, count_body, "release-count")
+            assert status == 200 and json.loads(first_count)["input_tokens"] > 0
+            status, repeated, headers = request(base, "POST", "/messages/count_tokens", ck, count_body, "release-count")
+            assert status == 200 and repeated == first_count and headers.get("Idempotency-Replayed") == "true"
+        assert calls == before_counts, "local counting contacted the provider"
+        assert sql(f"SELECT balance,(SELECT count(*) FROM usage_logs) FROM users WHERE id={uid}") == ledger
+        print("Compiled token vocabularies: Grok without account and DeepSeek local counts, replay and zero billing verified", flush=True)
         logs = dc("logs", "--no-color", "app").stdout
         assert not any(secret in logs for secret in secrets_seen), "secret in application logs"
         print("PASS: isolated release, crash recovery, rollback and upgrade; no paid upstream calls", flush=True)
