@@ -113,37 +113,8 @@ func parseTextRequest(r *http.Request, protocol string, body map[string]json.Raw
 			in.ImageSize, in.ImageSizeSource = size, "input"
 		}
 		if in.Action == "edits" {
-			var images []json.RawMessage
-			if raw := body["images"]; raw != nil {
-				if json.Unmarshal(raw, &images) != nil || len(images) == 0 || len(images) > 10 {
-					return in, bad("image edits require between 1 and 10 images")
-				}
-			} else if raw := body["image"]; raw != nil {
-				// xAI's image endpoint uses one image object instead of the
-				// OpenAI-compatible images array. Keep the original object on
-				// the wire; this branch only validates the shared request shape.
-				images = []json.RawMessage{raw}
-			} else {
-				return in, bad("image edits require an image source")
-			}
-			for _, raw := range images {
-				var image struct {
-					URL      string `json:"url"`
-					ImageURL struct {
-						URL string `json:"url"`
-					} `json:"image_url"`
-					FileID string `json:"file_id"`
-				}
-				if json.Unmarshal(raw, &image) != nil || image.FileID != "" {
-					return in, bad("image edits require image URLs or data URLs")
-				}
-				imageURL := image.URL
-				if imageURL == "" {
-					imageURL = image.ImageURL.URL
-				}
-				if !validImageSource(imageURL) {
-					return in, bad("invalid image edit source")
-				}
+			if err := normalizeImageEdit(body); err != nil {
+				return in, err
 			}
 		}
 		return in, nil
@@ -377,6 +348,94 @@ func validImageSource(raw string) bool {
 	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Hostname() != ""
 }
 
+// Accept native image references and the URL forms used by compatible clients.
+// File IDs require a provider resource grant; this endpoint only accepts URLs.
+func imageEditURL(raw json.RawMessage) (string, error) {
+	var uri string
+	if json.Unmarshal(raw, &uri) != nil {
+		var image map[string]json.RawMessage
+		if json.Unmarshal(raw, &image) != nil || image == nil {
+			return "", bad("invalid image edit source")
+		}
+		for key := range image {
+			if key != "url" && key != "image_url" && key != "type" {
+				return "", bad("image edits require image URLs or data URLs")
+			}
+		}
+		if kind := image["type"]; kind != nil && credentialString(image, "type") != "image_url" {
+			return "", bad("invalid image edit source type")
+		}
+		source := image["url"]
+		if value := image["image_url"]; value != nil {
+			if source != nil {
+				return "", bad("use one image source")
+			}
+			source = value
+			if json.Unmarshal(source, &uri) != nil {
+				var nested map[string]json.RawMessage
+				if json.Unmarshal(source, &nested) != nil || len(nested) != 1 {
+					return "", bad("invalid image edit source")
+				}
+				source = nested["url"]
+			}
+		}
+		if json.Unmarshal(source, &uri) != nil {
+			return "", bad("invalid image edit source")
+		}
+	}
+	if !validImageSource(uri) {
+		return "", bad("invalid image edit source")
+	}
+	return uri, nil
+}
+
+// Canonicalize before hashing, queueing and dispatch so each path agrees on the
+// images and mask. Never turn a mask into another source image or drop it.
+func normalizeImageEdit(body map[string]json.RawMessage) error {
+	var sources []json.RawMessage
+	found := false
+	for _, key := range []string{"images", "image", "image_url", "reference_images"} {
+		raw := body[key]
+		if raw == nil || string(raw) == "null" {
+			continue
+		}
+		if found {
+			return bad("use one image input field")
+		}
+		found = true
+		if key == "images" || key == "reference_images" {
+			if json.Unmarshal(raw, &sources) != nil {
+				return bad("invalid image edit sources")
+			}
+		} else {
+			sources = []json.RawMessage{raw}
+		}
+	}
+	if len(sources) == 0 || len(sources) > 16 {
+		return bad("image edits require between 1 and 16 images")
+	}
+	images := make([]map[string]string, 0, len(sources))
+	for _, raw := range sources {
+		uri, err := imageEditURL(raw)
+		if err != nil {
+			return err
+		}
+		images = append(images, map[string]string{"image_url": uri})
+	}
+	if raw := body["mask"]; raw != nil && string(raw) != "null" {
+		uri, err := imageEditURL(raw)
+		if err != nil {
+			return err
+		}
+		body["mask"], _ = json.Marshal(map[string]string{"image_url": uri})
+	}
+	delete(body, "image")
+	delete(body, "image_url")
+	delete(body, "reference_images")
+	body["images"], _ = json.Marshal(images)
+	return nil
+}
+
 // parseImageMultipart converts the OpenAI edit form into the same JSON shape as
 // the JSON endpoint. The upstream only receives normalized data URLs.
 func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMessage, error) {
@@ -401,12 +460,23 @@ func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMe
 			return nil, bad("image edit file is too large")
 		}
 		name := part.FormName()
-		if part.FileName() != "" && (name == "image" || strings.HasPrefix(name, "image[")) {
+		if part.FileName() != "" && (name == "image" || strings.HasPrefix(name, "image[") || name == "mask") {
 			content := part.Header.Get("Content-Type")
 			if !strings.HasPrefix(content, "image/") {
 				return nil, bad("image edit file must be an image")
 			}
-			images = append(images, map[string]any{"url": "data:" + content + ";base64," + base64.StdEncoding.EncodeToString(data)})
+			if len(data) == 0 {
+				return nil, bad("image edit file is empty")
+			}
+			uri := "data:" + content + ";base64," + base64.StdEncoding.EncodeToString(data)
+			if name == "mask" {
+				if out["mask"] != nil {
+					return nil, bad("use one image mask")
+				}
+				out["mask"], _ = json.Marshal(map[string]string{"image_url": uri})
+			} else {
+				images = append(images, map[string]any{"image_url": uri})
+			}
 			continue
 		}
 		value := strings.TrimSpace(string(data))
@@ -418,9 +488,17 @@ func parseImageMultipart(body []byte, contentType string) (map[string]json.RawMe
 				return nil, bad("invalid image edit " + name)
 			}
 			out[name] = json.RawMessage(value)
-		case "image":
-			if value != "" && validImageSource(value) {
-				images = append(images, map[string]any{"url": value})
+		case "image", "image[]", "image_url", "mask", "mask_image_url":
+			if !validImageSource(value) {
+				return nil, bad("invalid image edit source")
+			}
+			if name == "mask" || name == "mask_image_url" {
+				if out["mask"] != nil {
+					return nil, bad("use one image mask")
+				}
+				out["mask"], _ = json.Marshal(map[string]string{"image_url": value})
+			} else {
+				images = append(images, map[string]any{"image_url": value})
 			}
 		}
 	}
@@ -483,37 +561,31 @@ func imagesToGrok(body map[string]json.RawMessage) (map[string]json.RawMessage, 
 		body["aspect_ratio"], _ = json.Marshal(aspect)
 	}
 	delete(body, "size")
-	if body["images"] == nil {
+	if body["images"] == nil && body["image"] == nil && body["image_url"] == nil && body["reference_images"] == nil {
 		return body, nil
 	}
-	var sources []json.RawMessage
-	if json.Unmarshal(body["images"], &sources) != nil || len(sources) == 0 || len(sources) > 10 {
-		return nil, bad("invalid image edit sources")
+	if err := normalizeImageEdit(body); err != nil {
+		return nil, err
 	}
-	objects := make([]map[string]any, 0, len(sources))
-	for _, raw := range sources {
-		var image struct {
-			URL      string `json:"url"`
-			ImageURL struct {
-				URL string `json:"url"`
-			} `json:"image_url"`
-		}
-		if json.Unmarshal(raw, &image) != nil {
-			return nil, bad("invalid image edit source")
-		}
-		if image.URL == "" {
-			image.URL = image.ImageURL.URL
-		}
-		if !validImageSource(image.URL) {
-			return nil, bad("invalid image edit source")
-		}
-		objects = append(objects, map[string]any{"url": image.URL, "type": "image_url"})
+	var sources []map[string]string
+	_ = json.Unmarshal(body["images"], &sources)
+	if len(sources) > 5 {
+		return nil, bad("Grok image edits support at most 5 images")
+	}
+	for _, image := range sources {
+		image["url"], image["type"] = image["image_url"], "image_url"
+		delete(image, "image_url")
 	}
 	delete(body, "images")
-	if len(objects) == 1 {
-		body["image"], _ = json.Marshal(objects[0])
+	if len(sources) == 1 {
+		body["image"], _ = json.Marshal(sources[0])
 	} else {
-		body["images"], _ = json.Marshal(objects)
+		body["images"], _ = json.Marshal(sources)
+	}
+	if raw := body["mask"]; raw != nil && string(raw) != "null" {
+		var mask map[string]string
+		_ = json.Unmarshal(raw, &mask)
+		body["mask"], _ = json.Marshal(map[string]string{"url": mask["image_url"], "type": "image_url"})
 	}
 	return body, nil
 }

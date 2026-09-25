@@ -135,6 +135,15 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 		if credentialString(body, "model") != "async-upstream-model" || r.URL.Path != "/v1/images/generations" && r.URL.Path != "/v1/images/edits" {
 			t.Error("image dispatch", r.URL.Path)
 		}
+		if r.URL.Path == "/v1/images/edits" {
+			var mask map[string]string
+			var images []map[string]string
+			_ = json.Unmarshal(body["mask"], &mask)
+			_ = json.Unmarshal(body["images"], &images)
+			if len(images) != 1 || images[0]["image_url"] != "data:image/png;base64,c291cmNl" || mask["image_url"] != "data:image/png;base64,bWFzaw==" {
+				t.Error("async edit references or mask lost", body)
+			}
+		}
 		if credentialString(body, "prompt") == "upstream failure" {
 			w.WriteHeader(400)
 			return
@@ -269,6 +278,8 @@ func testImageTasks(t *testing.T, a *App, admin string) {
 	_ = form.WriteField("prompt", "replace the sky")
 	part, _ := form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="image"; filename="source.png"`}, "Content-Type": {"image/png"}})
 	_, _ = part.Write([]byte("source"))
+	part, _ = form.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="mask"; filename="mask.png"`}, "Content-Type": {"image/png"}})
+	_, _ = part.Write([]byte("mask"))
 	_ = form.Close()
 	r := httptest.NewRequest("POST", "/images/edits/async", &edit)
 	r.Header.Set("Content-Type", form.FormDataContentType())

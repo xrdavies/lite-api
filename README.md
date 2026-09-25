@@ -413,6 +413,10 @@ Key 列表费用查询保留 `POST /api/v1/usage/dashboard/api-keys-usage`（`ap
 
 Grok 图片请求把 `size` 转成 `resolution`（1k/2k）和宽高比，显式 `resolution`、`aspect_ratio` 优先，随后移除 `size`；任意像素尺寸沿用最接近的已有宽高比，4K 输入转换到 2k，账务仍保留原请求/输出尺寸含义。生成、编辑、复合路由和限流换号共用转换，每次尝试均从原始客户端请求开始。参数依据 [xAI 图片生成](https://docs.x.ai/developers/model-capabilities/images/generation)；其当前原厂文档未声明图片 SSE，Grok 类型中转返回 OpenAI 格式 SSE 时可透传并计费，不能据此推定所有 Grok 上游支持流式。验证使用本地协议模拟和隔离数据库，真实图片上游联调仍待完成。
 
+图片编辑接受原生字符串 `images[].image_url`，也兼容 `url`、`image_url.url`、单个 `image`/`image_url` 和 `reference_images` 输入，多个输入字段同时出现时拒绝。OpenAI 上游统一收到 `images[].image_url`；Grok 上游收到单个 `image` 或多个 `images` 的 `{url,type:"image_url"}`。源图片数量上限为 OpenAI 16 张、Grok 5 张，输出数量仍由 `n` 控制。定义见 [OpenAI 编辑](https://developers.openai.com/api/reference/resources/images/methods/edit)和 [xAI 多图编辑](https://docs.x.ai/developers/model-capabilities/images/multi-image-editing)。
+
+JSON `mask` 和 multipart 的单个 `mask` 文件/URL 保持独立蒙版；OpenAI 转为 `mask.image_url`，Grok 兼容请求转为 `{url,type:"image_url"}`，不并入源图片或静默丢弃，具体上游仍须支持蒙版。重复蒙版、非法来源和直接编辑中的 `file_id` 拒绝；此接口继续使用 URL/data URL，网关不下载输入 URL。multipart 单个文件上限 8 MiB、请求总上限 32 MiB。同步、流式和异步编辑共用归一化，幂等比较包括蒙版，修改蒙版后复用同一幂等键返回 409。
+
 ## 异步图片任务
 
 `POST /v1/images/generations/async` 和 `/v1/images/edits/async` 接受与同步图片相同的 JSON 或编辑 multipart 请求，返回 202、任务 ID 和 `poll_url`；通过 `GET /v1/images/tasks/{task_id}` 查询。三个入口均有去掉 `/v1` 的别名。当前使用允许图片的 OpenAI 分组或路由到 OpenAI 的 composite 分组，沿用模型、账号、价格、限额和计费规则。流式图片请求拒绝；`Idempotency-Key` 在同一 Key、相同操作及别名之间重放原任务，不同请求体冲突返回 409。

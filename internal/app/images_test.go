@@ -104,6 +104,81 @@ func TestImageEditRequestParsing(t *testing.T) {
 	}
 }
 
+func TestImageEditReferencesAndMask(t *testing.T) {
+	for _, raw := range []string{
+		`"https://example.test/image.png"`,
+		`{"image_url":"data:image/png;base64,AA=="}`,
+		`{"image_url":{"url":"https://example.test/image.png"}}`,
+		`{"url":"https://example.test/image.png","type":"image_url"}`,
+	} {
+		for _, field := range []string{"images", "image", "image_url", "reference_images"} {
+			value := raw
+			if field == "images" || field == "reference_images" {
+				value = "[" + raw + "]"
+			}
+			body := map[string]json.RawMessage{"model": json.RawMessage(`"edit"`), "prompt": json.RawMessage(`"edit"`), field: json.RawMessage(value), "mask": json.RawMessage(`{"image_url":"https://example.test/mask.png"}`)}
+			if _, err := parseTextRequest(httptest.NewRequest("POST", "/images/edits", nil), "images", body); err != nil {
+				t.Fatal(field, raw, err)
+			}
+			var refs []map[string]string
+			var mask map[string]string
+			_ = json.Unmarshal(body["images"], &refs)
+			_ = json.Unmarshal(body["mask"], &mask)
+			if len(refs) != 1 || refs[0]["image_url"] == "" || mask["image_url"] != "https://example.test/mask.png" || body["image"] != nil || body["reference_images"] != nil {
+				t.Fatal("native edit shape", body)
+			}
+			out, err := imagesToGrok(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = json.Unmarshal(out["mask"], &mask)
+			if mask["type"] != "image_url" || mask["url"] != "https://example.test/mask.png" {
+				t.Fatal("Grok mask lost", out)
+			}
+		}
+	}
+	for _, fields := range []string{
+		`"images":[{"image_url":"https://example.test/a","file_id":"file_private"}]`,
+		`"images":[{"image_url":"https://example.test/a","url":"https://example.test/b"}]`,
+		`"images":[{"image_url":{"url":"https://example.test/a","file_id":"file_private"}}]`,
+		`"images":[{"type":"file_id","url":"https://example.test/a"}]`,
+		`"image":"https://example.test/a","images":[{"image_url":"https://example.test/b"}]`,
+		`"image":"https://example.test/a","mask":{"file_id":"file_private"}`,
+		`"image":"https://example.test/a","mask":{"image_url":"file:///private"}`,
+		`"image":"https://example.test/a","mask":{}`,
+	} {
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"model":"edit","prompt":"edit",`+fields+`}`), &body)
+		if _, err := parseTextRequest(httptest.NewRequest("POST", "/images/edits", nil), "images", body); err == nil {
+			t.Fatal("invalid edit source accepted", fields)
+		}
+	}
+	for _, masks := range [][]string{{"https://example.test/mask.png"}, {"file:///private"}, {"https://example.test/a", "https://example.test/b"}} {
+		var raw bytes.Buffer
+		form := multipart.NewWriter(&raw)
+		_ = form.WriteField("image", "https://example.test/image.png")
+		for _, mask := range masks {
+			_ = form.WriteField("mask", mask)
+		}
+		_ = form.Close()
+		body, err := parseImageMultipart(raw.Bytes(), form.FormDataContentType())
+		valid := len(masks) == 1 && masks[0] == "https://example.test/mask.png"
+		if (err == nil) != valid || valid && !bytes.Contains(body["mask"], []byte(masks[0])) {
+			t.Fatal("multipart mask validation", masks, body, err)
+		}
+	}
+
+	for _, n := range []int{5, 6, 16, 17} {
+		body := map[string]json.RawMessage{"images": json.RawMessage("[" + strings.TrimSuffix(strings.Repeat(`{"image_url":"https://example.test/a"},`, n), ",") + "]")}
+		if err := normalizeImageEdit(body); (err != nil) != (n > 16) {
+			t.Fatal("source count", n, err)
+		}
+		if _, err := imagesToGrok(body); (err != nil) != (n > 5) {
+			t.Fatal("Grok source count", n, err)
+		}
+	}
+}
+
 func TestImagesToGrok(t *testing.T) {
 	body := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(`{"model":"m","prompt":"edit","images":[{"url":"https://example.test/a.png"}]}`), &body); err != nil {
@@ -214,6 +289,13 @@ func testGrokImages(t *testing.T, a *App, admin string) {
 		if credentialString(body, "model") != "grok-imagine-image-2.0" || credentialString(body, "prompt") == "" {
 			t.Errorf("grok image request: %s", mustJSON(body))
 		}
+		if r.URL.Path == "/v1/images/edits" {
+			var mask map[string]string
+			_ = json.Unmarshal(body["mask"], &mask)
+			if mask["url"] != "https://example.test/mask.png" || mask["type"] != "image_url" {
+				t.Error("Grok mask missing", body)
+			}
+		}
 		if body["image"] != nil {
 			var image map[string]any
 			_ = json.Unmarshal(body["image"], &image)
@@ -235,7 +317,7 @@ func testGrokImages(t *testing.T, a *App, admin string) {
 	if gen.Code != http.StatusOK || requests.Load() != 1 {
 		t.Fatalf("grok image generation: %d %s calls=%d", gen.Code, gen.Body.String(), requests.Load())
 	}
-	edit := call("/v1/images/edits", key, map[string]any{"model": "client-grok-image", "prompt": "make it blue", "images": []any{map[string]any{"url": "https://example.test/source.png"}}})
+	edit := call("/v1/images/edits", key, map[string]any{"model": "client-grok-image", "prompt": "make it blue", "images": []any{map[string]any{"image_url": "https://example.test/source.png"}}, "mask": map[string]string{"image_url": "https://example.test/mask.png"}})
 	if edit.Code != http.StatusOK || requests.Load() != 2 {
 		t.Fatalf("grok image edit: %d %s calls=%d", edit.Code, edit.Body.String(), requests.Load())
 	}
@@ -299,6 +381,19 @@ func testImages(t *testing.T, a *App, admin string) {
 		if json.Unmarshal(raw, &body) != nil || decodeErr != nil || body.Model != "upstream-image" || (r.URL.Path == "/v1/images/generations" && (body.Prompt != "draw a small lighthouse" || body.N != 2)) || (r.URL.Path == "/v1/images/edits" && body.Prompt != "replace the sky") {
 			t.Errorf("image request changed: %+v raw=%s err=%v", body, raw, decodeErr)
 		}
+		if r.URL.Path == "/v1/images/edits" {
+			var edit struct {
+				Images []struct {
+					ImageURL string `json:"image_url"`
+				}
+				Mask struct {
+					ImageURL string `json:"image_url"`
+				}
+			}
+			if json.Unmarshal(raw, &edit) != nil || len(edit.Images) != 1 || edit.Images[0].ImageURL == "" || edit.Mask.ImageURL != "https://example.test/mask.png" && edit.Mask.ImageURL != "data:image/png;base64,bWFzay1ieXRlcw==" {
+				t.Error("OpenAI edit references or mask lost", string(raw))
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"created":1710000000,"data":[{"b64_json":"one"},{"b64_json":"two"}]}`)
 	}))
@@ -332,10 +427,20 @@ func testImages(t *testing.T, a *App, admin string) {
 	if err := a.DB.QueryRow("SELECT count(*) FROM usage_logs WHERE model='client-image'").Scan(&logged); err != nil || logged != 1 {
 		t.Fatal("image duplicate billing", logged, err)
 	}
-	editBody := map[string]any{"model": "client-image", "prompt": "replace the sky", "images": []any{map[string]any{"url": "https://example.test/source.png"}}}
+	editBody := map[string]any{"model": "client-image", "prompt": "replace the sky", "images": []any{map[string]any{"image_url": "https://example.test/source.png"}}, "mask": map[string]string{"image_url": "https://example.test/mask.png"}}
 	edit := call("/v1/images/edits", key, editBody, "image-edit")
 	if edit.Code != http.StatusOK || !strings.Contains(edit.Body.String(), `"b64_json":"one"`) || calls.Load() != 2 {
 		t.Fatalf("json image edit failed: %d %s calls=%d", edit.Code, edit.Body.String(), calls.Load())
+	}
+	// Alias shapes share the same canonical identity; changing only the mask conflicts.
+	editBody["image"] = map[string]string{"url": "https://example.test/source.png", "type": "image_url"}
+	delete(editBody, "images")
+	if w := call("/images/edits", key, editBody, "image-edit"); w.Code != 200 || w.Header().Get("Idempotency-Replayed") != "true" || calls.Load() != 2 {
+		t.Fatal("edit source alias replay", w.Code, w.Body.String())
+	}
+	editBody["mask"] = map[string]string{"image_url": "https://example.test/another-mask.png"}
+	if w := call("/images/edits", key, editBody, "image-edit"); w.Code != 409 || calls.Load() != 2 {
+		t.Fatal("changed mask reused completed edit", w.Code, w.Body.String())
 	}
 	var form bytes.Buffer
 	mw := multipart.NewWriter(&form)
@@ -346,6 +451,11 @@ func testImages(t *testing.T, a *App, admin string) {
 		t.Fatal(err)
 	}
 	_, _ = part.Write([]byte("source-bytes"))
+	part, err = mw.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="mask"; filename="mask.png"`}, "Content-Type": {"image/png"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("mask-bytes"))
 	if err := mw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -573,6 +683,17 @@ func testImageStreams(t *testing.T, a *App, admin string) {
 			if platform == "openai" && (credentialString(body, "size") != "2048x1152" || body["resolution"] != nil) {
 				t.Error("OpenAI geometry changed")
 			}
+			if credentialString(body, "prompt") == "edit a lighthouse" {
+				var mask map[string]string
+				_ = json.Unmarshal(body["mask"], &mask)
+				field := "image_url"
+				if platform == "grok" {
+					field = "url"
+				}
+				if mask[field] != "data:image/png;base64,bWFzaw==" {
+					t.Error("stream edit mask lost", body)
+				}
+			}
 			if mode.Load() == 8 && retryCalls.Add(1) == 1 {
 				w.WriteHeader(429)
 				return
@@ -704,6 +825,8 @@ func testImageStreams(t *testing.T, a *App, admin string) {
 		}
 		part, _ := mw.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="image"; filename="source.png"`}, "Content-Type": {"image/png"}})
 		_, _ = part.Write([]byte("source"))
+		part, _ = mw.CreatePart(textproto.MIMEHeader{"Content-Disposition": {`form-data; name="mask"; filename="mask.png"`}, "Content-Type": {"image/png"}})
+		_, _ = part.Write([]byte("mask"))
 		_ = mw.Close()
 		r := httptest.NewRequest("POST", "/images/edits", &form)
 		r.RemoteAddr = "192.0.2.191:1234"
