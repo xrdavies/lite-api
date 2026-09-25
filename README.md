@@ -434,6 +434,8 @@ Gemini 分组使用 `POST /v1beta/models/{model}:generateContent`、`:streamGene
 
 `/api/v1/admin/ops/ingress-rejections` 按分钟记录网关鉴权拒绝；IPv6 按 /64 归并，不记录尝试的 Key，每秒最多写 100 次。`/ingress-rejections/health` 报告进程内失败与丢弃计数；`/auth-cache-invalidation/health` 明确返回数据库直读模式及 outbox 积压数，不伪装存在缓存订阅者。`/api/v1/admin/groups/usage-summary` 提供精确累计/今日/昨日费用，`/capacity-summary` 提供健康账号的配置并发及当前占用。以上接口仅管理员可用，不启动历史聚合或监控模板任务。
 
+入口拒绝按缺失/无效 Key、Key 停用或到期、用户停用、分组未分配/删除/停用/未授权、IP 限制分别记录。仅精确匹配到现存 Key 后写入其用户和 Key ID；匿名或无效凭证不附带身份，客户端仍收到原有通用错误。列表支持 `reason`、`route_family`、`protocol`、`client_ip`、`user_id`、`api_key_id` 筛选，枚举和 ID 严格校验；按分钟桶时间及 ID 倒序，同一快照读取总数和分页结果。起止时间直接作用于桶时间，不向前扩展起点；匿名记录省略身份字段，IP 不带掩码后缀。记录失败不改变原鉴权结果，只增加健康接口中的失败计数。
+
 用量、扣费去重、用户余额、Key/账号计数和平台额度同事务写入。日志精度为 10 位，余额与 Key/账号扣款为 8 位；起始余额为正的已发生消费可使余额为负。Redis 保存不含提示词或凭证的待结算记录，后台重试和重启恢复不重复扣费；持久部署须保留 Redis AOF 和 PostgreSQL 数据。上游尚未返回 usage 时的进程崩溃仍需人工核查，不能承诺第三方调用恰好一次。
 
 可选 `Idempotency-Key` 在同一个客户端 Key 下识别重复请求；24 小时内完整 JSON/SSE 响应可重放，同键不同内容返回 409。进程中断遗留的 processing 记录即使过期也拒绝自动重发，需核查原请求；超过 16 MiB 的响应不缓存重放。客户端请求幂等和扣费去重分别记录。

@@ -446,14 +446,26 @@ func (a *App) ingressRejections(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	where := []string{"bucket_start >= $1", "bucket_start < $2"}
-	args := []any{start.Truncate(time.Minute), end}
+	args := []any{start, end}
 	for _, pair := range [][2]string{{"reason", "reject_reason"}, {"route_family", "route_family"}, {"protocol", "protocol"}, {"client_ip", "client_ip"}, {"user_id", "user_id"}, {"api_key_id", "api_key_id"}} {
-		value := r.URL.Query().Get(pair[0])
+		value := strings.TrimSpace(r.URL.Query().Get(pair[0]))
 		if value == "" {
 			continue
 		}
 		var v any = value
 		if len(value) > 64 {
+			return bad("invalid " + pair[0])
+		}
+		var allowed string
+		switch pair[0] {
+		case "reason":
+			allowed = " query_api_key_deprecated api_key_required invalid_api_key invalid_auth_rate_limited api_key_auth_overloaded api_key_disabled ip_restricted user_inactive group_deleted group_disabled group_not_allowed group_unassigned other "
+		case "route_family":
+			allowed = " gemini codex messages responses chat_completions images videos embeddings models other "
+		case "protocol":
+			allowed = " google anthropic openai gateway other "
+		}
+		if allowed != "" && (strings.ContainsAny(value, " \t\r\n") || !strings.Contains(allowed, " "+value+" ")) {
 			return bad("invalid " + pair[0])
 		}
 		if pair[0] == "client_ip" {
@@ -480,12 +492,19 @@ func (a *App) ingressRejections(w http.ResponseWriter, r *http.Request) error {
 	base := " FROM ops_ingress_reject_aggregates WHERE " + strings.Join(where, " AND ")
 	page, size := pagination(r)
 	size = min(size, 200)
+	tx, err := a.DB.BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var total int
-	if err := a.DB.QueryRowContext(r.Context(), "SELECT count(*)"+base, args...).Scan(&total); err != nil {
+	if err := tx.QueryRowContext(r.Context(), "SELECT count(*)"+base, args...).Scan(&total); err != nil {
 		return err
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := a.DB.QueryContext(r.Context(), fmt.Sprintf("SELECT to_jsonb(x) FROM(SELECT *%s ORDER BY bucket_start DESC,id DESC LIMIT $%d OFFSET $%d)x", base, len(args)-1, len(args)), args...)
+	rows, err := tx.QueryContext(r.Context(), fmt.Sprintf(`SELECT jsonb_strip_nulls(to_jsonb(x)) FROM(SELECT id,bucket_start,reject_reason,route_family,protocol,
+ host(client_ip) AS client_ip,NULLIF(user_id,0) AS user_id,NULLIF(api_key_id,0) AS api_key_id,request_count,first_seen,last_seen%s
+ ORDER BY bucket_start DESC,id DESC LIMIT $%d OFFSET $%d)x`, base, len(args)-1, len(args)), args...)
 	if err != nil {
 		return err
 	}
@@ -516,7 +535,7 @@ func (a *App) authCacheHealth(w http.ResponseWriter, r *http.Request) error {
 
 // Log authentication denials in bounded per-minute dimensions, never credentials.
 // ponytail: synchronous writes capped at 100/s; batch flush only if measured latency warrants it.
-func (a *App) recordIngressRejection(r *http.Request, cause error) {
+func (a *App) recordIngressRejection(r *http.Request, cause error, reason string, userID, keyID int64) {
 	var failure *apiError
 	if !errors.As(cause, &failure) || failure.status != 400 && failure.status != 401 && failure.status != 403 {
 		return
@@ -558,19 +577,11 @@ func (a *App) recordIngressRejection(r *http.Request, cause error) {
 	if strings.HasPrefix(r.URL.Path, "/backend-api/codex/") {
 		family = "codex"
 	}
-	reason := "other"
-	if failure.status == 401 {
-		reason = "invalid_api_key"
-		if bearer(r) == "" && r.Header.Get("X-Api-Key") == "" && r.Header.Get("X-Goog-Api-Key") == "" && r.URL.Query().Get("key") == "" {
-			reason = "api_key_required"
-		}
-	}
-	if failure.status == 400 && (r.URL.Query().Has("api_key") || r.URL.Query().Has("key")) {
-		reason = "query_api_key_deprecated"
-	}
-	_, err = a.DB.ExecContext(ctx, `INSERT INTO ops_ingress_reject_aggregates(bucket_start,reject_reason,route_family,protocol,client_ip,request_count,first_seen,last_seen)
- VALUES($1,$2,$3,$4,$5,1,$6,$6) ON CONFLICT ON CONSTRAINT ops_ingress_reject_aggregates_dimensions_unique
- DO UPDATE SET request_count=ops_ingress_reject_aggregates.request_count+1,last_seen=EXCLUDED.last_seen,updated_at=now()`, now.Truncate(time.Minute), reason, family, protocol, ip.String(), now)
+	_, err = a.DB.ExecContext(ctx, `INSERT INTO ops_ingress_reject_aggregates(bucket_start,reject_reason,route_family,protocol,client_ip,request_count,first_seen,last_seen,user_id,api_key_id)
+ VALUES($1,$2,$3,$4,$5,1,$6,$6,$7,$8) ON CONFLICT ON CONSTRAINT ops_ingress_reject_aggregates_dimensions_unique
+ DO UPDATE SET request_count=ops_ingress_reject_aggregates.request_count+1,
+ first_seen=LEAST(ops_ingress_reject_aggregates.first_seen,EXCLUDED.first_seen),
+ last_seen=GREATEST(ops_ingress_reject_aggregates.last_seen,EXCLUDED.last_seen),updated_at=now()`, now.Truncate(time.Minute), reason, family, protocol, ip.String(), now, userID, keyID)
 	if err != nil {
 		a.ingressFailures.Add(1)
 	}

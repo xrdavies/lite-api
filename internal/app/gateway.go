@@ -106,14 +106,17 @@ func ipMatches(addr netip.Addr, rules []string) bool {
 	return false
 }
 func (a *App) gatewayAuth(r *http.Request, spending bool) (identity *gatewayIdentity, authErr error) {
+	reason := "other"
+	var rejectedUser, rejectedKey int64
 	defer func() {
 		if authErr != nil {
-			a.recordIngressRejection(r, authErr)
+			a.recordIngressRejection(r, authErr, reason, rejectedUser, rejectedKey)
 		}
 	}()
 	token := bearer(r)
 	gemini := strings.HasPrefix(r.URL.Path, "/v1beta/")
 	if r.URL.Query().Get("api_key") != "" || !gemini && r.URL.Query().Get("key") != "" {
+		reason = "query_api_key_deprecated"
 		return nil, bad("use an API key header")
 	}
 	if token == "" {
@@ -129,51 +132,78 @@ func (a *App) gatewayAuth(r *http.Request, spending bool) (identity *gatewayIden
 		token = r.URL.Query().Get("key")
 	}
 	if token == "" || len(token) > 128 {
+		reason = "invalid_api_key"
+		if token == "" {
+			reason = "api_key_required"
+		}
 		return nil, unauthorized()
 	}
 	var key, group []byte
 	g := &gatewayIdentity{}
-	var userStatus, keyStatus string
+	var userStatus, keyStatus, groupStatus string
+	var groupDeleted bool
 	var expires *time.Time
 	var balanceOK, quotaOK, windowsOK bool
 	err := a.DB.QueryRowContext(r.Context(), `SELECT to_jsonb(k),to_jsonb(g)||jsonb_build_object('rate_multiplier',COALESCE(m.rate_multiplier,g.rate_multiplier),'rpm_limit',COALESCE(m.rpm_override,g.rpm_limit)),u.id,u.status,k.status,k.expires_at,u.concurrency,u.rpm_limit,u.balance>0,
  (k.quota=0 OR k.quota_used<k.quota),
  (k.rate_limit_5h=0 OR k.window_5h_start IS NULL OR k.window_5h_start+interval '5 hours'<=now() OR k.usage_5h<k.rate_limit_5h) AND
  (k.rate_limit_1d=0 OR k.window_1d_start IS NULL OR k.window_1d_start+interval '24 hours'<=now() OR k.usage_1d<k.rate_limit_1d) AND
- (k.rate_limit_7d=0 OR k.window_7d_start IS NULL OR k.window_7d_start+interval '168 hours'<=now() OR k.usage_7d<k.rate_limit_7d)
- FROM api_keys k JOIN users u ON u.id=k.user_id LEFT JOIN groups g ON g.id=k.group_id AND g.deleted_at IS NULL AND g.status='active' LEFT JOIN user_group_rate_multipliers m ON m.user_id=u.id AND m.group_id=g.id WHERE k.key=$1 AND k.deleted_at IS NULL AND u.deleted_at IS NULL`, token).Scan(&key, &group, &g.UserID, &userStatus, &keyStatus, &expires, &g.Concurrency, &g.RPM, &balanceOK, &quotaOK, &windowsOK)
+ (k.rate_limit_7d=0 OR k.window_7d_start IS NULL OR k.window_7d_start+interval '168 hours'<=now() OR k.usage_7d<k.rate_limit_7d),COALESCE(g.status,''),g.deleted_at IS NOT NULL
+ FROM api_keys k JOIN users u ON u.id=k.user_id LEFT JOIN groups g ON g.id=k.group_id LEFT JOIN user_group_rate_multipliers m ON m.user_id=u.id AND m.group_id=g.id WHERE k.key=$1 AND k.deleted_at IS NULL AND u.deleted_at IS NULL`, token).Scan(&key, &group, &g.UserID, &userStatus, &keyStatus, &expires, &g.Concurrency, &g.RPM, &balanceOK, &quotaOK, &windowsOK, &groupStatus, &groupDeleted)
 	if errors.Is(err, sql.ErrNoRows) {
+		reason = "invalid_api_key"
 		return nil, unauthorized()
 	}
 	if err != nil {
 		return nil, err
 	}
-	if userStatus != "active" || (keyStatus != "active" && keyStatus != "quota_exhausted") {
-		return nil, unauthorized()
-	}
-	if expires != nil && !time.Now().Before(*expires) {
-		return nil, unauthorized()
-	}
 	if err = json.Unmarshal(key, &g.Key); err != nil {
 		return nil, err
 	}
-	if len(group) == 0 || string(group) == "null" || g.Key.GroupID == 0 {
+	// Only an exact credential lookup may attach an identity to a rejection.
+	rejectedUser, rejectedKey = g.UserID, g.Key.ID
+	if userStatus != "active" {
+		reason = "user_inactive"
+		return nil, unauthorized()
+	}
+	if keyStatus != "active" && keyStatus != "quota_exhausted" {
+		reason = "api_key_disabled"
+		return nil, unauthorized()
+	}
+	if expires != nil && !time.Now().Before(*expires) {
+		reason = "api_key_disabled"
+		return nil, unauthorized()
+	}
+	if g.Key.GroupID == 0 {
+		reason = "group_unassigned"
+		return nil, denied()
+	}
+	if len(group) == 0 || string(group) == "null" || groupDeleted || groupStatus == "" {
+		reason = "group_deleted"
+		return nil, denied()
+	}
+	if groupStatus != "active" {
+		reason = "group_disabled"
 		return nil, denied()
 	}
 	if err = json.Unmarshal(group, &g.Group); err != nil {
 		return nil, err
 	}
 	if g.Group.ID == 0 {
+		reason = "group_deleted"
 		return nil, denied()
 	}
 	if err = a.groupAccess(r.Context(), a.DB, g.UserID, g.Key.GroupID); err != nil {
+		reason = "group_not_allowed"
 		return nil, err
 	}
 	addr, err := netip.ParseAddr(clientIP(r))
 	if err != nil {
+		reason = "ip_restricted"
 		return nil, denied()
 	}
 	if ipMatches(addr, g.Key.Blacklist) || len(g.Key.Whitelist) > 0 && !ipMatches(addr, g.Key.Whitelist) {
+		reason = "ip_restricted"
 		return nil, denied()
 	}
 	g.SourcePlatform = g.Group.Platform

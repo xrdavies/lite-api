@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,229 @@ import (
 	"testing"
 	"time"
 )
+
+func testIngressRejections(t *testing.T, a *App, admin, ordinary string) {
+	t.Helper()
+	defer pauseTestWorkers(a)()
+	const client = "2001:db8:244::"
+	const secret = "ingress-credential-canary"
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var uid, gid, kid int64
+	if err := a.DB.QueryRow("INSERT INTO users(email,password_hash,balance) SELECT 'ingress@example.test',password_hash,10 FROM users WHERE role='admin' LIMIT 1 RETURNING id").Scan(&uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DB.QueryRow("INSERT INTO groups(name,platform) VALUES('Ingress checks','openai') RETURNING id").Scan(&gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DB.QueryRow("INSERT INTO api_keys(user_id,group_id,name,key) VALUES($1,$2,'Ingress',$3) RETURNING id", uid, gid, secret).Scan(&kid); err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, token string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(`{"private":"request-body-canary"}`))
+		r.RemoteAddr = "[" + client + "1234]:1234"
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		a.Handler().ServeHTTP(w, r)
+		return w
+	}
+	// Each denial is produced by the shared authentication path, not a synthetic log.
+	for _, tc := range []struct {
+		name, change, reset, token, reason string
+		status                             int
+		known                              bool
+	}{
+		{"missing", "", "", "", "api_key_required", 401, false},
+		{"invalid", "", "", "not-a-valid-credential", "invalid_api_key", 401, false},
+		{"long", "", "", strings.Repeat("k", 129), "invalid_api_key", 401, false},
+		{"key-disabled", "UPDATE api_keys SET status='inactive' WHERE id=$1", "UPDATE api_keys SET status='active' WHERE id=$1", secret, "api_key_disabled", 401, true},
+		{"expired", "UPDATE api_keys SET expires_at=now()-interval '1 second' WHERE id=$1", "UPDATE api_keys SET expires_at=NULL WHERE id=$1", secret, "api_key_disabled", 401, true},
+		{"user-disabled", "UPDATE users SET status='disabled' WHERE id=$2", "UPDATE users SET status='active' WHERE id=$2", secret, "user_inactive", 401, true},
+		{"unassigned", "UPDATE api_keys SET group_id=NULL WHERE id=$1", "UPDATE api_keys SET group_id=$3 WHERE id=$1", secret, "group_unassigned", 403, true},
+		{"group-disabled", "UPDATE groups SET status='inactive' WHERE id=$3", "UPDATE groups SET status='active' WHERE id=$3", secret, "group_disabled", 403, true},
+		{"group-deleted", "UPDATE groups SET deleted_at=now() WHERE id=$3", "UPDATE groups SET deleted_at=NULL WHERE id=$3", secret, "group_deleted", 403, true},
+		{"private-group", "UPDATE groups SET is_exclusive=true WHERE id=$3", "UPDATE groups SET is_exclusive=false WHERE id=$3", secret, "group_not_allowed", 403, true},
+		{"ip-denied", `UPDATE api_keys SET ip_blacklist='["2001:db8:244::/64"]'::jsonb WHERE id=$1`, "UPDATE api_keys SET ip_blacklist='[]'::jsonb WHERE id=$1", secret, "ip_restricted", 403, true},
+		{"deleted-key", "UPDATE api_keys SET deleted_at=now() WHERE id=$1", "UPDATE api_keys SET deleted_at=NULL WHERE id=$1", secret, "invalid_api_key", 401, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Cast all three parameters even when only one is used in the mutation.
+			change := func(query string) {
+				if query != "" {
+					exec(query+" AND $1::bigint>0 AND $2::bigint>0 AND $3::bigint>0", kid, uid, gid)
+				}
+			}
+			change(tc.change)
+			defer change(tc.reset)
+			exec("DELETE FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client)
+			w := call("GET", "/v1/usage", tc.token)
+			if w.Code != tc.status || strings.Contains(w.Body.String(), tc.reason) || strings.Contains(w.Body.String(), secret) {
+				t.Fatalf("denial response changed: %d %s", w.Code, w.Body.String())
+			}
+			var reason string
+			var user, key, count int64
+			if err := a.DB.QueryRow("SELECT reject_reason,user_id,api_key_id,request_count FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client).Scan(&reason, &user, &key, &count); err != nil || reason != tc.reason || count != 1 {
+				t.Fatal("denial classification", reason, count, err)
+			}
+			if tc.known && (user != uid || key != kid) || !tc.known && (user != 0 || key != 0) {
+				t.Fatal("unverified identity or missing known identity", user, key)
+			}
+		})
+	}
+	// Concurrent denials of a known key aggregate once per request and cannot
+	// move either time boundary inward. No credential/body is stored.
+	exec("DELETE FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client)
+	exec("UPDATE api_keys SET status='inactive' WHERE id=$1", kid)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if w := call("GET", "/v1/usage", secret); w.Code != 401 {
+				t.Errorf("concurrent denial returned %d", w.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	var count int
+	var safe bool
+	if err := a.DB.QueryRow(`SELECT sum(request_count),bool_and(user_id=$2 AND api_key_id=$3 AND first_seen<=last_seen AND to_jsonb(x)::text NOT LIKE '%canary%')
+ FROM ops_ingress_reject_aggregates x WHERE client_ip=$1`, client, uid, kid).Scan(&count, &safe); err != nil || count != 8 || !safe {
+		t.Fatal("concurrent attribution or sensitive data persisted", count, safe, err)
+	}
+	exec("UPDATE ops_ingress_reject_aggregates SET first_seen=bucket_start-interval '1 hour',last_seen=bucket_start+interval '1 hour' WHERE client_ip=$1", client)
+	call("GET", "/v1/usage", secret)
+	if err := a.DB.QueryRow("SELECT bool_and(first_seen=bucket_start-interval '1 hour' AND last_seen=bucket_start+interval '1 hour') FROM ops_ingress_reject_aggregates WHERE client_ip=$1 AND request_count>1", client).Scan(&safe); err != nil || !safe {
+		t.Fatal("rejection time boundaries narrowed", err)
+	}
+	failures := a.ingressFailures.Load()
+	exec("ALTER TABLE ops_ingress_reject_aggregates ADD CONSTRAINT test_ingress_write_failure CHECK(client_ip<>'2001:db8:244::'::inet) NOT VALID")
+	defer a.DB.Exec("ALTER TABLE ops_ingress_reject_aggregates DROP CONSTRAINT IF EXISTS test_ingress_write_failure")
+	if w := call("GET", "/v1/usage", secret); w.Code != 401 || a.ingressFailures.Load() != failures+1 {
+		t.Fatal("recording failure changed denial or health", w.Code)
+	}
+	exec("ALTER TABLE ops_ingress_reject_aggregates DROP CONSTRAINT test_ingress_write_failure")
+	exec("UPDATE api_keys SET status='active' WHERE id=$1", kid)
+	call("GET", "/v1/usage", secret)
+	if err := a.DB.QueryRow("SELECT sum(request_count) FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client).Scan(&count); err != nil || count != 9 {
+		t.Fatal("successful authentication or failed recording added rejections", count, err)
+	}
+	// The query is an authenticated projection: normalized IP, optional known IDs,
+	// strict filters, stable ordering and an exact [start,end) bucket range.
+	exec("DELETE FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client)
+	for _, tc := range []struct{ method, path, family, protocol, reason string }{
+		{"POST", "/v1/messages", "messages", "anthropic", "invalid_api_key"},
+		{"GET", "/backend-api/codex/models", "codex", "openai", "invalid_api_key"},
+		{"GET", "/v1beta/models?key=query-credential-canary", "gemini", "google", "invalid_api_key"},
+		{"GET", "/models?api_key=query-credential-canary", "models", "openai", "query_api_key_deprecated"},
+	} {
+		w := call(tc.method, tc.path, "invalid-credential")
+		if w.Code != 401 && w.Code != 400 {
+			t.Fatal("protocol denial", tc.path, w.Code)
+		}
+		var count int
+		if err := a.DB.QueryRow("SELECT count(*) FROM ops_ingress_reject_aggregates WHERE client_ip=$1 AND route_family=$2 AND protocol=$3 AND reject_reason=$4 AND user_id=0 AND api_key_id=0", client, tc.family, tc.protocol, tc.reason).Scan(&count); err != nil || count != 1 {
+			t.Fatal("protocol classification", tc.path, count, err)
+		}
+	}
+	exec("DELETE FROM ops_ingress_reject_aggregates WHERE client_ip=$1", client)
+	at := time.Now().UTC().Truncate(time.Minute).Add(-10 * time.Minute)
+	ids := []int64{}
+	for i := range 3 {
+		var id int64
+		err := a.DB.QueryRow(`INSERT INTO ops_ingress_reject_aggregates(bucket_start,reject_reason,route_family,protocol,client_ip,user_id,api_key_id,request_count,first_seen,last_seen)
+ VALUES($1,'ip_restricted','messages','anthropic',$2,$3,$4,2,$1,$1) RETURNING id`, at.Add(time.Duration(i/2)*time.Minute), client, int64(i%2)*uid, int64(i%2)*kid).Scan(&id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	list := func(query string) (int, []map[string]any) {
+		t.Helper()
+		w := call("GET", "/api/v1/admin/ops/ingress-rejections?client_ip="+url.QueryEscape(" "+client+"9876 ")+"&"+query, admin)
+		var out struct {
+			Data struct {
+				Total int
+				Items []map[string]any
+			}
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatal("ingress query", w.Code, w.Body.String())
+		}
+		for _, item := range out.Data.Items {
+			if item["client_ip"] != client || item["created_at"] != nil || item["updated_at"] != nil || item["user_id"] == float64(0) || item["api_key_id"] == float64(0) {
+				t.Fatal("ingress public projection", item)
+			}
+		}
+		return out.Data.Total, out.Data.Items
+	}
+	check := func(query string, total int, want ...int64) {
+		t.Helper()
+		count, rows := list(query)
+		if count != total || len(rows) != len(want) {
+			t.Fatal("ingress range or count", query, count, rows)
+		}
+		for i, id := range want {
+			if rows[i]["id"] != float64(id) {
+				t.Fatal("ingress ordering", query, rows)
+			}
+		}
+	}
+	check("", 3, ids[2], ids[1], ids[0])
+	check("page_size=1&page=2", 3, ids[1])
+	check(fmt.Sprintf("user_id=%%20%d%%20&api_key_id=%d&reason=%%20ip_restricted%%20&route_family=messages&protocol=anthropic", uid, kid), 1, ids[1])
+	check("start_time="+url.QueryEscape(at.Add(time.Second).Format(time.RFC3339)), 1, ids[2])
+	check("end_time="+url.QueryEscape(at.Add(time.Minute).Format(time.RFC3339)), 2, ids[1], ids[0])
+	for _, query := range []string{"reason=unknown", "reason=ip_restricted%00", "reason=invalid_api_key%20ip_restricted", "route_family=unknown", "protocol=%FF", "user_id=0", "api_key_id=-1", "client_ip=not-an-ip"} {
+		if w := call("GET", "/api/v1/admin/ops/ingress-rejections?"+query, admin); w.Code != 400 {
+			t.Fatal("invalid ingress filter", query, w.Code)
+		}
+	}
+	for _, tc := range []struct {
+		token  string
+		status int
+	}{{"", 401}, {ordinary, 403}, {secret, 401}} {
+		if w := call("GET", "/api/v1/admin/ops/ingress-rejections", tc.token); w.Code != tc.status {
+			t.Fatal("ingress permissions", w.Code)
+		}
+	}
+	// Snapshot pagination must remain coherent while independent writes arrive.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		for ctx.Err() == nil {
+			var id int64
+			err := a.DB.QueryRow(`INSERT INTO ops_ingress_reject_aggregates(bucket_start,reject_reason,route_family,protocol,client_ip,request_count,first_seen,last_seen)
+ VALUES($1,'other','other','gateway',$2,1,$1,$1) RETURNING id`, at.Add(2*time.Minute), client).Scan(&id)
+			if err == nil {
+				_, err = a.DB.Exec("DELETE FROM ops_ingress_reject_aggregates WHERE id=$1", id)
+			}
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	for range 24 {
+		total, rows := list("page_size=200")
+		if total != len(rows) || total < 3 || total > 4 {
+			t.Fatal("ingress count and page used different snapshots", total, rows)
+		}
+	}
+}
 
 func testOperationalQueries(t *testing.T, a *App, admin, ordinary string) {
 	t.Helper()

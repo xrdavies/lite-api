@@ -332,6 +332,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testProxyQueries(t, a, admin, otherToken)
 	testAdminCreationIdempotency(t, a, admin, otherToken)
 	testOperationalQueries(t, a, admin, otherToken)
+	testIngressRejections(t, a, admin, otherToken)
 	testAccountUsage(t, a, admin, otherToken)
 	testErrorPassthrough(t, a, admin, otherToken)
 	testTLSProfiles(t, a, admin, otherToken)
