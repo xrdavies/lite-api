@@ -29,7 +29,7 @@ func TestChatGemini(t *testing.T) {
 			t.Fatal("lost input", want, string(raw))
 		}
 	}
-	for _, absent := range []string{`"model":`, `"stream":`, `"store":`, `"max_tokens":`, `"strict":`, `"tool_call_id":`, `"id":"c`} {
+	for _, absent := range []string{`"model":`, `"stream":`, `"store":`, `"max_tokens":`, `"strict":`, `"tool_call_id":`} {
 		if strings.Contains(string(raw), absent) {
 			t.Fatal("wire field", absent, string(raw))
 		}
@@ -145,6 +145,39 @@ func TestChatGemini(t *testing.T) {
 	}
 }
 
+func TestChatGeminiToolIDs(t *testing.T) {
+	// Parallel calls may invoke the same function and return results out of order.
+	var body map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"model":"gemini-3.1-pro","messages":[{"role":"assistant","tool_calls":[{"id":"first","type":"function","function":{"name":"lookup","arguments":"{\"n\":1}"}},{"id":"second","type":"function","function":{"name":"lookup","arguments":"{\"n\":2}"}}]},{"role":"tool","tool_call_id":"second","content":"second result"},{"role":"tool","tool_call_id":"first","content":"first result"}]}`), &body)
+	raw, _, _, err := chatToGemini(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Contents []struct {
+			Parts []struct {
+				Call *struct {
+					ID, Name string
+					Args     struct{ N int }
+				} `json:"functionCall"`
+				Response *struct {
+					ID, Name string
+					Response struct{ Content string }
+				} `json:"functionResponse"`
+			}
+		}
+	}
+	if json.Unmarshal(raw, &wire) != nil || len(wire.Contents) != 2 || len(wire.Contents[0].Parts) != 2 || len(wire.Contents[1].Parts) != 2 {
+		t.Fatal("unexpected tool turns", string(raw))
+	}
+	for i, id := range []string{"first", "second"} {
+		call, result := wire.Contents[0].Parts[i].Call, wire.Contents[1].Parts[1-i].Response
+		if call == nil || result == nil || call.ID != id || result.ID != id || call.Name != "lookup" || result.Name != "lookup" || call.Args.N != i+1 || result.Response.Content != id+" result" {
+			t.Fatal("tool call/result identity lost", id, string(raw))
+		}
+	}
+}
+
 func testChatGemini(t *testing.T, a *App, admin string) {
 	t.Helper()
 	call := func(method, path, token string, body any, idem string) *httptest.ResponseRecorder {
@@ -195,6 +228,9 @@ func testChatGemini(t *testing.T, a *App, admin string) {
 			wire := string(b["contents"])
 			if !strings.Contains(wire, `"thoughtSignature":"opaque"`) || !strings.Contains(wire, `"functionResponse"`) || !strings.Contains(wire, `"content":"tool result"`) {
 				t.Error("lost tool continuation", wire)
+			}
+			if strings.Count(wire, `"id":"call_a"`) != 2 {
+				t.Error("call and result must retain the native tool ID", wire)
 			}
 		}
 		if priceChange.Swap(0) == 1 {

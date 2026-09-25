@@ -95,6 +95,11 @@ func TestResponsesGeminiTools(t *testing.T) {
 		if strings.Contains(string(wire), "skip_thought_signature_validator") {
 			t.Fatal("signature replaced by sentinel")
 		}
+		for _, id := range []string{"call_lookup", "call_patch", "call_search"} {
+			if strings.Count(string(wire), `"id":"`+id+`"`) != 2 {
+				t.Fatal("lost tool call/result IDs", stream, id, string(wire))
+			}
+		}
 	}
 }
 
@@ -138,6 +143,11 @@ func testResponsesGemini(t *testing.T, a *App, admin string) {
 		response := geminiResponseCalls
 		if strings.Contains(string(body["contents"]), "functionResponse") {
 			continued.Store(true)
+			for _, id := range []string{"call_lookup", "call_patch", "call_search"} {
+				if strings.Count(string(body["contents"]), `"id":"`+id+`"`) != 2 {
+					t.Error("call and result must retain the native tool ID", id)
+				}
+			}
 			for _, signature := range []string{"lookup-signature", "patch-signature", "search-signature"} {
 				if !strings.Contains(string(body["contents"]), signature) {
 					t.Error("lost authenticated tool signature", signature)

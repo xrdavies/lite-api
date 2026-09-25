@@ -67,6 +67,8 @@ class Provider(BaseHTTPRequestHandler):
                 native = [part for part in parts if "functionCall" in part]
                 assert len(native) == 1 and native[0]["thoughtSignature"] == "persisted-gemini-signature"
                 assert native[0]["functionCall"]["name"] == "team__lookup"
+                results = [part["functionResponse"] for part in parts if "functionResponse" in part]
+                assert len(results) == 1 and native[0]["functionCall"]["id"] == results[0]["id"] == "call_gemini"
                 output = [{"text": "continued after restart"}]
             else:
                 assert body["tools"][0]["functionDeclarations"][0]["name"] == "team__lookup"

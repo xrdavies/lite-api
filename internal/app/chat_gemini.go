@@ -104,7 +104,7 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 			if signature == "" {
 				signature = "skip_thought_signature_validator"
 			}
-			appendContent("model", []any{map[string]any{"functionCall": map[string]any{"name": name, "args": args}, "thoughtSignature": signature}})
+			appendContent("model", []any{map[string]any{"functionCall": map[string]any{"id": id, "name": name, "args": args}, "thoughtSignature": signature}})
 		case "function_call_output", "custom_tool_call_output":
 			id := credentialString(item, "call_id")
 			name := calls[id]
@@ -126,7 +126,7 @@ func chatToGemini(body map[string]json.RawMessage) ([]byte, map[string]bool, str
 					media = append(media, p)
 				}
 			}
-			response := map[string]any{"functionResponse": map[string]any{"name": name, "response": map[string]any{"content": result.String()}}}
+			response := map[string]any{"functionResponse": map[string]any{"id": id, "name": name, "response": map[string]any{"content": result.String()}}}
 			appendContent("user", append([]any{response}, media...))
 		default:
 			parts, err := geminiInputContent(item["content"])
