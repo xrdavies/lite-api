@@ -14,6 +14,10 @@
 
 单实例部署、容器故障验收、升级回退与数据恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
+本机人工测试也可使用 `python3 scripts/manual-test.py prepare` 生成 `reserve/manual/config.json`，再依次运行 `init`、`serve`（保持运行），另开终端执行 `set-key`、`seed`。脚本使用现有 Compose 的本机 PostgreSQL/Redis，配置、随机密码、测试用户 Key 和脱敏请求记录均保存在已忽略的 `reserve/manual/`。已有配置不会覆盖，初始化不清空数据，重复 seed 复用测试资源和初始充值记录；配置已有数据库时应填写原管理员密码及 JWT_SECRET。详细子命令见 `python3 scripts/manual-test.py --help`。
+
+`chat`、`chat --stream`、`responses`、`responses --stream` 分别发起一次可能计费的真实请求并检查文本、usage 和成功终态；两种上游协议使用独立测试分组/账号。`check` 核对余额调整、原始用量与 Key 累计，单价/倍率另行人工核对；`permissions` 检查普通用户、客户端 Key 和匿名访问管理接口被拒绝。`plan chat create` 创建停用的健康计划，只有显式 `enable` 才每分钟调用上游，测试后执行 `disable`。脚本自身检查：`PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-manual.py`，不会调用收费供应商。
+
 ```sh
 cp .env.example .env
 # 编辑 .env，填写 JWT_SECRET（至少 32 字节随机值）和首个管理员凭证。
