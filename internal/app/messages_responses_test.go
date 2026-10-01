@@ -234,6 +234,7 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 	uid := id(must("POST", "/api/v1/admin/users", admin, map[string]any{"email": "messages-responses@example.test", "password": "messages-responses-password", "balance": 100}))
 	user := must("POST", "/api/v1/auth/login", "", map[string]any{"email": "messages-responses@example.test", "password": "messages-responses-password"})["access_token"].(string)
 	var calls, mode atomic.Int32
+	var deepSeek atomic.Bool
 	var captured atomic.Value
 	var groupID atomic.Int64
 	const usage = `"usage":{"input_tokens":20,"output_tokens":5,"input_tokens_details":{"cached_tokens":4}}`
@@ -253,7 +254,11 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		raw := mustJSON(body)
 		captured.Store(string(raw))
-		if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer upstream-secret" || r.Header.Get("X-Api-Key") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Anthropic-Beta") != "" || credentialString(body, "model") != "responses-up" || string(body["store"]) != "false" || body["messages"] != nil {
+		path := "/v1/responses"
+		if deepSeek.Load() {
+			path = "/responses"
+		}
+		if r.URL.Path != path || r.Header.Get("Authorization") != "Bearer upstream-secret" || r.Header.Get("X-Api-Key") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Anthropic-Beta") != "" || credentialString(body, "model") != "responses-up" || string(body["store"]) != "false" || body["messages"] != nil {
 			t.Error("upstream request", r.URL.Path, string(raw))
 		}
 		m := mode.Load()
@@ -470,6 +475,7 @@ func testMessagesResponses(t *testing.T, a *App, admin string) {
 		t.Fatal("count_tokens bridge", w.Code, w.Body.String())
 	}
 	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
+		deepSeek.Store(platform == "deepseek")
 		g := group(platform)
 		k := must("POST", "/api/v1/keys", user, map[string]any{"name": platform, "group_id": g})["key"].(string)
 		acct := account(platform, []int64{g}, up.URL, 1)

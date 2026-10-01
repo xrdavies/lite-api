@@ -21,6 +21,37 @@ import (
 
 const upstreamRequestIDHeaderKey = "upstream_request_id_header"
 
+func applyAccountHeaderOverrides(headers http.Header, account *upstreamAccount) {
+	if account == nil || headers == nil || !headerOverrideEligible(account.Platform) || account.Type != "apikey" || !credentialBool(account.Credentials, "header_override_enabled") {
+		return
+	}
+	var overrides map[string]string
+	if json.Unmarshal(account.Credentials["header_overrides"], &overrides) != nil || len(overrides) > maxHeaderOverrides {
+		return
+	}
+	for name, value := range overrides {
+		name, value, err := normalizeHeaderOverride(name, value)
+		if err != nil || name == "" || value == "" {
+			continue
+		}
+		for existing := range headers {
+			if strings.EqualFold(existing, name) {
+				delete(headers, existing)
+			}
+		}
+		headers.Set(name, value)
+	}
+}
+
+func headerOverrideEligible(platform string) bool {
+	switch platform {
+	case "openai", "anthropic", "grok", "kimi", "zhipu", "deepseek", "minimax":
+		return true
+	default:
+		return false
+	}
+}
+
 func validRequestIDHeader(name string) bool {
 	if name == "" || len(name) > 64 {
 		return false
@@ -154,6 +185,12 @@ func (a *App) upstreamRequest(ctx context.Context, account *upstreamAccount, met
 	return a.upstreamRequestHeaders(ctx, account, method, path, body, nil)
 }
 func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount, method, path string, body []byte, headers http.Header) (*http.Response, error) {
+	// Normalize the original protocol path before provider-specific URL joining
+	// strips /v1 for DeepSeek's native Responses endpoint.
+	if method == http.MethodPost && (path == "/v1/responses" || strings.HasPrefix(path, "/v1/responses/")) {
+		body = normalizeNativeCNResponsesBody(account, body)
+	}
+	path = nativeCNResponsesPath(account, path)
 	base, err := account.baseURL()
 	if err != nil {
 		return nil, err
@@ -203,6 +240,7 @@ func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount,
 			req.Header.Set("Authorization", "Bearer "+key)
 		}
 	}
+	applyAccountHeaderOverrides(req.Header, account)
 	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -215,6 +253,13 @@ func (a *App) sendUpstreamRequest(ctx context.Context, account *upstreamAccount,
 	resp.Body = &transportBody{ReadCloser: resp.Body, transport: tr}
 	a.recordGrokQuota(ctx, account, resp)
 	return resp, nil
+}
+
+func nativeCNResponsesPath(account *upstreamAccount, path string) string {
+	if account == nil || account.Platform != "deepseek" || account.protocol() != "responses" || path != "/v1/responses" && !strings.HasPrefix(path, "/v1/responses/") {
+		return path
+	}
+	return strings.TrimPrefix(path, "/v1")
 }
 
 // Shared by HTTP and WebSocket handshakes, including proxy and DNS pinning.
@@ -310,6 +355,19 @@ func credentialString(m map[string]json.RawMessage, key string) string {
 	_ = json.Unmarshal(m[key], &s)
 	return s
 }
+
+func apiKeyRequestCredentials(source map[string]json.RawMessage, protocol string) map[string]json.RawMessage {
+	out := map[string]json.RawMessage{
+		"api_key": source["api_key"], "base_url": source["base_url"],
+	}
+	out["api_protocol"], _ = json.Marshal(protocol)
+	for _, key := range []string{"header_override_enabled", "header_overrides"} {
+		if value := source[key]; value != nil {
+			out[key] = value
+		}
+	}
+	return out
+}
 func (u *upstreamAccount) protocol() string {
 	if u.Platform == "gemini" {
 		return "gemini"
@@ -395,43 +453,65 @@ func (u *upstreamAccount) mappedModel(model string) (string, error) {
 }
 
 func (u *upstreamAccount) resolveModelMapping(model string) (string, bool, error) {
-	var mapping map[string]string
-	if raw := u.Credentials["model_mapping"]; raw != nil {
-		if err := json.Unmarshal(raw, &mapping); err != nil {
-			return "", false, bad("invalid model mapping")
+	return u.resolveModelMappingFor(model, false)
+}
+
+func (u *upstreamAccount) resolveModelMappingFor(model string, compact bool) (string, bool, error) {
+	resolve := func(raw json.RawMessage, name string, strict bool) (string, bool, error) {
+		var mapping map[string]string
+		if raw != nil {
+			if err := json.Unmarshal(raw, &mapping); err != nil {
+				return "", false, bad("invalid model mapping")
+			}
 		}
-	}
-	if len(mapping) == 0 {
-		return model, false, nil
-	}
-	if value, ok := mapping[model]; ok {
-		if value == "" {
-			return model, true, nil
+		if len(mapping) == 0 {
+			return name, false, nil
 		}
-		return value, true, nil
-	}
-	patterns := make([]string, 0, len(mapping))
-	for pattern := range mapping {
-		if strings.HasSuffix(pattern, "*") {
-			patterns = append(patterns, pattern)
-		}
-	}
-	sort.Slice(patterns, func(i, j int) bool {
-		if len(patterns[i]) != len(patterns[j]) {
-			return len(patterns[i]) > len(patterns[j])
-		}
-		return patterns[i] < patterns[j]
-	})
-	for _, pattern := range patterns {
-		if strings.HasPrefix(model, strings.TrimSuffix(pattern, "*")) {
-			value := mapping[pattern]
-			if value == "" || value == "*" {
-				return model, true, nil
+		if value, ok := mapping[name]; ok {
+			if value == "" {
+				return name, true, nil
 			}
 			return value, true, nil
 		}
+		patterns := make([]string, 0, len(mapping))
+		for pattern := range mapping {
+			if strings.HasSuffix(pattern, "*") {
+				patterns = append(patterns, pattern)
+			}
+		}
+		sort.Slice(patterns, func(i, j int) bool {
+			if len(patterns[i]) != len(patterns[j]) {
+				return len(patterns[i]) > len(patterns[j])
+			}
+			return patterns[i] < patterns[j]
+		})
+		for _, pattern := range patterns {
+			if strings.HasPrefix(name, strings.TrimSuffix(pattern, "*")) {
+				value := mapping[pattern]
+				if value == "" || value == "*" {
+					return name, true, nil
+				}
+				return value, true, nil
+			}
+		}
+		if strict {
+			return "", false, bad("model is not allowed by this account")
+		}
+		return name, false, nil
 	}
-	return "", false, bad("model is not allowed by this account")
+	if compact {
+		if mapped, matched, err := resolve(u.Credentials["compact_model_mapping"], model, false); err != nil || matched {
+			return mapped, matched, err
+		}
+	}
+	mapped, matched, err := resolve(u.Credentials["model_mapping"], model, true)
+	if err != nil || !compact {
+		return mapped, matched, err
+	}
+	if compactModel, compactMatched, compactErr := resolve(u.Credentials["compact_model_mapping"], mapped, false); compactErr != nil || compactMatched {
+		return compactModel, true, compactErr
+	}
+	return mapped, matched, nil
 }
 func (a *App) resolveProxy(ctx context.Context, id int64) (*url.URL, error) {
 	p, err := resolveProxyTarget(ctx, a.DB, id, time.Now())

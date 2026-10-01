@@ -348,6 +348,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testHostedSearch(t, a, admin, "openai")
 	testResponseImages(t, a, admin)
 	t.Run("ReviewRegressions", func(t *testing.T) { testReviewRegressions(t, a, admin) })
+	t.Run("AccountCompatibility", func(t *testing.T) { testAccountCompatibility(t, a, admin) })
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

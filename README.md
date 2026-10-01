@@ -6,7 +6,7 @@
 
 目前已实现空库初始化、结构校验、首个管理员初始化、密码登录与令牌刷新/撤销、用户管理、分组基础配置/授权、用户 API Key 管理及管理员余额调整、上游 API Key 账号与代理管理、文本/图片/视频手动测试和定时测试计划、渠道价格配置和模型广场。已接入 Chat Completions、Responses、Anthropic Messages 和 Gemini 原生 JSON/SSE 网关、token 计数、用量与事务扣费、平台额度和基础查询；已支持 Responses WebSocket、Chat/Responses 双向基础转换、alpha 和 Grok 独立搜索，以及 OpenAI/Grok API Key 图片生成/编辑（JSON URL/data URL 与 multipart 文件）和持久异步图片任务、Gemini 原生同步/流式及批量图片任务；已支持 Grok 语音/Realtime、自定义声音和视频生成/编辑/扩展、Seedance 持久任务、文件/文件搜索、MCP、代码工具、托管 Shell、计算机工具、工具搜索、后台 Responses、Responses 资源与扩展路径。上游是否提供某项能力仍由实际账号和模型决定，网关会按能力配置和协议明确放行或拒绝。
 
-保留范围已经完成 Go 后端实现。完整本地验证覆盖空库初始化、权限、API Key、路由、协议转换、媒体任务、持久恢复、计费幂等、Redis/PostgreSQL 故障、单实例部署、强杀恢复和版本回退；首个真实上游 `buyonce.xyz/gpt-5.6-luna` 已通过 Chat Completions 与 Responses 的 JSON/SSE 以及用量、余额和 Key 额度对账。本文中的“尚未真实联调”表示未对某个外部供应商组合发起验证，不表示对应网关代码缺失。
+保留范围已有 Go 后端实现，本地回归覆盖空库初始化、权限、API Key、路由、协议转换、媒体任务、持久恢复、计费幂等、Redis/PostgreSQL 故障、单实例部署、强杀恢复和版本回退；首个真实上游 `buyonce.xyz/gpt-5.6-luna` 有 Chat Completions 与 Responses JSON/SSE 及账务对账的历史成功记录。本地回归不代表所有供应商、模型和协议组合均已验收，实际部署需按选定上游验证。
 
 ## 本地运行
 
@@ -110,6 +110,10 @@ Gemini 同一路径返回 `source=local` 的本地估算，按模型名 flash/li
 管理员账号列表支持 `search`（名称字面子串，最多 100 个字符）、`platform`、`type`、`status` 和 `group`（正整数分组 ID、`ungrouped` 或不筛选的 `0`）。仅列出八个保留平台的按量 API Key 账号。状态筛选区分 active、unschedulable、rate_limited、temp_unschedulable；临时停调优先于限流，过期冷却不再阻止 active 筛选，查询不改写状态。`sort_by` 支持 id/name/status/schedulable/priority/rate_multiplier/last_used_at/expires_at/created_at，默认 name 升序，同值按 ID 排序，排序先于分页。列表返回当前单实例占用的账号槽位 `current_concurrency`，不包括等待槽位的请求；总数和分页内容使用同一数据库快照，凭证保持脱敏。
 
 管理员通过 `/api/v1/admin/accounts` 配置 `platform`、`type=apikey`、`credentials.api_key`、可选 `credentials.base_url` 和 `group_ids`。支持的账号平台为 openai、anthropic、gemini、grok、kimi、zhipu、deepseek、minimax；仅接受按量 API Key，账号查询不会返回原始 Key。`POST /api/v1/admin/accounts/{id}/test` 使用 `model_id` 发起真实请求，返回测试 SSE；它可能产生上游费用，不计入内部用户消费。`mode` 支持 default（或省略）、text、image、video，以及 Grok 专用 search、tts、stt、realtime；自动模式按账号映射后的已知模型识别 OpenAI/Grok/Gemini 图片、Grok 视频和 Seedance，其余走文本。显式 text 强制文本协议，自定义媒体模型名可显式选择 image/video；Seedance 始终要求账号能力开启。
+
+账号 `load_factor` 是调度负载的分母：同优先级候选按当前占用槽位除以有效负载因子选择，未设置时使用 `concurrency`，同负载保留最近使用顺序。模型路由、会话绑定和优先级仍先于负载；物理并发上限和监控容量仍使用 `concurrency`。创建时非正值不设负载因子；更新为 0 或负数清除，省略或 null 保持，正数最大 10000。
+
+账号可配置 `credentials.header_override_enabled=true` 和 `credentials.header_overrides` 对象，例如 `{"X-Relay-Route":"team-a"}`。OpenAI、Anthropic、Grok、Kimi、Zhipu、DeepSeek、MiniMax 的 API Key HTTP/WS 出站及健康测试共用覆写；Gemini 不应用。最多 64 个头，名称最多 200 字节、值最多 8192 字节，忽略大小写并去除首尾空白；空值不覆写，同名重复或非法值拒绝。认证、Cookie、Host、Content-Type、连接控制、WebSocket 握手和会话隔离头禁止覆写。变更实际生效的覆写会使旧响应绑定、资源授权和上游能力快照失效，避免跨上游路由续接。
 
 账号 `extra.upstream_request_id_header` 可指定直接上游用于标识请求的 HTTP 响应头，例如 `X-Request-ID`；头名最多 64 字节，忽略大小写，省略保持配置，空白或 null 清除。用量 `upstream_request_id` 只记录该头的值，去除首尾空白并按 UTF-8 边界截到 128 字节；未配置、缺失或非法值写入 NULL。视频、Seedance、后台 Responses 和异步图片保存创建请求时的标识，轮询、配置修改及结算恢复不替换它。WebSocket 用量保持 NULL；供应商任务/响应 ID 继续用于资源查询和归属，不代替 HTTP 请求标识。历史已结算记录不改写。
 
@@ -239,6 +243,8 @@ Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；
 
 `POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
+Kimi、DeepSeek、MiniMax 的 `api_protocol=responses` 账号使用无状态原生转发：出站强制 `store=false`、移除 `previous_response_id`，包括 Chat/Messages 转换和健康测试。客户端应携带完整历史；依赖响应 ID、远程资源引用或后台执行的请求明确拒绝，不保存可续接的响应绑定。DeepSeek 使用配置根地址下的 `/responses`（显式 `/v1` 根仍保留该前缀），并将图片 URL 同时写入 `image_url` 和 `url`；OpenAI 类型账号指向 `api.deepseek.com` 时也应用图片适配。工具参数和大整数原样保留；这些规则已按本地固定参考源码实现，真实原厂组合仍需联调。
+
 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Chat 协议账号也可承接普通 Responses JSON/SSE 请求，复合分组按目标平台判断。转换包括文本/图片/文件输入、函数/自定义工具及结果、additional_tools、明文推理、结构化输出及服务等级；自定义工具转成带 input 字符串的函数，返回时还原。上游强制请求流式 usage 并使用 `store=false`，生成 lite-api 响应 ID；实际 Chat 用量和端点参与原账务。输出事件带顺序号，终态及工具完成事件在结算成功后才发出，length/content_filter 对应 incomplete。托管工具、仅加密推理和自动截断尚不能转换；compact、原生压缩和 WebSocket 仍要求原生 Responses 账号；input_tokens 使用下述独立计数路径。
 
 Responses HTTP/SSE 也支持 Anthropic 平台及 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax 的 Anthropic 协议账号。直接生成 `/v1/messages`，保留文本/图片/PDF、结构化系统指令、缓存标记、工具结果，工具命名空间/custom/客户端发现复用同一套身份映射；原生内容块按出现顺序转为 Responses 输出。compact、原生 compaction 和 WebSocket 仍要求原生 Responses 账号；OpenAI 兼容平台的 input_tokens 使用下述独立计数路径。
@@ -260,6 +266,8 @@ namespace 的函数在 Chat 请求中映射为 `namespace__name`，超长名截�
 转换路径的 `store` 默认 true：Redis 保存 AES-GCM 加密的会话历史，绑定客户端 Key、分组、响应 ID 与上游来源，30 天过期；使用部署密钥派生加密密钥，轮换后旧历史无法解密。顶层 instructions 只影响当前轮，input 内的指令和工具结果保留在续接历史中。历史上限 2 MiB/256 条消息，转换输出上限 16 MiB/4096 项；超限明确失败。`store=false` 不保存续接历史；凭证或协议变化、原账号不可用、缓存失效均拒绝续接，不能切换账号重放。当前通过协议模拟及数据库验证，尚无新增真实上游转换联调。
 
 三个 Responses 前缀均提供 `/compact` 和 `/input_tokens`：压缩按返回 usage 结算，token 计数只验证权限/余额/限额而不扣费，两者不支持流式。
+
+显式压缩路径优先按 `credentials.compact_model_mapping` 匹配渠道映射后的模型；没有命中则执行普通 `model_mapping`，再尝试对普通映射结果应用压缩规则。精确匹配先于最长前缀通配，未命中压缩规则沿用普通结果。普通 Responses 和 `compaction_trigger` 不使用压缩专用映射；用量记录实际上游模型，计价继续遵守渠道的模型来源配置。
 
 OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址（未配置 `base_url` 或主机名为 `api.openai.com`）使用 Bearer Key 调用配置地址的同名端点；完整输入遇到上游 404 时改为本地估算，401/403、429、其他错误及无效成功响应沿用原错误处理。自定义中转、Grok、Kimi、Zhipu、DeepSeek、MiniMax 的完整输入直接本地估算，不发送上游请求。均保留用户/Key/模型/账号/资源准入、余额与限额、RPM 和并发校验；Grok 此处仍需要可用账号及消费资格，与 Messages 本地计数不同。返回 `{"object":"response.input_tokens","input_tokens":整数}`，不生成内容、不调用工具、不写入消费账务。
 

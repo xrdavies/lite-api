@@ -93,10 +93,7 @@ func (a *App) seedanceRequest(ctx context.Context, u *upstreamAccount, method, i
 	// The native task endpoint always uses Bearer authentication, even when this
 	// account's text protocol is configured for Messages compatibility.
 	account := *u
-	account.Credentials = map[string]json.RawMessage{
-		"base_url": u.Credentials["base_url"], "api_key": u.Credentials["api_key"],
-		"api_protocol": json.RawMessage(`"chat_completions"`),
-	}
+	account.Credentials = apiKeyRequestCredentials(u.Credentials, "chat_completions")
 	return a.upstreamRequest(ctx, &account, method, seedancePath(u, id), body)
 }
 

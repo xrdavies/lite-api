@@ -368,7 +368,8 @@ func (a *App) probeBilling(ctx context.Context, id int64, scheduled bool) (*bill
 		// the account's inference protocol (including native Gemini/Anthropic).
 		account.Platform = "openai"
 		root, _ := json.Marshal(base)
-		account.Credentials = map[string]json.RawMessage{"api_key": u.Credentials["api_key"], "base_url": root, "api_protocol": json.RawMessage(`"chat_completions"`)}
+		account.Credentials = apiKeyRequestCredentials(u.Credentials, "chat_completions")
+		account.Credentials["base_url"] = root
 		resp, e := a.upstreamRequest(probeCtx, &account, "GET", keyBillingPath, nil)
 		if e != nil {
 			out.Error = "request_failed"

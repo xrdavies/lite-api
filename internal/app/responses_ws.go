@@ -281,6 +281,7 @@ func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body
 	delete(out, "stream")
 	delete(out, "stream_options")
 	raw, _ := json.Marshal(out)
+	raw = normalizeNativeCNResponsesBody(account, raw)
 	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	err := s.upstream.Write(writeCtx, websocket.MessageText, raw)
 	cancel()
@@ -314,6 +315,8 @@ func (a *App) dialUpstreamSocket(ctx context.Context, account *upstreamAccount, 
 		return nil, nil, err
 	}
 	defer tr.CloseIdleConnections()
+	headers = headers.Clone()
+	applyAccountHeaderOverrides(headers, account)
 	client := &http.Client{Transport: socketTransport{tr, req.URL.Opaque}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	conn, resp, err := websocket.Dial(ctx, req.URL.String(), &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers, Host: req.Host, CompressionMode: websocket.CompressionDisabled})
 	a.recordGrokQuota(ctx, account, resp)

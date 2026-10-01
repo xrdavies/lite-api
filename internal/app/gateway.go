@@ -362,19 +362,22 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 			return nil, err
 		}
 	}
-	rows, err := a.DB.QueryContext(ctx, `SELECT a.id,a.concurrency,a.rate_multiplier::text FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND a.platform=$2 AND a.type='apikey' AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now()) AND (a.overload_until IS NULL OR a.overload_until<=now()) AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now()) ORDER BY ag.priority,a.priority,a.last_used_at NULLS FIRST,a.id`, routing.ID, g.Group.Platform)
+	rows, err := a.DB.QueryContext(ctx, `SELECT a.id,a.concurrency,a.load_factor,ag.priority,a.priority,a.rate_multiplier::text FROM accounts a JOIN account_groups ag ON ag.account_id=a.id WHERE ag.group_id=$1 AND a.platform=$2 AND a.type='apikey' AND a.deleted_at IS NULL AND a.status='active' AND a.schedulable AND (NOT a.auto_pause_on_expired OR a.expires_at IS NULL OR a.expires_at>now()) AND (a.rate_limit_reset_at IS NULL OR a.rate_limit_reset_at<=now()) AND (a.overload_until IS NULL OR a.overload_until<=now()) AND (a.temp_unschedulable_until IS NULL OR a.temp_unschedulable_until<=now()) ORDER BY ag.priority,a.priority,a.last_used_at NULLS FIRST,a.id`, routing.ID, g.Group.Platform)
 	if err != nil {
 		return nil, err
 	}
 	type candidate struct {
-		id          int64
-		concurrency int
-		rate        json.Number
+		id                      int64
+		concurrency             int
+		loadFactor              sql.NullInt64
+		groupPriority, priority int
+		rate                    json.Number
+		load                    float64
 	}
 	candidates := []candidate{}
 	for rows.Next() {
 		var c candidate
-		if err = rows.Scan(&c.id, &c.concurrency, &c.rate); err != nil {
+		if err = rows.Scan(&c.id, &c.concurrency, &c.loadFactor, &c.groupPriority, &c.priority, &c.rate); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -390,6 +393,30 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		scheduleModel = dispatchModel
 	}
 	preferred := routing.routingAccounts(scheduleModel, g.Group.Platform)
+	// load_factor changes the normalized load used to choose among otherwise
+	// equivalent accounts; concurrency remains the hard slot limit.
+	a.gatewayMu.Lock()
+	for i := range candidates {
+		c := &candidates[i]
+		capacity := c.concurrency
+		if c.loadFactor.Valid && c.loadFactor.Int64 > 0 {
+			capacity = int(c.loadFactor.Int64)
+		}
+		if capacity < 1 {
+			capacity = 1
+		}
+		active := a.gatewayActive[fmt.Sprintf("account:%d", c.id)]
+		c.load = float64(active) / float64(capacity)
+	}
+	a.gatewayMu.Unlock()
+	for start := 0; start < len(candidates); {
+		end := start + 1
+		for end < len(candidates) && candidates[end].groupPriority == candidates[start].groupPriority && candidates[end].priority == candidates[start].priority {
+			end++
+		}
+		sort.SliceStable(candidates[start:end], func(i, j int) bool { return candidates[start+i].load < candidates[start+j].load })
+		start = end
+	}
 	if sticky != nil {
 		u, err := a.loadAccount(ctx, sticky.AccountID)
 		if err != nil || responseTarget(u) != sticky.Target {
@@ -493,7 +520,8 @@ func (a *App) chooseAccount(ctx context.Context, g *gatewayIdentity, model strin
 		if !u.allowsResponseResources(responseStoresKey, g.Key.GroupID, in.VectorStores) || !u.allowsResponseResources(responseFilesKey, g.Key.GroupID, in.FileIDs) || !u.allowsResponseResources(responseSkillsKey, g.Key.GroupID, in.SkillIDs) {
 			continue
 		}
-		mapped, matched, err := u.resolveModelMapping(s.ChannelModel)
+		_, compact := responseCompactionPath(in.Action)
+		mapped, matched, err := u.resolveModelMappingFor(s.ChannelModel, compact)
 		if dispatchModel != "" {
 			// Admission uses the dispatch model. Explicit account mappings of the
 			// channel model still win when constructing the actual wire request.
@@ -1128,6 +1156,11 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		if len(selected.UpstreamModel) > 100 {
 			selected.Release()
 			fail(bad("upstream model exceeds supported length"))
+			return
+		}
+		if protocol == "responses" && selected.Account.statelessResponses() && (in.Previous != "" || len(in.ItemReferences) > 0 || len(in.ResponseResources) > 0 || in.Background) {
+			selected.Release()
+			fail(bad("this upstream requires full Responses input without resource references or background execution"))
 			return
 		}
 		billingModel := selected.ChannelModel
@@ -2134,7 +2167,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			turn.socket.responses[observation.ResponseID] = binding
 		}
 	}
-	if protocol == "responses" && !in.CountOnly && (in.Action == "" || in.ResponseExtension) && in.Store {
+	if protocol == "responses" && !in.CountOnly && (in.Action == "" || in.ResponseExtension) && in.Store && !selected.Account.statelessResponses() {
 		bindingCtx, bindingCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if anthropicResponses != nil {
 			err = a.bindChatResponse(bindingCtx, g, selected.Account, observation.ResponseID, append(chatRequest.History, anthropicResponses.assistant()))

@@ -193,7 +193,7 @@ func (a *App) testAccountMedia(ctx context.Context, u *upstreamAccount, model, m
 	// the account's text protocol. Keep the proxy and configured relay root.
 	account := *u
 	if u.Platform != "gemini" {
-		account.Credentials = map[string]json.RawMessage{"api_key": u.Credentials["api_key"], "base_url": u.Credentials["base_url"], "api_protocol": json.RawMessage(`"chat_completions"`)}
+		account.Credentials = apiKeyRequestCredentials(u.Credentials, "chat_completions")
 	}
 	path := "/v1/images/generations"
 	body := map[string]any{"model": model, "prompt": prompt, "n": 1}

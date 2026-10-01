@@ -87,7 +87,8 @@ func balanceEndpoint(u *upstreamAccount) (*upstreamAccount, string, error) {
 	}
 	account := *u
 	root, _ := json.Marshal(base)
-	account.Credentials = map[string]json.RawMessage{"api_key": u.Credentials["api_key"], "base_url": root, "api_protocol": json.RawMessage(`"chat_completions"`)}
+	account.Credentials = apiKeyRequestCredentials(u.Credentials, "chat_completions")
+	account.Credentials["base_url"] = root
 	path := "/user/balance"
 	if u.Platform == "kimi" {
 		path = "/v1/users/me/balance"

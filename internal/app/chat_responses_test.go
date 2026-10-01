@@ -148,6 +148,7 @@ func testChatResponses(t *testing.T, a *App, admin string) {
 	price := map[string]any{"platform": "openai", "models": []string{"public-bridge"}, "input_price": 0.01, "output_price": 0.02, "cache_read_price": 0.003, "cache_write_price": 0.004}
 	must("POST", "/api/v1/admin/channels", admin, map[string]any{"name": "Bridge price", "group_ids": []int64{gid}, "model_pricing": []any{price}})
 	var calls, mode, changePrice atomic.Int32
+	var deepSeek atomic.Bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			fmt.Fprint(w, `{"data":[{"id":"mapped-bridge"}]}`)
@@ -155,7 +156,11 @@ func testChatResponses(t *testing.T, a *App, admin string) {
 		}
 		n := calls.Add(1)
 		var b map[string]json.RawMessage
-		if json.NewDecoder(r.Body).Decode(&b) != nil || r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer bridge-upstream" || credentialString(b, "model") != "mapped-bridge" || string(b["store"]) != "false" || b["messages"] != nil || b["stream_options"] != nil || b["input"] == nil {
+		path := "/v1/responses"
+		if deepSeek.Load() {
+			path = "/responses"
+		}
+		if json.NewDecoder(r.Body).Decode(&b) != nil || r.URL.Path != path || r.Header.Get("Authorization") != "Bearer bridge-upstream" || credentialString(b, "model") != "mapped-bridge" || string(b["store"]) != "false" || b["messages"] != nil || b["stream_options"] != nil || b["input"] == nil {
 			t.Error("bridge upstream request", r.URL.Path, b)
 		}
 		if changePrice.Swap(0) == 1 {
@@ -318,6 +323,7 @@ func testChatResponses(t *testing.T, a *App, admin string) {
 		t.Fatal("converted composite model missing", w.Code, w.Body.String())
 	}
 	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+		deepSeek.Store(platform == "deepseek")
 		groupID := id(must("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "Bridge " + platform, "platform": platform, "rate_multiplier": 2, "model_pricing": []any{map[string]any{"platform": platform, "models": []string{"public-bridge"}, "input_price": 0.01, "output_price": 0.02, "cache_read_price": 0.003, "cache_write_price": 0.004}}}))
 		accountID := id(must("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Bridge " + platform, "platform": platform, "type": "apikey", "group_ids": []int64{groupID}, "credentials": map[string]any{"api_key": "bridge-upstream", "api_protocol": "responses", "base_url": up.URL, "model_mapping": map[string]string{"public-bridge": "mapped-bridge"}}}))
 		platformKey := must("POST", "/api/v1/keys", user, map[string]any{"name": "Bridge " + platform, "group_id": groupID})["key"].(string)

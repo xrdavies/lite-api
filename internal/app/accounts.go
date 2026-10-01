@@ -56,7 +56,7 @@ func (in *accountInput) validate(create bool) error {
 	if in.Priority != nil && (*in.Priority < 0 || *in.Priority > 1000000) {
 		return bad("invalid priority")
 	}
-	if in.LoadFactor != nil && (*in.LoadFactor < 1 || *in.LoadFactor > 10000) {
+	if in.LoadFactor != nil && *in.LoadFactor > 10000 {
 		return bad("invalid load_factor")
 	}
 	if in.ProxyID != nil && *in.ProxyID < 0 {
@@ -104,16 +104,21 @@ func (in *accountInput) validate(create bool) error {
 			default:
 				return bad("unsupported API protocol")
 			}
-		case "model_mapping":
-			var mapping map[string]string
-			if json.Unmarshal(value, &mapping) != nil || mapping == nil || len(mapping) > 10000 {
-				return bad("invalid model_mapping")
+		case "model_mapping", "compact_model_mapping":
+			if err := validateAccountModelMapping(value, key); err != nil {
+				return err
 			}
-			for k, v := range mapping {
-				if k == "" || len(k) > 200 || len(v) > 200 || strings.ContainsAny(k+v, "\r\n") {
-					return bad("invalid model mapping entry")
-				}
+		case "header_override_enabled":
+			var enabled bool
+			if json.Unmarshal(value, &enabled) != nil {
+				return bad("header_override_enabled must be a boolean")
 			}
+		case "header_overrides":
+			normalized, err := normalizeHeaderOverrides(value)
+			if err != nil {
+				return err
+			}
+			in.Credentials[key] = normalized
 		default:
 			return bad("unsupported credential field: " + key)
 		}
@@ -190,7 +195,95 @@ func (in *accountInput) validate(create bool) error {
 	return nil
 }
 
-const accountView = `(to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','tier_id',credentials->'tier_id','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb))`
+func credentialBool(m map[string]json.RawMessage, key string) bool {
+	var value bool
+	return json.Unmarshal(m[key], &value) == nil && value
+}
+
+func validateAccountModelMapping(raw json.RawMessage, field string) error {
+	var mapping map[string]string
+	if json.Unmarshal(raw, &mapping) != nil || mapping == nil || len(mapping) > 10000 {
+		return bad("invalid " + field)
+	}
+	for k, v := range mapping {
+		if k == "" || len(k) > 200 || len(v) > 200 || strings.ContainsAny(k+v, "\r\n") {
+			return bad("invalid " + field + " entry")
+		}
+	}
+	return nil
+}
+
+const maxHeaderOverrides = 64
+
+var blockedHeaderOverrides = map[string]bool{
+	"host": true, "content-length": true, "content-type": true, "transfer-encoding": true,
+	"connection": true, "keep-alive": true, "upgrade": true, "te": true, "trailer": true,
+	"proxy-authenticate": true, "proxy-connection": true, "accept-encoding": true,
+	"sec-websocket-key": true, "sec-websocket-version": true, "sec-websocket-extensions": true,
+	"sec-websocket-protocol": true, "sec-websocket-accept": true,
+	"authorization": true, "proxy-authorization": true, "cookie": true,
+	"x-api-key": true, "x-goog-api-key": true, "session_id": true, "conversation_id": true,
+	"x-codex-turn-state": true, "x-codex-turn-metadata": true, "chatgpt-account-id": true,
+	"x-claude-code-session-id": true, "x-client-request-id": true, "x-grok-conv-id": true,
+}
+
+func normalizeHeaderOverride(name, value string) (string, string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	value = strings.TrimSpace(value)
+	if name == "" && value == "" {
+		return "", "", nil
+	}
+	if name == "" {
+		return "", "", bad("header name must not be empty")
+	}
+	if len(name) > 200 || blockedHeaderOverrides[name] {
+		return "", "", bad("header is not allowed to be overridden")
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c)) {
+			return "", "", bad("invalid header override name")
+		}
+	}
+	if len(value) > 8192 {
+		return "", "", bad("invalid header override value")
+	}
+	for i := range value {
+		if value[i] < 32 && value[i] != '\t' || value[i] == 127 {
+			return "", "", bad("invalid header override value")
+		}
+	}
+	return name, value, nil
+}
+
+func normalizeHeaderOverrides(raw json.RawMessage) (json.RawMessage, error) {
+	if string(raw) == "null" {
+		return raw, nil
+	}
+	var entries map[string]json.RawMessage
+	if json.Unmarshal(raw, &entries) != nil || entries == nil || len(entries) > maxHeaderOverrides {
+		return nil, bad("header_overrides must be an object with at most 64 entries")
+	}
+	result := map[string]string{}
+	for name, value := range entries {
+		var text string
+		if string(value) == "null" || json.Unmarshal(value, &text) != nil {
+			return nil, bad("header override values must be strings")
+		}
+		name, text, err := normalizeHeaderOverride(name, text)
+		if err != nil {
+			return nil, err
+		}
+		if name != "" {
+			if _, seen := result[name]; seen {
+				return nil, bad("duplicate header override name")
+			}
+			result[name] = text
+		}
+	}
+	return json.Marshal(result)
+}
+
+const accountView = `(to_jsonb(a)-'deleted_at'-'credentials') || jsonb_build_object('credentials',jsonb_strip_nulls(jsonb_build_object('base_url',credentials->'base_url','account_mode',credentials->'account_mode','tier_id',credentials->'tier_id','api_protocol',credentials->'api_protocol','model_mapping',credentials->'model_mapping','compact_model_mapping',credentials->'compact_model_mapping','header_override_enabled',credentials->'header_override_enabled','header_overrides',credentials->'header_overrides','openai_capabilities',credentials->'openai_capabilities')),'has_api_key',credentials ? 'api_key','group_ids',COALESCE((SELECT jsonb_agg(group_id ORDER BY group_id) FROM account_groups WHERE account_id=a.id),'[]'::jsonb))`
 
 func accountJSON(ctx context.Context, q queryer, id int64) (json.RawMessage, error) {
 	return jsonRow(q.QueryRowContext(ctx, "SELECT "+accountView+" FROM accounts a WHERE id=$1 AND deleted_at IS NULL", id))
@@ -228,7 +321,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	if credentialString(in.Credentials, "api_key") == "" {
 		return bad("credentials.api_key is required")
 	}
-	u := &upstreamAccount{Platform: *in.Platform, Credentials: in.Credentials}
+	u := &upstreamAccount{Platform: *in.Platform, Type: "apikey", Credentials: in.Credentials}
 	if err := in.bindResponseResourceGrants(u); err != nil {
 		return err
 	}
@@ -272,7 +365,7 @@ func (a *App) createAccount(w http.ResponseWriter, r *http.Request) error {
 	if in.ExpiresAt != nil && *in.ExpiresAt > 0 {
 		expiry = time.Unix(*in.ExpiresAt, 0)
 	}
-	if in.LoadFactor != nil {
+	if in.LoadFactor != nil && *in.LoadFactor > 0 {
 		load = *in.LoadFactor
 	}
 	concurrency, priority, rate, status, notes, pause := 3, 50, "1", "active", "", true
@@ -397,7 +490,11 @@ func (a *App) updateAccount(w http.ResponseWriter, r *http.Request) error {
 		add("rate_multiplier", in.Rate.String())
 	}
 	if in.LoadFactor != nil {
-		add("load_factor", *in.LoadFactor)
+		var load any
+		if *in.LoadFactor > 0 {
+			load = *in.LoadFactor
+		}
+		add("load_factor", load)
 	}
 	if in.AutoPause != nil {
 		add("auto_pause_on_expired", *in.AutoPause)

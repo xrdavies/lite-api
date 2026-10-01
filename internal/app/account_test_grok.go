@@ -61,7 +61,7 @@ func accountTestAudio(uri string) ([]byte, string, error) {
 func (a *App) testGrokAccount(ctx context.Context, u *upstreamAccount, model, mode string, in accountTestInput, result *accountTestResult) error {
 	// These endpoints always use Bearer, independent of text API compatibility.
 	account := *u
-	account.Credentials = map[string]json.RawMessage{"api_key": u.Credentials["api_key"], "base_url": u.Credentials["base_url"], "api_protocol": json.RawMessage(`"chat_completions"`)}
+	account.Credentials = apiKeyRequestCredentials(u.Credentials, "chat_completions")
 	if mode == "realtime" {
 		return a.testAccountRealtime(ctx, &account, model, result)
 	}

@@ -1,14 +1,120 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
+
+func (u *upstreamAccount) statelessResponses() bool {
+	return u != nil && u.Type == "apikey" && u.protocol() == "responses" && (u.Platform == "kimi" || u.Platform == "deepseek" || u.Platform == "minimax")
+}
+
+func normalizeNativeCNResponsesBody(account *upstreamAccount, raw []byte) []byte {
+	if account == nil || account.Type != "apikey" || account.protocol() != "responses" {
+		return raw
+	}
+	stateless := account.statelessResponses()
+	deepSeekImages := account.Platform == "deepseek" || targetsDeepSeekResponsesHost(account)
+	if !stateless && !deepSeekImages {
+		return raw
+	}
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) != nil || body == nil {
+		return raw
+	}
+	if stateless {
+		body["store"] = json.RawMessage("false")
+		delete(body, "previous_response_id")
+	}
+	if deepSeekImages {
+		if input, ok := body["input"]; ok {
+			var value any
+			decoder := json.NewDecoder(bytes.NewReader(input))
+			decoder.UseNumber()
+			if decoder.Decode(&value) == nil && normalizeDeepSeekImages(value) {
+				body["input"], _ = json.Marshal(value)
+			}
+		}
+	}
+	result, err := json.Marshal(body)
+	if err != nil {
+		return raw
+	}
+	return result
+}
+
+func targetsDeepSeekResponsesHost(account *upstreamAccount) bool {
+	if account == nil {
+		return false
+	}
+	base, err := account.baseURL()
+	if err != nil {
+		return false
+	}
+	u, err := url.Parse(base)
+	return err == nil && strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "api.deepseek.com")
+}
+
+func normalizeDeepSeekImages(value any) bool {
+	changed := false
+	switch node := value.(type) {
+	case []any:
+		for _, item := range node {
+			changed = normalizeDeepSeekImages(item) || changed
+		}
+	case map[string]any:
+		if kind, ok := node["type"].(string); ok && (kind == "input_image" || kind == "image_url" || kind == "image") {
+			var image string
+			switch v := node["image_url"].(type) {
+			case string:
+				image = v
+			case map[string]any:
+				image, _ = v["url"].(string)
+			}
+			if image == "" {
+				image, _ = node["url"].(string)
+			}
+			if image == "" {
+				image, _ = node["image"].(string)
+			}
+			if image == "" {
+				if source, ok := node["source"].(map[string]any); ok {
+					image, _ = source["url"].(string)
+					if image == "" {
+						if data, _ := source["data"].(string); data != "" {
+							media, _ := source["media_type"].(string)
+							if media == "" {
+								media = "image/png"
+							}
+							image = "data:" + media + ";base64," + data
+						}
+					}
+				}
+			}
+			if image != "" {
+				node["type"] = "input_image"
+				node["image_url"] = image
+				node["url"] = image
+				changed = true
+			}
+		}
+		// Only media-bearing fields are protocol content. Tool arguments and
+		// other user JSON may use the same names and must remain untouched.
+		for _, field := range []string{"content", "output"} {
+			if items, ok := node[field].([]any); ok {
+				changed = normalizeDeepSeekImages(items) || changed
+			}
+		}
+	}
+	return changed
+}
 
 func parseResponsesRequest(r *http.Request, in textRequest, body map[string]json.RawMessage) (textRequest, error) {
 	in.Scope, in.Store = "responses", true
@@ -544,7 +650,14 @@ func responseBindingKey(g *gatewayIdentity, id string) string {
 }
 func responseTarget(u *upstreamAccount) string {
 	base, _ := u.baseURL()
-	return digest(u.Platform + "\n" + u.protocol() + "\n" + base + "\n" + credentialString(u.Credentials, "api_key"))
+	target := u.Platform + "\n" + u.protocol() + "\n" + base + "\n" + credentialString(u.Credentials, "api_key")
+	headers := http.Header{}
+	applyAccountHeaderOverrides(headers, u)
+	if len(headers) > 0 {
+		raw, _ := json.Marshal(headers)
+		target += "\n" + string(raw)
+	}
+	return digest(target)
 }
 func (a *App) previousResponse(ctx context.Context, g *gatewayIdentity, id string) (*responseBinding, error) {
 	if id == "" {
