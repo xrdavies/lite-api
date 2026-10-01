@@ -219,6 +219,7 @@ func (a *App) startWorkers() {
 	ctx, cancel := context.WithCancel(context.Background())
 	a.workerCancel = cancel
 	a.workerDone = make(chan struct{})
+	a.planWorkerDone = make(chan struct{})
 	a.startImageTasks(ctx)
 	a.startBatchImages(ctx)
 	a.startVideoTasks(ctx)
@@ -226,6 +227,24 @@ func (a *App) startWorkers() {
 	a.startBalanceChecks(ctx)
 	a.startBillingProbes(ctx)
 	a.startProxyExpiry(ctx)
+	go func() {
+		defer close(a.planWorkerDone)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := a.checkInstance(ctx); err != nil {
+					return
+				}
+				if err := a.runDueTests(ctx); err != nil && ctx.Err() == nil {
+					slog.Error("scheduled test cycle failed")
+				}
+			}
+		}
+	}()
 	go func() {
 		defer close(a.workerDone)
 		if err := a.recoverRealtime(ctx); err != nil {
@@ -256,9 +275,6 @@ func (a *App) startWorkers() {
 				}
 				if err := a.recoverRealtime(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("realtime billing recovery failed")
-				}
-				if err := a.runDueTests(ctx); err != nil && ctx.Err() == nil {
-					slog.Error("scheduled test cycle failed")
 				}
 			}
 		}

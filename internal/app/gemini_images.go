@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -214,48 +215,110 @@ func (s *gatewaySelection) generatedImageCost(g gatewayGroup, model string, u pr
 	return cost, price.BillingMode, rate, err
 }
 
-func countGeminiImages(raw []byte) (int64, error) {
+// Counts per candidate and output identity preserve identical images within a
+// payload while deduplicating cumulative SSE frames. Only hashes are retained.
+// ponytail: identical delta images across frames are indistinguishable from
+// replayed frames; use provider output IDs if those become available.
+func geminiImageOutputs(raw []byte, references bool) (map[string]int64, error) {
 	var body struct {
 		Candidates []struct {
+			Index   int
 			Content struct{ Parts []map[string]json.RawMessage }
 		}
 	}
+	invalid := func() (map[string]int64, error) { return nil, &apiError{502, "invalid Gemini image response"} }
 	if json.Unmarshal(raw, &body) != nil {
-		return 0, &apiError{502, "invalid Gemini image response"}
+		return invalid()
 	}
-	var count int64
+	counts := map[string]int64{}
+	total := int64(0)
 	for _, candidate := range body.Candidates {
 		for _, part := range candidate.Content.Parts {
 			value := part["inlineData"]
 			if value == nil {
 				value = part["inline_data"]
 			}
+			reference := false
+			if value == nil && references {
+				value = part["fileData"]
+				if value == nil {
+					value = part["file_data"]
+				}
+				reference = value != nil
+			}
 			if value == nil {
 				continue
 			}
-			var inline map[string]json.RawMessage
-			if json.Unmarshal(value, &inline) != nil {
-				return 0, &apiError{502, "invalid Gemini inline data"}
+			var data map[string]json.RawMessage
+			if json.Unmarshal(value, &data) != nil || data == nil {
+				return invalid()
 			}
-			kind := credentialString(inline, "mimeType")
+			kind := credentialString(data, "mimeType")
 			if kind == "" {
-				kind = credentialString(inline, "mime_type")
+				kind = credentialString(data, "mime_type")
 			}
-			switch strings.ToLower(strings.TrimSpace(kind)) {
+			kind = strings.ToLower(strings.TrimSpace(kind))
+			switch kind {
 			case "image/png", "image/jpeg", "image/webp", "image/gif":
-				data := credentialString(inline, "data")
-				if strings.TrimSpace(data) == "" {
+			default:
+				continue
+			}
+			identity := ""
+			if reference {
+				uri := credentialString(data, "fileUri")
+				if uri == "" {
+					uri = credentialString(data, "file_uri")
+				}
+				if strings.TrimSpace(uri) == "" {
+					return invalid()
+				}
+				identity = "file:" + digest(uri)
+			} else {
+				encoded := credentialString(data, "data")
+				if strings.TrimSpace(encoded) == "" {
 					continue
 				}
-				if _, err := base64.StdEncoding.DecodeString(data); err != nil {
-					return 0, &apiError{502, "invalid Gemini image encoding"}
+				decoded, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil || len(decoded) == 0 {
+					return invalid()
 				}
-				count++
-				if count > 64 {
-					return 0, &apiError{502, "too many Gemini images"}
-				}
+				identity = "inline:" + digest(string(decoded))
 			}
+			total++
+			if total > 64 {
+				return nil, &apiError{502, "too many Gemini images"}
+			}
+			counts[strconv.Itoa(candidate.Index)+":"+kind+":"+identity]++
 		}
 	}
-	return count, nil
+	return counts, nil
+}
+
+func countGeminiImages(raw []byte) (int64, error) {
+	counts, err := geminiImageOutputs(raw, false)
+	var count int64
+	for _, n := range counts {
+		count += n
+	}
+	return count, err
+}
+
+func (o *textObservation) observeGeminiImages(raw []byte) error {
+	counts, err := geminiImageOutputs(raw, true)
+	if err != nil {
+		return err
+	}
+	if o.geminiImages == nil {
+		o.geminiImages = map[string]int64{}
+	}
+	for identity, n := range counts {
+		if previous := o.geminiImages[identity]; n > previous {
+			if o.ImageCount+n-previous > 64 {
+				return &apiError{502, "too many Gemini images"}
+			}
+			o.ImageCount += n - previous
+			o.geminiImages[identity] = n
+		}
+	}
+	return nil
 }

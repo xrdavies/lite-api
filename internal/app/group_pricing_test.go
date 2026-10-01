@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func testGroupPricing(t *testing.T, a *App, admin string) {
 		const response = `{"id":"group-price","model":"gpt-5.6-luna","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":2}}}`
 		if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", response)
+			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", strings.Replace(response, `"message":`, `"delta":`, 1))
 		} else {
 			fmt.Fprint(w, response)
 		}

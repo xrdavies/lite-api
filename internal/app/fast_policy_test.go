@@ -183,7 +183,7 @@ func testFastPolicy(t *testing.T, a *App, admin string) {
 			stream = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + result + "}\n\n"
 		} else {
 			result = fmt.Sprintf(`{"id":"chat_policy_%d","model":"native-policy","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`, n)
-			stream = "data: " + result + "\n\ndata: [DONE]\n\n"
+			stream = "data: " + strings.Replace(result, `"message":`, `"delta":`, 1) + "\n\ndata: [DONE]\n\n"
 		}
 		if string(body["stream"]) == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")

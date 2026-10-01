@@ -526,7 +526,7 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/test-integration.py
 
 `POST /v1beta/models/{model}:generateContent` 和 `:streamGenerateContent?alt=sse` 支持 Gemini API Key 图片生成及带输入图片的编辑。请求沿用原生 `contents`、`generationConfig.responseModalities` 和 `imageConfig`，模型映射、composite→Gemini、鉴权、并发/RPM、幂等及额度检查沿用网关。输入上限 32 MiB，JSON 响应或单个 SSE 帧上限 16 MiB。原生字段参见 [generateContent](https://ai.google.dev/api/generate-content)。
 
-图片数量优先取实际 `inlineData` / `inline_data` 图片 part；兼容累积式 SSE，以单帧最大图片数计量，纯增量多图流分散在不同帧时可能少计。无内联图片时，对已知图片模型的正常完整响应沿用一张的兼容回落；上游明确拦截或图片失败不触发回落。`candidatesTokensDetails` 中的 IMAGE token 与普通输出分别记录，思考 token 计入普通输出。明确 token 价卡须有真实 token usage，不能用图片数量填造。
+图片数量取实际 `inlineData` / `inline_data` 图片及明确的 `fileData` / `file_data` 图片引用；纯文本响应不再按模型名补计一张图片。SSE 按候选索引、MIME 类型和内容摘要（引用使用 URI 摘要）累计不同图片，重复的累积帧不重复收费，同帧重复图片保留其数量。没有独立输出 ID 的跨帧相同图片按重复帧处理，无法区分两次生成的完全相同内容。最多计量 64 张图片。`candidatesTokensDetails` 中的 IMAGE token 与普通输出分别记录，思考 token 计入普通输出。明确 token 价卡须有真实 token usage，不能用图片数量填造。
 
 计价顺序为：有效的显式 token 价卡优先并使用普通倍率；其他情况依次使用分组模型价卡、分组尺寸价、渠道媒体价、固定图片参考价。`image_price_1k/2k/4k` 单位 USD/张，0 免费、负数清除覆盖、省略/null 保持。按图计价使用 `image_rate_independent` / `image_rate_multiplier`，否则采用有效用户/分组倍率。参考价的 2K/4K 系数为 1.5/2，是兼容基线而非实时原厂报价。
 

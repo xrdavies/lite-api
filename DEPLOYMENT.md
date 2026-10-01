@@ -2,6 +2,8 @@
 
 lite-api 使用一个应用实例、PostgreSQL 和持久 Redis。前端目录仅占位。生产运行使用 `compose.deploy.yaml`；以下命令在仓库根目录执行，需要 Docker Compose。对外访问由现有 HTTPS 反向代理负责，应用端口仅绑定本机。
 
+反向代理部署须在 `.env.deploy` 配置 `TRUSTED_PROXY_CIDRS`，填写应用实际看到的代理连接来源 CIDR（多个用逗号分隔）。默认留空，不信任任何转发头。只有可信代理传入的 `X-Forwarded-For` 会从右向左解析，到第一个非可信地址为止；没有该头时才读取单值 `X-Real-IP`。网关 IP 黑白名单、登录限流、审计及用量均使用解析后的来源。代理必须正确覆盖或追加真实连接地址，不能原样转发客户端伪造的头；Docker 部署应核实容器看到的来源，勿直接信任全部地址或整个内网。
+
 ## 首次部署
 
 准备只允许部署账户读取的 `.env.deploy`，填写独立随机值；该文件按 `.env.*` 规则忽略。`POSTGRES_PASSWORD` 使用 URL 安全字符，例如随机十六进制字符串。`JWT_SECRET` 至少 32 字节，用于会话和媒体任务加密，后续升级保持原值。
@@ -40,7 +42,7 @@ docker compose --env-file .env.deploy -f compose.deploy.yaml exec -T app /lite-a
 DOCKER_CONTEXT=desktop-linux python3 scripts/test-deployment.py
 ```
 
-使用其他 Docker 环境时省略或修改 `DOCKER_CONTEXT`。脚本仅使用 Python 标准库，构建当前工作树及 `HEAD^` 的容器镜像；使用独立 Compose 项目、随机凭证、临时端口和新数据卷，结束后清理。需要 Git 历史中的上一提交，以及镜像构建所需网络或缓存。不会读取部署的 `.env`、连接现有业务库或调用收费上游。
+使用其他 Docker 环境时省略或修改 `DOCKER_CONTEXT`。脚本要求 Python 3.12 或更新版本（使用安全 tar 解包过滤），仅使用标准库，构建当前工作树及 `HEAD^` 的容器镜像；使用独立 Compose 项目、随机凭证、临时端口和新数据卷，结束后清理。需要 Git 历史中的上一提交，以及镜像构建所需网络或缓存。不会读取部署的 `.env`、连接现有业务库或调用收费上游。
 
 脚本验证：
 

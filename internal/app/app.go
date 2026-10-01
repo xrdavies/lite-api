@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -31,6 +30,7 @@ type Config struct {
 	BalanceCheckEnabled, BalanceThreshold, BalanceCheckIntervalMinutes              string
 	StreamDataIntervalTimeout, ImageStreamDataIntervalTimeout                       string
 	GeminiQuotaPolicy                                                               string
+	TrustedProxyCIDRs                                                               string
 }
 
 // Version is set at build time for immutable release images.
@@ -50,6 +50,7 @@ func ConfigFromEnv() Config {
 		StreamDataIntervalTimeout:      os.Getenv("GATEWAY_STREAM_DATA_INTERVAL_TIMEOUT"),
 		ImageStreamDataIntervalTimeout: os.Getenv("GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT"),
 		GeminiQuotaPolicy:              os.Getenv("GEMINI_QUOTA_POLICY"),
+		TrustedProxyCIDRs:              os.Getenv("TRUSTED_PROXY_CIDRS"),
 	}
 }
 
@@ -60,8 +61,10 @@ type App struct {
 	secret            []byte
 	mux               *http.ServeMux
 	privateUpstreams  []netip.Prefix
+	trustedProxies    []netip.Prefix
 	workerCancel      context.CancelFunc
 	workerDone        chan struct{}
+	planWorkerDone    chan struct{}
 	imageWorkerDone   chan struct{}
 	imageTaskMu       sync.Mutex
 	batchMu           sync.Mutex
@@ -116,6 +119,10 @@ func OpenDatabase(ctx context.Context, url string) (*sql.DB, error) {
 }
 
 func New(ctx context.Context, cfg Config) (*App, error) {
+	trusted, err := parseTrustedProxies(cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, err
+	}
 	var quotaPolicy geminiQuotaPolicy
 	if strings.TrimSpace(cfg.GeminiQuotaPolicy) != "" {
 		var err error
@@ -173,6 +180,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return fail(errors.New("Redis connection failed"))
 	}
 	a := &App{DB: db, Redis: cache, instanceLock: instanceLock, secret: []byte(cfg.JWTSecret), mux: http.NewServeMux()}
+	a.trustedProxies = trusted
 	a.streamIdle, a.imageStreamIdle = streamIdle, imageStreamIdle
 	a.geminiQuotaPolicy = quotaPolicy
 	a.balancePolicy = balancePolicy
@@ -198,6 +206,7 @@ func (a *App) Close() {
 	a.websocketDone.Wait()
 	a.workerCancel()
 	<-a.workerDone
+	<-a.planWorkerDone
 	<-a.imageWorkerDone
 	<-a.batchWorkerDone
 	<-a.videoWorkerDone
@@ -209,7 +218,12 @@ func (a *App) Close() {
 	a.instanceLock.Close()
 	a.DB.Close()
 }
-func (a *App) Handler() http.Handler { return a.mux }
+func (a *App) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(context.WithValue(r.Context(), clientIPKey{}, proxyClientIP(r, a.trustedProxies)))
+		a.mux.ServeHTTP(w, r)
+	})
+}
 
 func (a *App) checkInstance(ctx context.Context) error {
 	if a.instanceLost.Load() {
@@ -330,13 +344,6 @@ func randomBytes(n int) []byte {
 		panic(err)
 	}
 	return b
-}
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 func pathID(r *http.Request) (int64, error) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)

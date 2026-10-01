@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -191,7 +192,7 @@ func (a *App) asyncImageTask(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	task := imageTaskRecord{ID: "imgtask_" + randomToken(18), UserID: g.UserID, APIKeyID: g.Key.ID, GroupID: g.Key.GroupID, Status: "processing", Stage: "queued", CreatedAt: now.Unix(), ExpiresAt: now.Add(imageTaskTTL).Unix()}
-	if err = a.sealImageRequest(&task, imageTaskRequest{Path: path, RemoteAddr: r.RemoteAddr, UserAgent: r.UserAgent(), Body: body, Storage: storage}); err != nil {
+	if err = a.sealImageRequest(&task, imageTaskRequest{Path: path, RemoteAddr: net.JoinHostPort(clientIP(r), "0"), UserAgent: r.UserAgent(), Body: body, Storage: storage}); err != nil {
 		fail(err)
 		return
 	}

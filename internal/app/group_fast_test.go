@@ -126,7 +126,7 @@ func testGroupFast(t *testing.T, a *App, admin string) {
 			terminal = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + response + "}\n\n"
 		} else {
 			response = fmt.Sprintf(`{"id":"chat_fast_%d","model":"fast-test","service_tier":%q,"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`, n, tier)
-			terminal = "data: " + response + "\n\ndata: [DONE]\n\n"
+			terminal = "data: " + strings.Replace(response, `"message":`, `"delta":`, 1) + "\n\ndata: [DONE]\n\n"
 		}
 		if string(body["stream"]) == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")

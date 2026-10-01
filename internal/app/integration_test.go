@@ -18,7 +18,7 @@ import (
 // Worker lifecycle tests still start their own runner explicitly.
 func pauseTestWorkers(a *App) func() {
 	a.workerCancel()
-	for _, done := range []chan struct{}{a.workerDone, a.imageWorkerDone, a.batchWorkerDone, a.videoWorkerDone, a.responseWorkerDone, a.balanceWorkerDone, a.billingWorkerDone, a.proxyWorkerDone} {
+	for _, done := range []chan struct{}{a.workerDone, a.planWorkerDone, a.imageWorkerDone, a.batchWorkerDone, a.videoWorkerDone, a.responseWorkerDone, a.balanceWorkerDone, a.billingWorkerDone, a.proxyWorkerDone} {
 		<-done
 	}
 	return a.startWorkers
@@ -347,6 +347,7 @@ func TestIdentityKeysAndBalance(t *testing.T) {
 	testHostedSearch(t, a, admin, "grok")
 	testHostedSearch(t, a, admin, "openai")
 	testResponseImages(t, a, admin)
+	t.Run("ReviewRegressions", func(t *testing.T) { testReviewRegressions(t, a, admin) })
 	// Startup detects drift; it never fixes it implicitly.
 	if _, err = db.ExecContext(ctx, "ALTER TABLE users ADD COLUMN test_drift boolean"); err != nil {
 		t.Fatal(err)

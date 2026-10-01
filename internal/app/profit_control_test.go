@@ -119,7 +119,7 @@ func testProfitControl(t *testing.T, a *App, admin string) {
 			stream = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + result + "}\n\n"
 		default:
 			result = fmt.Sprintf(`{"id":"chat_profit_%d","model":"profit-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`, n)
-			stream = "data: " + result + "\n\ndata: [DONE]\n\n"
+			stream = "data: " + strings.Replace(result, `"message":`, `"delta":`, 1) + "\n\ndata: [DONE]\n\n"
 		}
 		if string(body["stream"]) == "true" || strings.HasSuffix(r.URL.Path, "streamGenerateContent") {
 			w.Header().Set("Content-Type", "text/event-stream")

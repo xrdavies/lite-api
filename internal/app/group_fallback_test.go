@@ -144,7 +144,7 @@ func testGroupFallback(t *testing.T, a *App, admin string) {
 			fmt.Fprint(w, `{"input_tokens":10}`)
 		} else if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_%d\",\"model\":\"client-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", n)
+			fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_%d\",\"model\":\"client-model\",\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", n)
 		} else {
 			fmt.Fprintf(w, `{"id":"msg_%d","type":"message","role":"assistant","model":"client-model","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`, n)
 		}

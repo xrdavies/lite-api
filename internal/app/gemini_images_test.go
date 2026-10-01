@@ -13,6 +13,57 @@ import (
 	"time"
 )
 
+func TestGeminiImageMeter(t *testing.T) {
+	const a = `{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}`
+	const b = `{"inline_data":{"mime_type":"image/jpeg","data":"/9j/4AAQ"}}`
+	const file = `{"fileData":{"mimeType":"image/png","fileUri":"https://example.test/image.png"}}`
+	frame := func(index int, parts string) []byte {
+		return []byte(fmt.Sprintf(`{"candidates":[{"index":%d,"content":{"parts":[%s]}}]}`, index, parts))
+	}
+	for _, tt := range []struct {
+		name   string
+		frames [][]byte
+		want   int64
+	}{
+		{"text only", [][]byte{frame(0, `{"text":"no image"}`)}, 0},
+		{"delta", [][]byte{frame(0, a), frame(0, b)}, 2},
+		{"cumulative", [][]byte{frame(0, a), frame(0, a+","+b), frame(0, a+","+b)}, 2},
+		{"identical in one frame", [][]byte{frame(0, a+","+a), frame(0, a+","+a)}, 2},
+		{"different candidates", [][]byte{frame(0, a), frame(1, a)}, 2},
+		{"file reference", [][]byte{frame(0, file), frame(0, file)}, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			o := textObservation{Protocol: "gemini"}
+			for _, raw := range tt.frames {
+				if err := o.observe(raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if o.ImageCount != tt.want {
+				t.Fatalf("images = %d, want %d", o.ImageCount, tt.want)
+			}
+		})
+	}
+	for _, part := range []string{`{"inlineData":{"mimeType":"image/png","data":"invalid"}}`, `{"fileData":{"mimeType":"image/png"}}`} {
+		o := textObservation{Protocol: "gemini"}
+		if o.observe(frame(0, part)) == nil {
+			t.Fatal("malformed image accepted")
+		}
+	}
+	o := textObservation{Protocol: "gemini"}
+	for i := range 64 {
+		if err := o.observe(frame(i, a)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if o.observe(frame(64, a)) == nil || o.ImageCount != 64 {
+		t.Fatal("image bound not enforced")
+	}
+	if count, err := countGeminiImages(frame(0, file)); count != 0 || err != nil {
+		t.Fatal("health probe accepted unverified reference", count, err)
+	}
+}
+
 func TestGeminiImageBilling(t *testing.T) {
 	for _, tc := range []struct {
 		body, size, source string

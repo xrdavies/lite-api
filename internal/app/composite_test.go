@@ -169,7 +169,7 @@ func testCompositeGateway(t *testing.T, a *App, admin string) {
 		response := fmt.Sprintf(`{"id":"chat","model":%q,"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`, model)
 		if string(body["stream"]) == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", response)
+			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", strings.Replace(response, `"message":`, `"delta":`, 1))
 		} else {
 			fmt.Fprint(w, response)
 		}

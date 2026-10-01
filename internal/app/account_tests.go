@@ -115,6 +115,12 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in account
 				result.Text += p.Text
 			}
 		case "responses":
+			status := credentialString(data, "status")
+			var incomplete map[string]json.RawMessage
+			_ = json.Unmarshal(data["incomplete_details"], &incomplete)
+			if status != "completed" && !(status == "incomplete" && credentialString(incomplete, "reason") == "max_output_tokens") {
+				return errors.New("Responses test did not complete successfully")
+			}
 			var output []struct{ Content []struct{ Type, Text string } }
 			if json.Unmarshal(data["output"], &output) != nil {
 				return errors.New("missing Responses output")

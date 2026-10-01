@@ -1602,7 +1602,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		upstreamID = upstreamRequestID(selected.Account, resp.Header)
 	}
 	firstToken := int64(0)
-	observe := observation.observe
+	observe := func(raw []byte) error {
+		if err := observation.observe(raw); err != nil {
+			return err
+		}
+		return observation.observeResult(raw, stream)
+	}
 	if wireIn.Protocol == "responses" && (selected.Account.Platform == "grok" || selected.Account.Platform == "openai") && selected.Search == "" && !in.CountOnly {
 		meter := &hostedSearchMeter{OpenAI: selected.Account.Platform == "openai"}
 		observe = func(raw []byte) error {
@@ -1754,6 +1759,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				return nil
 			}
 			if wireIn.Protocol == "chat_completions" && data == "[DONE]" {
+				if !observation.resultSeen {
+					return &apiError{502, "upstream chat stream ended without a result"}
+				}
 				terminal = "data: [DONE]\n\n"
 				if messagesBridge != nil {
 					var err error
@@ -1999,9 +2007,6 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	if wireIn.Protocol == "gemini" && !in.CountOnly {
 		count := observation.ImageCount
 		observation.Usage.ImageRequest = wireIn.ImageGeneration || count > 0
-		if count == 0 && (geminiImageModel(model) || geminiImageModel(selected.UpstreamModel)) && forwardErr == nil && observation.complete() && !observation.blocked && !observation.ImageRejected {
-			count = 1
-		}
 		if count > 0 {
 			observation.Usage.ImageCount = count
 			observation.Usage.ImageSize = wireIn.ImageSize

@@ -657,10 +657,11 @@ type textObservation struct {
 	HasUsage, CountOnly   bool
 	Programmatic          bool
 	started, stopped      bool
+	resultSeen            bool
 	finished              map[int]bool
 	blocked               bool
-	ImageRejected         bool
 	ImageCount            int64
+	geminiImages          map[string]int64
 	ImageStream           *responseImageMeter
 }
 
@@ -773,18 +774,11 @@ func (o *textObservation) observe(data []byte) error {
 		}
 		for _, c := range event.Candidates {
 			o.finished[c.Index] = c.Finish != "" || o.finished[c.Index]
-			if c.Finish != "" && c.Finish != "STOP" && c.Finish != "MAX_TOKENS" {
-				o.ImageRejected = true
-			}
 		}
 		o.blocked = o.blocked || event.Feedback.Block != ""
-		count, err := countGeminiImages(data)
-		if err != nil {
+		if err := o.observeGeminiImages(data); err != nil {
 			return err
 		}
-		// ponytail: preserve cumulative relay payload semantics with the maximum
-		// count in one frame; delta-only multi-image streams may undercount.
-		o.ImageCount = max(o.ImageCount, count)
 		if event.Metadata != nil && string(event.Metadata) != "null" {
 			var u struct {
 				Input         *int64 `json:"promptTokenCount"`

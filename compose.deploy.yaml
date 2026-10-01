@@ -13,6 +13,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET (at least 32 bytes)}
       LISTEN_ADDR: :8080
       UPSTREAM_PRIVATE_CIDRS: ${UPSTREAM_PRIVATE_CIDRS:-}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
     ports:
       - "127.0.0.1:${LITE_API_PORT:-8080}:8080"
     depends_on:

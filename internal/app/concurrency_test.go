@@ -168,7 +168,7 @@ func testGatewayQueues(t *testing.T, a *App, admin string) {
 			fmt.Fprintf(w, `{"id":"resp_queue_%d","object":"response","status":"completed","model":"queue-model","output":[],"usage":{"input_tokens":10,"output_tokens":5}}`, n)
 		} else if body.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, "data: {\"model\":\"queue-model\",\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n")
+			fmt.Fprint(w, "data: {\"model\":\"queue-model\",\"choices\":[{\"delta\":{\"content\":\"OK\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n")
 		} else {
 			fmt.Fprint(w, `{"model":"queue-model","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
 		}

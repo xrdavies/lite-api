@@ -175,11 +175,11 @@ func testReasoningPolicy(t *testing.T, a *App, admin string) {
 			response = fmt.Sprintf(`{"id":"resp_effort_%d","object":"response","status":"completed","model":"up-effort","output":[],"usage":{"input_tokens":10,"output_tokens":5}}`, n)
 			terminal = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + response + "}\n\n"
 		case "anthropic":
-			response = `{"id":"msg_effort","type":"message","role":"assistant","model":"up-effort","content":[],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
+			response = `{"id":"msg_effort","type":"message","role":"assistant","model":"up-effort","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
 			terminal = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":" + response + "}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 		default:
 			response = `{"id":"effort","model":"up-effort","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`
-			terminal = "data: " + response + "\n\ndata: [DONE]\n\n"
+			terminal = "data: " + strings.Replace(response, `"message":`, `"delta":`, 1) + "\n\ndata: [DONE]\n\n"
 		}
 		if string(body["stream"]) == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")

@@ -176,7 +176,7 @@ func testStreamTimeout(t *testing.T, original *App, admin, ordinary string) {
 		kind := r.URL.Path
 		first, last := `data: {"model":"stream-model","choices":[{"index":0,"delta":{"content":"hi"}}],"usage":{"prompt_tokens":2,"completion_tokens":3}}`+"\n\n", "data: [DONE]\n\n"
 		if strings.Contains(kind, "messages") {
-			first = `data: {"type":"message_start","message":{"model":"stream-model","usage":{"input_tokens":2,"output_tokens":3}}}` + "\n\n"
+			first = `data: {"type":"message_start","message":{"model":"stream-model","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"output_tokens":3}}}` + "\n\n"
 			last = "data: {\"type\":\"message_stop\"}\n\n"
 		}
 		if strings.Contains(kind, "responses") {
