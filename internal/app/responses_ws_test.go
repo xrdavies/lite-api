@@ -149,7 +149,9 @@ func testResponsesWebSocket(t *testing.T, a *App, admin string) {
 			if !warm {
 				send(map[string]any{"type": "response.output_text.delta", "delta": "hello"})
 				response["output"] = []any{map[string]any{"type": "message", "id": "msg_" + rid, "role": "assistant", "content": []any{}}}
-				response["usage"] = map[string]any{"input_tokens": 10, "output_tokens": 5, "input_tokens_details": map[string]int{"cached_tokens": 2}}
+				// Independent reasoning must normalize to the same five output
+				// tokens already asserted by this suite's settlement/recovery checks.
+				response["usage"] = map[string]any{"input_tokens": 10, "output_tokens": 1, "total_tokens": 15, "output_tokens_details": map[string]int{"reasoning_tokens": 4}, "input_tokens_details": map[string]int{"cached_tokens": 2}}
 			}
 			response["status"] = "completed"
 			if currentMode == 5 {

@@ -65,13 +65,18 @@ func testPlanLifecycle(t *testing.T, a *App, admin, ordinary string) {
 		return p
 	}
 	var calls atomic.Int32
+	var missingUsage atomic.Bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		var body map[string]json.RawMessage
 		if json.NewDecoder(r.Body).Decode(&body) != nil || credentialString(body, "model") != "team-default" || r.URL.Path != "/v1/chat/completions" {
 			t.Error("default model dispatch")
 		}
-		fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+		if missingUsage.Load() {
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+		} else {
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
+		}
 	}))
 	defer up.Close()
 	w := call("POST", "/api/v1/admin/accounts", admin, map[string]any{"name": "Plan lifecycle", "platform": "openai", "type": "apikey", "credentials": map[string]any{"api_key": "plan-test-key", "base_url": up.URL, "model_mapping": map[string]string{"gpt-5.4": "team-default"}}})
@@ -110,6 +115,30 @@ func testPlanLifecycle(t *testing.T, a *App, admin, ordinary string) {
 	}
 	if calls.Load() != 3 {
 		t.Fatal("invalid body dispatched test", calls.Load())
+	}
+	// Generation alone must neither turn a plan green nor recover its account.
+	missingUsage.Store(true)
+	if _, err := a.DB.Exec("UPDATE accounts SET status='error',updated_at=now() WHERE id=$1", aid); err != nil {
+		t.Fatal(err)
+	}
+	w = call("POST", fmt.Sprintf("/api/v1/admin/accounts/%d/test", aid), admin, map[string]any{})
+	if strings.Contains(w.Body.String(), `"test_complete"`) || !strings.Contains(w.Body.String(), `"generation_status":"success"`) || !strings.Contains(w.Body.String(), `"gateway_status":"failed"`) {
+		t.Fatal("manual test hid incompatible usage", w.Body.String())
+	}
+	if err := a.runTestPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	var health, status, text, diagnosis string
+	err := a.DB.QueryRow("SELECT a.status,t.status,t.response_text,t.error_message FROM accounts a JOIN scheduled_test_results t ON t.plan_id=$2 WHERE a.id=$1 ORDER BY t.id DESC LIMIT 1", aid, plan.ID).Scan(&health, &status, &text, &diagnosis)
+	if err != nil || health != "error" || status != "failed" || text != "OK" || !strings.HasPrefix(diagnosis, "gateway compatibility check failed:") {
+		t.Fatal("plan recovered incompatible account", health, status, text, diagnosis, err)
+	}
+	missingUsage.Store(false)
+	if err := a.runTestPlan(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DB.QueryRow("SELECT status FROM accounts WHERE id=$1", aid).Scan(&health); err != nil || health != "active" {
+		t.Fatal("compatible plan did not recover account", health, err)
 	}
 	// Omitted/null fields retain their values; an empty model restores defaults.
 	planReply(call("PUT", path, admin, map[string]any{"model_id": "explicit-model", "max_results": 2}))
@@ -174,7 +203,7 @@ func testPlanLifecycle(t *testing.T, a *App, admin, ordinary string) {
 		}
 		results(path+"/results", []string{"OK", "2"})
 		results(fmt.Sprintf("%s/%d/results", root, second.ID), []string{"other plan"})
-		if calls.Load() != 4 {
+		if calls.Load() != 7 {
 			t.Fatal("listing dispatched extra tests", calls.Load())
 		}
 	}()

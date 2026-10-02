@@ -2209,6 +2209,7 @@ func parseChatUsage(raw []byte) (priceUsage, error) {
 	var u struct {
 		Input        *int64 `json:"prompt_tokens"`
 		Output       *int64 `json:"completion_tokens"`
+		Total        *int64 `json:"total_tokens"`
 		CacheWrite   int64  `json:"cache_creation_input_tokens"`
 		InputDetails struct {
 			Cached int64  `json:"cached_tokens"`
@@ -2226,9 +2227,18 @@ func parseChatUsage(raw []byte) (priceUsage, error) {
 	if u.InputDetails.Write != nil {
 		u.CacheWrite = *u.InputDetails.Write
 	}
-	if !tokenCountsValid(u.CacheWrite, u.OutputDetails.Reasoning) || u.CacheWrite > *u.Input-u.InputDetails.Cached || u.OutputDetails.Reasoning > *u.Output {
+	if !tokenCountsValid(u.CacheWrite, u.OutputDetails.Reasoning) || u.CacheWrite > *u.Input-u.InputDetails.Cached || u.Total != nil && *u.Total < 0 {
+		return priceUsage{}, &apiError{502, "upstream usage is invalid"}
+	}
+	output := *u.Output
+	// Some relays report visible completion and reasoning separately. Only
+	// total_tokens proves additional consumption; canonical totals add nothing.
+	if u.Total != nil && *u.Total > *u.Input+output {
+		output += min(*u.Total-*u.Input-output, u.OutputDetails.Reasoning)
+	}
+	if !tokenCountsValid(output) || u.OutputDetails.Reasoning > output {
 		return priceUsage{}, &apiError{502, "upstream usage is invalid"}
 	}
 	input := *u.Input - u.InputDetails.Cached - u.CacheWrite
-	return priceUsage{Input: input, Output: *u.Output, CacheRead: u.InputDetails.Cached, CacheWrite: u.CacheWrite, ImageInput: min(u.InputDetails.Image, input), ImageOutput: u.OutputDetails.Image}, nil
+	return priceUsage{Input: input, Output: output, CacheRead: u.InputDetails.Cached, CacheWrite: u.CacheWrite, ImageInput: min(u.InputDetails.Image, input), ImageOutput: u.OutputDetails.Image}, nil
 }

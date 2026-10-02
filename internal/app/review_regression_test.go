@@ -81,11 +81,23 @@ func testReviewRegressions(t *testing.T, a *App, admin string) {
 			fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}]}`)
 		case 4:
 			fmt.Fprint(w, `{"id":"resp_review","object":"response","status":"failed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":10,"output_tokens":5}}`)
+		case 10:
+			var body struct{ Stream bool }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			usage := `{"prompt_tokens":210,"completion_tokens":1,"total_tokens":436,"completion_tokens_details":{"reasoning_tokens":225}}`
+			if body.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: {\"id\":\"chat_reasoning\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":%s}\n\ndata: [DONE]\n\n", usage)
+			} else {
+				fmt.Fprintf(w, `{"id":"chat_reasoning","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":%s}`, usage)
+			}
+		case 11:
+			fmt.Fprint(w, `{"id":"resp_snapshot","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":10,"output_tokens":2}}`)
 		}
 	}))
 	defer up.Close()
 	create := func(platform, model, protocol string) (string, int64) {
-		group := manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "review-" + protocol, "platform": platform, "rate_multiplier": 1})
+		group := manage("POST", "/api/v1/admin/groups", admin, map[string]any{"name": "review-" + protocol, "platform": platform, "rate_multiplier": 1, "allow_messages_dispatch": platform == "openai"})
 		gid := int64(group["id"].(float64))
 		price := map[string]any{"platform": platform, "models": []string{model}, "input_price": "0.000001", "output_price": "0.000002", "cache_read_price": "0.000001", "cache_write_price": "0.000001"}
 		if platform == "gemini" {
@@ -107,7 +119,38 @@ func testReviewRegressions(t *testing.T, a *App, admin string) {
 	if err := db.QueryRow("SELECT group_id FROM api_keys WHERE key=$1", chat).Scan(&chatGroup); err != nil {
 		t.Fatal(err)
 	}
-	_, responseID := create("openai", "review-responses", "responses")
+	responseKey, responseID := create("openai", "review-responses", "responses")
+	t.Run("IndependentReasoningSettlesAllHTTPConversions", func(t *testing.T) {
+		mode.Store(10)
+		for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+			for _, stream := range []bool{false, true} {
+				body := map[string]any{"model": "review-chat", "stream": stream}
+				if path == "/v1/responses" {
+					body["input"], body["store"] = "hello", false
+				} else {
+					body["messages"] = []any{map[string]string{"role": "user", "content": "hello"}}
+					if path == "/v1/messages" {
+						body["max_tokens"] = 256
+					}
+				}
+				w := call("POST", path, chat, body)
+				var output int
+				var cost string
+				err := db.QueryRow("SELECT output_tokens,actual_cost::text FROM usage_logs WHERE request_id=$1", w.Header().Get("X-Request-ID")).Scan(&output, &cost)
+				if w.Code != 200 || strings.Contains(w.Body.String(), `"error":{`) || strings.Contains(w.Body.String(), "event: error") || !strings.Contains(w.Body.String(), "OK") || err != nil || output != 226 || cost != "0.0006620000" {
+					t.Fatal(path, stream, w.Code, w.Body.String(), output, cost, err)
+				}
+			}
+		}
+	})
+	t.Run("MessagesSnapshotWithoutItemID", func(t *testing.T) {
+		mode.Store(11)
+		w := call("POST", "/v1/messages", responseKey, map[string]any{"model": "review-responses", "max_tokens": 256, "messages": []any{map[string]string{"role": "user", "content": "hello"}}})
+		var output int
+		if err := db.QueryRow("SELECT output_tokens FROM usage_logs WHERE request_id=$1", w.Header().Get("X-Request-ID")).Scan(&output); err != nil || output != 2 || w.Code != 200 || !strings.Contains(w.Body.String(), `"text":"OK"`) {
+			t.Fatal(w.Code, w.Body.String(), output, err)
+		}
+	})
 	assertFailedUsage := func(t *testing.T, w *httptest.ResponseRecorder, cost string) {
 		t.Helper()
 		var usageRows, errorRows int

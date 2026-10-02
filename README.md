@@ -127,6 +127,8 @@ Grok `search` 沿用独立搜索的 `grok-4.6` 和账号映射，向 `/v1/respon
 
 手动和定时测试共用账号并发上限，同一账号最多执行一个健康测试。测试可以探测停调账号，成功恢复仍检查配置版本，不覆盖人工禁用、停调开关和本地额度；失败不冒充健康。测试只证明所测模型的本次调用结果。
 
+文本测试在生成文本后复用网关的原生协议、结果结构和用量解析检查。手动 SSE 增加 `gateway_check` 事件，分别返回 `generation_status`（success/failed）和 `gateway_status`（success/failed/not_checked）。文本生成成功但 usage 缺失、非法或协议不兼容时，整体失败，不发送成功 `test_complete`，也不自动恢复账号。定时计划同样失败，保留 `response_text`，在原 `error_message` 中以 `gateway compatibility check failed:` 标明兼容性失败；不增加数据库列。检查不包含客户端权限、价格配置、实际扣费或所有下游协议转换，媒体与 Realtime 探测也不据此宣称计费兼容。
+
 文本测试可省略 `model_id`，手动测试也接受空请求体（非法 JSON、null 或未知字段仍拒绝）。固定兼容默认值为 OpenAI `gpt-5.4`、Anthropic `claude-sonnet-4-5-20250929`、Gemini `gemini-2.0-flash`、Grok `grok-4.5`；国内平台按所配置的 Anthropic 或 OpenAI 文本协议采用对应默认值。默认值继续经过账号模型映射和白名单，不保证供应商当前提供该模型；管理员可显式指定模型或映射到实际可用的模型。
 
 `/api/v1/admin/scheduled-test-plans` 支持创建、编辑、删除，`/{id}/results` 查询结果，`/api/v1/admin/accounts/{id}/scheduled-test-plans` 列出账号计划。这组接口沿用直接 JSON 响应。五字段 cron 默认 UTC，可用 `CRON_TZ=Asia/Shanghai` 指定时区。单实例每 15 秒扫描，按到期顺序执行，按上述文本/媒体超时执行；`max_results` 控制留存，`auto_recover` 仅恢复可恢复状态，保留人工停调和消费额度。计划不新增模式列，按映射后的模型自动选择文本/图片/视频，结果只保存状态、耗时和简短摘要。进程停止会取消正在执行的请求，未完成计划下次启动继续检查。
@@ -241,7 +243,7 @@ Chat 三个入口也支持 Gemini 账号，通过原生 `generateContent` / `str
 
 Gemini 2.5 的显式 effort 转为 thinkingBudget，3 系列转 thinkingLevel；xhigh/max 映射 high，minimal 在 Pro 上映射 low，未指定时沿用模型默认。计费档位仅取实际 thinkingLevel，预算值不推断收费档位；客户端显式 effort 单独记入请求字段。禁止关闭强制思考，不能映射的多候选、托管工具或禁用并行函数调用等控制在派发前拒绝；预算映射参考 [Gemini OpenAI 兼容文档](https://ai.google.dev/gemini-api/docs/openai)。Chat 输入用量含缓存读，输出用量含思考；扣费使用原生互斥计量。文本/思考增量实时返回，工具调用、finish_reason、usage 和 DONE 等待结算成功。缺用量或断流返回错误，已知消费仍持久结算并支持恢复。本地协议服务及 Docker 数据库验证已通过，尚未使用真实 Gemini Key 联调。
 
-`POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算，思考 token 已包含在输出量中，不重复加算。输入、缓存读、缓存写分别计费，Chat 与 Responses 共用互斥 token 计量。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
+`POST /v1/responses` 及 `/responses`、`/backend-api/codex/responses` 支持原生 JSON/SSE，使用配置 `credentials.api_protocol=responses` 的同平台账号时，工具调用、结构化输出与加密推理内容原样传递；支持 function/custom 工具和只含客户端函数的 namespace。终止事件在扣费成功后发送，`incomplete` 保留原协议含义；失败响应中的有效 usage 仍结算。已包含思考 token 的输出量不重复加算；Grok 或中转将思考单列时，仅在 `total_tokens` 大于原始输入与输出之和时补入正差额，最多补 `reasoning_tokens`。缺少 total 时不推定额外用量；负数、溢出、缓存分区和图片计数仍校验。Chat、Responses JSON/SSE 与 Responses WebSocket 共用该计费解析；原生响应保持上游 usage，账务记录规范化后的输出量。输入、缓存读、缓存写分别计费。协议字段见 [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)。
 
 Kimi、DeepSeek、MiniMax 的 `api_protocol=responses` 账号使用无状态原生转发：出站强制 `store=false`、移除 `previous_response_id`，包括 Chat/Messages 转换和健康测试。客户端应携带完整历史；依赖响应 ID、远程资源引用或后台执行的请求明确拒绝，不保存可续接的响应绑定。DeepSeek 使用配置根地址下的 `/responses`（显式 `/v1` 根仍保留该前缀），并将图片 URL 同时写入 `image_url` 和 `url`；OpenAI 类型账号指向 `api.deepseek.com` 时也应用图片适配。工具参数和大整数原样保留；这些规则已按本地固定参考源码实现，真实原厂组合仍需联调。
 
@@ -283,6 +285,8 @@ OpenAI 类型账号的 `/input_tokens` 独立于其文本协议。原厂地址�
 注册扩展使用普通 [Responses 创建请求和结果契约](https://developers.openai.com/api/reference/resources/responses/methods/create)，支持 JSON、SSE 和 background；模型必填，有路径资源上下文时 input 可省略。每个路径资源与正文历史分别鉴权并合并文件、工具、容器限制，同一请求必须使用同一原生 Responses 来源，不能转换成 Chat/Messages/Gemini 或改写为普通创建路径。客户端 Key、模型、额度、并发、价格预检和实际 usage 结算均沿用现有网关；上游接收后报错不换号重发。返回的新 response 和输出条目按 store 保存归属，可继续查询或续接。
 
 三个前缀及尾部斜杠共享同路径的幂等结果，不同扩展路径分别去重。后台任务保存原路径和价格快照，撤销配置仅阻止新扩展请求，已接受任务仍能查询和恢复；SQL 故障或后台断流不重新生成、不重复扣费。扩展名称和路径由中转上游提供，不表示 OpenAI 官方存在这些端点；扩展必须返回普通 Responses 对象及有效 usage，特殊无用量操作不适用。以上通过本地 HTTP 模拟和 Docker PostgreSQL/Redis 验证，未进行真实扩展上游联调。
+
+替换范围明确限定为内置操作与显式注册的扩展，不包含 Sub2API 的任意安全 POST 后缀透传。新增上游扩展须先提供确切路径、请求/结果/usage 契约，涉及已有响应时使用 `{response_id}` 模板；在同一上游、协议和模型上验证 JSON/SSE、跨 Key 拒绝、幂等重放及账务后再放行。无用量管理动作需单独实现契约，不能靠注册配置冒充生成接口。模型列表可见或账号健康成功均不能替代扩展、WebSocket、background 或媒体能力的实际验收；发布能力按上游、模型、协议、传输和操作分别记录证据，未测和上游拒绝的组合保留未放行状态。
 
 原生流式 `compaction_trigger` 会规范为最后一个输入项、补充对应协商头，并保存 `native_compaction_v2` 用量标记。
 
@@ -413,6 +417,8 @@ Messages 也可调用 OpenAI/Kimi/Zhipu/DeepSeek/MiniMax/Grok 的 Chat 协议账
 该转换实时返回文本和思考，工具块在参数校验和结算成功后按顺序发送，再发送 `message_delta/message_stop`；并行工具碎片不会造成重叠的 Messages 内容块。实际 Chat usage 的普通输入、缓存读写及输出分别计费，日志保留实际端点；max 按固定模型兼容规则保留或转成 xhigh，以实际 effort 计价。无等价映射的 top_k、服务端上下文管理及托管工具在派发前拒绝。已通过本地 HTTP 协议及数据库测试，真实上游联调尚未覆盖此转换。事件结构参考 [Messages 流式协议](https://platform.claude.com/docs/en/api/messages-streaming)。
 
 Messages 也可直接调用上述六个平台的 Responses 协议账号，支持 JSON/SSE、系统/图文/PDF、工具及包含图片的工具结果、结构化输出。请求使用 `store=false` 与 `include=["reasoning.encrypted_content"]`，不经过 Chat 格式；工具 ID 与数字精度保持。文本及思考摘要增量返回，工具块和后续内容等结算成功后发送；length/filter 分别成为 max_tokens/refusal，原始 Responses 用量参与扣费。生成转换不支持非空 stop_sequences 或托管工具；OpenAI 类型账号的 count_tokens 使用独立输入计数桥接。
+
+完整非流式 Responses 的文本 message 可省略 item ID；转换器使用内部临时身份，不将其当作可查询或续接的上游资源。流式 item/终态身份、工具 ID/CallID、思考密文签名及归属检查继续严格执行。
 
 Responses 思考密文通过 AES-GCM 封装为 Messages 的 signature，绑定当前客户端 Key/分组和上游账号/凭证来源，30 天有效。客户端携带该签名续接时只能选择原来源；跨 Key/组、篡改、到期、部署密钥或上游凭证轮换会拒绝，原账号不可用时不改投。外部厂商签名不作为 Responses 密文转发。服务端不为此保存新会话表或明文历史；相同响应的幂等重放保留原签名。完整 reasoning item 的 ID、summary 和 encrypted_content 用于重放，行为依据 [OpenAI reasoning 文档](https://developers.openai.com/api/docs/guides/reasoning)。已用本地 HTTP 上游和数据库验证，尚未进行真实上游联调。
 

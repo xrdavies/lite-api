@@ -134,9 +134,9 @@ func testUpstreamManagement(t *testing.T, a *App, admin, user string, gid int64)
 			}
 			fmt.Fprint(w, `{"content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":4,"output_tokens":1}}`)
 		case r.URL.Path == "/v1/responses":
-			fmt.Fprint(w, `{"status":"completed","output":[{"content":[{"type":"output_text","text":"OK"}]}]}`)
+			fmt.Fprint(w, `{"id":"resp_health","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":4,"output_tokens":1}}`)
 		case strings.HasPrefix(r.URL.Path, "/v1beta/models/"):
-			fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"OK"}]}}]}`)
+			fmt.Fprint(w, `{"candidates":[{"content":{"parts":[{"text":"OK"}]}}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":1}}`)
 		default:
 			t.Error("incorrect protocol path", r.URL.Path)
 			w.WriteHeader(404)

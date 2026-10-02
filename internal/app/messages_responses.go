@@ -683,6 +683,14 @@ func (s *responsesMessagesStream) response(raw []byte, u priceUsage) ([]byte, er
 	if json.Unmarshal(raw, &response) != nil {
 		return nil, &apiError{502, "invalid Responses JSON"}
 	}
+	// A complete text snapshot needs no provider item identity. These local IDs
+	// never leave the converter or authorize resources, tools or reasoning replay.
+	for i := range response.Output {
+		item := &response.Output[i]
+		if item.Type == "message" && item.ID == "" {
+			item.ID = "msg_lite_" + randomToken(18)
+		}
+	}
 	_, result, err := s.finish(response, u)
 	return result, err
 }

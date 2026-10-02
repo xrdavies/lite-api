@@ -86,7 +86,7 @@ func TestAccountMediaProbes(t *testing.T) {
 		case path == "/v1/images/generations" || path == "/v1/images/edits":
 			fmt.Fprint(w, `{"data":[{"b64_json":"`+testImagePNG+`"}]}`)
 		case path == "/v1/chat/completions":
-			fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}]}`)
+			fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
 		default:
 			t.Error("unexpected probe path", path)
 			w.WriteHeader(404)

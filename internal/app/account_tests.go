@@ -21,13 +21,15 @@ type accountTestInput struct {
 }
 
 type accountTestResult struct {
-	Status   string           `json:"status"`
-	Media    []map[string]any `json:"-"`
-	Text     string           `json:"response_text"`
-	Error    string           `json:"error_message"`
-	Latency  int64            `json:"latency_ms"`
-	Started  time.Time        `json:"started_at"`
-	Finished time.Time        `json:"finished_at"`
+	GenerationStatus string           `json:"generation_status,omitempty"`
+	GatewayStatus    string           `json:"gateway_status,omitempty"`
+	Status           string           `json:"status"`
+	Media            []map[string]any `json:"-"`
+	Text             string           `json:"response_text"`
+	Error            string           `json:"error_message"`
+	Latency          int64            `json:"latency_ms"`
+	Started          time.Time        `json:"started_at"`
+	Finished         time.Time        `json:"finished_at"`
 }
 
 func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in accountTestInput) accountTestResult {
@@ -63,6 +65,7 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in account
 		if mode != "text" {
 			return a.testAccountMedia(ctx, u, mapped, mode, in, &result)
 		}
+		result.GenerationStatus, result.GatewayStatus = "failed", "not_checked"
 		prompt := in.Prompt
 		if prompt == "" {
 			prompt = "Reply with OK."
@@ -142,6 +145,21 @@ func (a *App) runAccountTest(ctx context.Context, u *upstreamAccount, in account
 		if strings.TrimSpace(result.Text) == "" {
 			return errors.New("upstream returned no test text")
 		}
+		result.GenerationStatus, result.GatewayStatus = "success", "failed"
+		// Use the same native protocol and metering checks as gateway requests.
+		// This probe has no client Key or price context and never settles a bill.
+		raw, _ = json.Marshal(data)
+		observation := textObservation{Protocol: u.protocol()}
+		if err := observation.observe(raw); err != nil {
+			return &apiError{502, "gateway compatibility check failed: " + safeGatewayError(err)}
+		}
+		if err := observation.observeResult(raw, false); err != nil {
+			return &apiError{502, "gateway compatibility check failed: " + safeGatewayError(err)}
+		}
+		if !observation.HasUsage {
+			return &apiError{502, "gateway compatibility check failed: upstream usage is missing"}
+		}
+		result.GatewayStatus = "success"
 		return nil
 	}()
 	if err == nil {
@@ -224,6 +242,11 @@ func (a *App) testAccount(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	result := a.runAccountTest(r.Context(), u, *in)
+	if result.GenerationStatus != "" {
+		if err = send(map[string]any{"type": "gateway_check", "generation_status": result.GenerationStatus, "gateway_status": result.GatewayStatus}); err != nil {
+			return nil
+		}
+	}
 	if result.Status == "success" {
 		if err = a.recoverTestAccount(r.Context(), u); err != nil {
 			_ = send(map[string]any{"type": "error", "error": "test succeeded but health state could not be saved"})
