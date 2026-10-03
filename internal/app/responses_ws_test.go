@@ -41,6 +41,19 @@ func TestResponseSocketValidation(t *testing.T) {
 	if !u.supportsResponseSocket() {
 		t.Fatal("explicit mode precedence")
 	}
+	u.Extra["openai_apikey_responses_websockets_v2_mode"] = json.RawMessage(`"http_bridge"`)
+	if u.responseSocketMode() != "http_bridge" {
+		t.Fatal("HTTP bridge mode")
+	}
+	in := accountInput{Extra: u.Extra}
+	if err := in.validate(false); err != nil {
+		t.Fatal(err)
+	}
+	u.Platform = "grok"
+	if u.supportsResponseSocket() {
+		t.Fatal("HTTP bridge must be explicitly supported for the platform")
+	}
+	u.Platform = "openai"
 	u.Extra["openai_ws_force_http"] = json.RawMessage("true")
 	if u.supportsResponseSocket() {
 		t.Fatal("force HTTP ignored")

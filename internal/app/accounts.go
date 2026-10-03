@@ -161,9 +161,9 @@ func (in *accountInput) validate(create bool) error {
 			}
 		case "openai_apikey_responses_websockets_v2_mode":
 			switch credentialString(in.Extra, key) {
-			case "off", "passthrough":
+			case "off", "passthrough", "http_bridge":
 			default:
-				return bad("supported WebSocket modes are off and passthrough")
+				return bad("supported WebSocket modes are off, passthrough and http_bridge")
 			}
 		case "quota_daily_reset_mode", "quota_weekly_reset_mode":
 			mode := credentialString(in.Extra, key)

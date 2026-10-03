@@ -21,12 +21,18 @@ type responseSocket struct {
 	proxyTarget            string
 	responses              map[string]responseBinding
 	responseOrder          []string
+	mode                   string
+	bridgeHistory          map[string][]json.RawMessage
+	bridgeOrder            []string
+	bridgeBytes            int
 }
 
 type responseSocketTurn struct {
-	socket   *responseSocket
-	warmup   bool
-	streamID string
+	socket       *responseSocket
+	warmup       bool
+	streamID     string
+	bridgeInput  []json.RawMessage
+	bridgeOutput []json.RawMessage
 }
 type socketTurnKey struct{}
 
@@ -36,28 +42,38 @@ func socketTurn(ctx context.Context) *responseSocketTurn {
 }
 
 func (u *upstreamAccount) supportsResponseSocket() bool {
+	return u.responseSocketMode() != "off"
+}
+
+func (u *upstreamAccount) responseSocketMode() string {
 	if u.protocol() != "responses" || u.Platform != "openai" && u.Platform != "grok" {
-		return false
+		return "off"
 	}
 	var forced bool
 	_ = json.Unmarshal(u.Extra["openai_ws_force_http"], &forced)
 	if forced {
-		return false
+		return "off"
 	}
 	if raw, ok := u.Extra["openai_apikey_responses_websockets_v2_mode"]; ok {
 		var mode string
-		return json.Unmarshal(raw, &mode) == nil && mode == "passthrough"
+		if json.Unmarshal(raw, &mode) == nil && (mode == "passthrough" || mode == "http_bridge" && u.Platform == "openai") {
+			return mode
+		}
+		return "off"
 	}
 	for _, name := range []string{"openai_apikey_responses_websockets_v2_enabled", "responses_websockets_v2_enabled", "openai_ws_enabled"} {
 		if raw, ok := u.Extra[name]; ok {
 			var enabled bool
-			return json.Unmarshal(raw, &enabled) == nil && enabled
+			if json.Unmarshal(raw, &enabled) == nil && enabled {
+				return "passthrough"
+			}
+			return "off"
 		}
 	}
-	return false
+	return "off"
 }
 func (s *responseSocket) eligible(u *upstreamAccount) bool {
-	return u.supportsResponseSocket() && (s.binding == nil || s.binding.AccountID == u.ID && s.binding.Target == responseTarget(u))
+	return u.supportsResponseSocket() && (s.mode == "" || s.mode == u.responseSocketMode()) && (s.binding == nil || s.binding.AccountID == u.ID && s.binding.Target == responseTarget(u))
 }
 func (s *responseSocket) remember(id string, u *upstreamAccount, items ...string) {
 	if id == "" {
@@ -195,7 +211,7 @@ func (a *App) responsesWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		// ponytail: turns share one private upstream connection and run serially;
+		// ponytail: turns share one private upstream session and run serially;
 		// add lane multiplexing only with matching per-lane affinity and accounting.
 		turnCtx := context.WithValue(ctx, socketTurnKey{}, turn)
 		req := r.Clone(turnCtx)
@@ -245,8 +261,15 @@ func parseSocketTurn(raw []byte, s *responseSocket) ([]byte, *responseSocketTurn
 
 // Adapt native frames to the existing Responses event observer and settlement
 // path. A connection stays private to one authenticated client; no shared pool.
-func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body map[string]json.RawMessage, turn *responseSocketTurn) (*http.Response, error) {
+func (a *App) socketUpstream(ctx context.Context, account *upstreamAccount, body map[string]json.RawMessage, headers http.Header, turn *responseSocketTurn) (*http.Response, error) {
 	s := turn.socket
+	if !s.eligible(account) {
+		return nil, conflict("upstream configuration changed; reconnect")
+	}
+	s.mode = account.responseSocketMode()
+	if s.mode == "http_bridge" {
+		return a.socketHTTPUpstream(ctx, account, body, headers, turn)
+	}
 	proxyTarget := "direct"
 	if account.ProxyID != nil {
 		proxy, err := a.resolveProxy(ctx, *account.ProxyID)

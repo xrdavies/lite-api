@@ -1539,7 +1539,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 				resp = webSearchMessages(result, model, stream)
 			}
 		} else if turn := socketTurn(ctx); turn != nil {
-			resp, err = a.socketUpstream(ctx, selected.Account, request, turn)
+			resp, err = a.socketUpstream(ctx, selected.Account, request, wireIn.Headers, turn)
 		} else {
 			upstreamCtx, upstreamCancel := context.WithCancel(ctx)
 			if protocol == "images" && stream {
@@ -1600,7 +1600,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 			fail(failure)
 			return
 		}
-		if in.ResponseExtension || in.NativeMCP || in.NativeCode || in.NativeProgrammatic || in.NativeFileSearch || len(in.FileIDs) > 0 {
+		if turn := socketTurn(ctx); turn != nil && turn.socket.mode == "http_bridge" || in.ResponseExtension || in.NativeMCP || in.NativeCode || in.NativeProgrammatic || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			// A tool may already have acted before the provider returned an error.
 			fail(failure)
 			return
@@ -1631,7 +1631,7 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 		}
 	}
 	upstreamID := ""
-	if socketTurn(ctx) == nil {
+	if turn := socketTurn(ctx); turn == nil || turn.socket.mode == "http_bridge" && !turn.warmup {
 		upstreamID = upstreamRequestID(selected.Account, resp.Header)
 	}
 	firstToken := int64(0)
@@ -1836,6 +1836,9 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 					}
 					frame = append(kept, "data: "+string(clean))
 					data = string(clean)
+				}
+				if turn := socketTurn(ctx); turn != nil {
+					turn.observeBridge(clean)
 				}
 			}
 			wire := strings.Join(frame, "\n") + "\n\n"
@@ -2158,6 +2161,12 @@ func (a *App) textGateway(w http.ResponseWriter, r *http.Request, protocol strin
 	in.NativeCode = in.NativeCode || len(observation.ResponseContainers) > 0
 	if turn := socketTurn(ctx); turn != nil {
 		turn.socket.remember(observation.ResponseID, selected.Account, observation.ResponseItems...)
+		if turn.socket.mode == "http_bridge" {
+			turn.socket.rememberBridge(observation.ResponseID, append(turn.bridgeInput, turn.bridgeOutput...))
+			if turn.warmup {
+				in.Store = false // Local warmup IDs are not upstream resources.
+			}
+		}
 		if in.ResponseImage != nil || in.NativeProgrammatic || in.NativeMCP || in.NativeCode || in.NativeFileSearch || len(in.FileIDs) > 0 {
 			binding := turn.socket.responses[observation.ResponseID]
 			binding.ImageTool, binding.ProgrammaticTool, binding.MCPTool = in.ResponseImage != nil, in.NativeProgrammatic, in.NativeMCP

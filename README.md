@@ -371,6 +371,7 @@ HTTP Responses 支持 `background=true`，只调度原生 Responses API Key 账�
 后台请求只有显式 `store=true` 才保存 30 天结果和续接关联；省略/false 的终态结果本地保留十分钟，不建立续接关联。未完成/待结算任务不自动过期。创建结果不明确或 ID 尚未成功保存时，任务和幂等记录保持待核查，不自动重发；须保留 Redis 持久卷及原 JWT_SECRET。后台 WebSocket、compact/input_tokens 不适用。当前为本地协议、数据库和恢复测试，真实上游后台模式仍未联调。
 
 三个 Responses 前缀的 GET 支持 WebSocket 升级。账号需使用 Responses 协议、OpenAI/Grok 平台，并设置 `extra.openai_apikey_responses_websockets_v2_mode="passthrough"`；默认关闭，`openai_ws_force_http=true` 禁止该路径。复合分组按实际目标平台检查。连接私有且逐轮重新鉴权，每个 `response.create` 复用 HTTP 的额度、路由、计价及结算；同一连接串行执行，可用 `stream_id` 关联客户端事件。`generate=false` 无 usage 的预热不扣费，`store=false` 的续接仅在本连接保留。每 Key 最多 4 条连接、进程 128 条；连接上限一小时，客户端空闲五分钟关闭。连接不接受请求幂等头；已发送的轮次不自动重试。下游断开后最多等待 15 秒收取已产生用量，数据库失败仍由待结算记录恢复。原厂 WebSocket 尚无真实凭证验证，当前验证使用本地协议服务。
+如果上游只提供 HTTP/SSE，可将 OpenAI API Key 账号的 `extra.openai_apikey_responses_websockets_v2_mode` 设为 `http_bridge`，把客户端 Responses WebSocket 的每轮 `response.create` 转换为上游 `/v1/responses` 流式 HTTP，再将 SSE 事件转换回 WebSocket JSON 事件。桥接仍使用现有 Key/分组鉴权、路由、额度、限流、计费和结算；连接内按 `previous_response_id` 保存有界历史，`store=false` 历史不跨连接共享。该模式仅适用于 OpenAI 平台的 Responses API Key 账号，`background` 不适用于 WebSocket，缺失用量或上游错误不会重试。
 
 `POST /v1/alpha/search`、`/alpha/search`、`/backend-api/codex/alpha/search` 提供独立 JSON 搜索代理。请求必须包含 `model`，搜索命令及扩展字段透传；移除不属于独立搜索的 `prompt_cache_key`、`prompt_cache_retention`、`store`。选择 OpenAI 平台 Chat/Responses 协议的 API Key 账号，上游路径为 `/v1/alpha/search`；复合路由使用 responses 端点并仅允许 OpenAI 目标。该入口不支持流式，不代表任意上游已提供此端点。
 
